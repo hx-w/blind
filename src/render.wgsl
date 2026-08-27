@@ -6,6 +6,7 @@ struct Camera {
   camera_position: vec4<f32>,
   camera_up: vec4<f32>,
   finish: vec4<f32>,
+  tone: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -37,7 +38,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @location(0) vec4<f32> {
-  if input.color.a < 0.999 && !front_facing {
+  if input.color.a < camera.tone.w && !front_facing {
     discard;
   }
   var normal = normalize(input.normal);
@@ -51,6 +52,6 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @l
   let facing = clamp((dot(normal, view_direction) + camera.finish.y) / (1.0 + camera.finish.y), 0.0, 1.0);
   var light = camera.lighting.x + key * camera.lighting.y + fill * camera.lighting.z
     + hemisphere * camera.lighting.w + facing * camera.finish.x;
-  light = clamp((light - 0.72) * camera.finish.z + 0.72, 0.42, 1.04);
+  light = clamp((light - camera.tone.x) * camera.finish.z + camera.tone.x, camera.tone.y, camera.tone.z);
   return vec4<f32>(input.color.rgb * light, input.color.a);
 }

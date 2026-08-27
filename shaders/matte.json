@@ -8,5 +8,19 @@
   "view": 0.22,
   "wrap": 0.55,
   "contrast": 1.08,
-  "depth_bias_step": 0.000001
+  "depth_bias_step": 0.000001,
+  "translucent_threshold": 0.999,
+  "contrast_pivot": 0.72,
+  "light_min": 0.42,
+  "light_max": 1.04,
+  "background_dark": "#292c32",
+  "background_light": "#e7e9ec",
+  "camera": {
+    "fov_degrees": 34.0,
+    "fit_padding": 1.15,
+    "default_view_direction": [1.0, 0.7, 1.0],
+    "near_floor_factor": 0.0001,
+    "near_radius_spans": 4.0,
+    "far_multiple": 100.0
+  }
 }

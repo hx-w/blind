@@ -48,7 +48,6 @@ pub struct ViewState {
     pub shading: Shading,
     pub projection: Projection,
     pub background: Background,
-    pub grid: bool,
     pub axes: bool,
     pub frame: Frame,
     pub camera: Option<CameraState>,
@@ -112,7 +111,6 @@ impl Default for ViewState {
             shading: Shading::Smooth,
             projection: Projection::Perspective,
             background: Background::Dark,
-            grid: false,
             axes: true,
             frame: Frame {
                 width: 1200,

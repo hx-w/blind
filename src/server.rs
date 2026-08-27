@@ -26,11 +26,11 @@ use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use crate::{
     config::{Config, normalize_origin},
-    mesh::pts_geometry,
+    mesh,
     network::{HostCandidate, discover},
     registry::{RegisteredScene, Registry, RegistryLookupError, is_short_secret},
     render::Renderer,
-    scene::{MeshFormat, SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
+    scene::{SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
     token::{Scope, TokenCodec},
 };
 
@@ -275,21 +275,16 @@ pub fn stateless_links_for(
     include_owner: bool,
 ) -> anyhow::Result<ShareLinks> {
     let public_token = codec.seal(Scope::Public, scene)?;
-    let viewer_url = format!("{origin}/v/{public_token}");
-    let image_url = format!("{origin}/i/{public_token}.png");
-    let owner_url = if include_owner {
-        let owner_token = codec.seal(Scope::Owner, scene)?;
-        Some(format!("{viewer_url}#owner={owner_token}"))
-    } else {
-        None
-    };
-    let full_text = include_owner.then(|| scene.full_text(&viewer_url, &image_url));
-    Ok(ShareLinks {
-        viewer_url,
-        image_url,
-        owner_url,
-        full_text,
-    })
+    let owner_secret = include_owner
+        .then(|| codec.seal(Scope::Owner, scene))
+        .transpose()?;
+    Ok(compose_links(
+        origin,
+        "v",
+        &public_token,
+        owner_secret.as_deref(),
+        scene,
+    ))
 }
 
 pub fn links_for(
@@ -299,17 +294,35 @@ pub fn links_for(
     include_owner: bool,
 ) -> anyhow::Result<ShareLinks> {
     let registration = registry.register(scene)?;
-    let viewer_url = format!("{origin}/s/{}", registration.code);
-    let image_url = format!("{origin}/i/{}.png", registration.code);
-    let owner_url =
-        include_owner.then(|| format!("{viewer_url}#owner={}", registration.owner_secret));
-    let full_text = include_owner.then(|| scene.full_text(&viewer_url, &image_url));
-    Ok(ShareLinks {
+    Ok(compose_links(
+        origin,
+        "s",
+        &registration.code,
+        include_owner.then_some(registration.owner_secret.as_str()),
+        scene,
+    ))
+}
+
+/// One link contract shared by short-registry and stateless links.
+fn compose_links(
+    origin: &str,
+    route: &str,
+    token: &str,
+    owner: Option<&str>,
+    scene: &SceneDescriptor,
+) -> ShareLinks {
+    let viewer_url = format!("{origin}/{route}/{token}");
+    let image_url = format!("{origin}/i/{token}.png");
+    let owner_url = owner.map(|owner| format!("{viewer_url}#owner={owner}"));
+    let full_text = owner
+        .is_some()
+        .then(|| scene.full_text(&viewer_url, &image_url));
+    ShareLinks {
         viewer_url,
         image_url,
         owner_url,
         full_text,
-    })
+    }
 }
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
@@ -435,18 +448,14 @@ async fn get_mesh(
         mark_scene_gone(&state, &token);
         return Err(SceneGone.into());
     }
-    let (bytes, content_type) = if mesh.format == MeshFormat::Pts {
-        let geometry = tokio::task::spawn_blocking(move || {
-            let geometry = pts_geometry(&bytes)?;
-            geometry.to_binary_ply()
-        })
-        .await
-        .map_err(|error| AppError::internal(&error.to_string()))?
-        .map_err(|error| AppError::unprocessable(&error.to_string()))?;
-        (geometry, MeshFormat::Ply.mime())
-    } else {
-        (bytes, mesh.format.mime())
-    };
+    let format = mesh.format;
+    let served = tokio::task::spawn_blocking(move || {
+        mesh::serve_bytes(bytes, format).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| AppError::internal(&error.to_string()))?
+    .map_err(|error| AppError::unprocessable(&error))?;
+    let (bytes, content_type) = served;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)

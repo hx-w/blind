@@ -50,15 +50,7 @@ impl Geometry {
     }
 
     pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
-        let mut min = [f32::INFINITY; 3];
-        let mut max = [f32::NEG_INFINITY; 3];
-        for position in &self.positions {
-            for axis in 0..3 {
-                min[axis] = min[axis].min(position[axis]);
-                max[axis] = max[axis].max(position[axis]);
-            }
-        }
-        (min, max)
+        bounds_of(self.positions.iter().copied())
     }
 
     pub fn smooth_normals(&self) -> Vec<[f32; 3]> {
@@ -185,6 +177,18 @@ fn load_pts(path: &Path) -> Result<Geometry> {
     pts_geometry(&bytes).with_context(|| format!("failed to parse PTS {}", path.display()))
 }
 
+/// Bytes ready to serve over HTTP plus their content type: PTS rings ship as
+/// generated binary PLY so every client receives triangle geometry.
+pub fn serve_bytes(bytes: Vec<u8>, format: MeshFormat) -> Result<(Vec<u8>, &'static str)> {
+    match format {
+        MeshFormat::Pts => Ok((
+            pts_geometry(&bytes)?.to_binary_ply()?,
+            MeshFormat::Ply.mime(),
+        )),
+        _ => Ok((bytes, format.mime())),
+    }
+}
+
 pub fn pts_geometry(bytes: &[u8]) -> Result<Geometry> {
     let mut points = Vec::new();
     for line in String::from_utf8_lossy(bytes).lines() {
@@ -192,14 +196,9 @@ pub fn pts_geometry(bytes: &[u8]) -> Result<Geometry> {
         if line.is_empty() || line.starts_with("SELECTION_SEED") {
             continue;
         }
-        let mut values = line.split_whitespace();
-        let Some(Ok(x)) = values.next().map(str::parse::<f32>) else {
-            continue;
-        };
-        let Some(Ok(y)) = values.next().map(str::parse::<f32>) else {
-            continue;
-        };
-        let Some(Ok(z)) = values.next().map(str::parse::<f32>) else {
+        let mut values = line.split_whitespace().map(|value| value.parse::<f32>());
+        let [Some(Ok(x)), Some(Ok(y)), Some(Ok(z))] = [values.next(), values.next(), values.next()]
+        else {
             continue;
         };
         let point = Vec3::new(x, y, z);
@@ -228,8 +227,10 @@ pub fn pts_geometry(bytes: &[u8]) -> Result<Geometry> {
         bail!("PTS must contain at least three finite ordered points");
     }
 
-    let (min, max) = point_bounds(&points);
-    let diagonal = (max - min).length().max(1e-6);
+    let (min, max) = bounds_of(points.iter().map(|point| point.to_array()));
+    let diagonal = (Vec3::from_array(max) - Vec3::from_array(min))
+        .length()
+        .max(1e-6);
     let tube_radius = (diagonal * 0.006).clamp(0.04, 0.12);
     let point_radius = tube_radius * 1.75;
     let mut geometry = Geometry {
@@ -357,11 +358,16 @@ fn append_sphere(geometry: &mut Geometry, center: Vec3, radius: f32) -> Result<(
     Ok(())
 }
 
-fn point_bounds(points: &[Vec3]) -> (Vec3, Vec3) {
-    points.iter().fold(
-        (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
-        |(min, max), point| (min.min(*point), max.max(*point)),
-    )
+fn bounds_of<I: IntoIterator<Item = [f32; 3]>>(positions: I) -> ([f32; 3], [f32; 3]) {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for position in positions {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(position[axis]);
+            max[axis] = max[axis].max(position[axis]);
+        }
+    }
+    (min, max)
 }
 
 fn perpendicular(tangent: Vec3) -> Vec3 {

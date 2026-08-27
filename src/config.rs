@@ -37,7 +37,7 @@ impl Config {
             listen: "0.0.0.0:7400".into(),
             preferred_origin: None,
             pat: format!("blind_pat_{}", random_b64(24)),
-            secret: random_secret(),
+            secret: random_b64(32),
         }
     }
 
@@ -90,17 +90,13 @@ impl Config {
     }
 
     pub fn rotate_key(&mut self) -> Result<()> {
-        self.secret = random_secret();
+        self.secret = random_b64(32);
         self.save()
     }
 }
 
 /// Random URL-safe secret derived from OS entropy.
-fn random_secret() -> String {
-    random_b64(32)
-}
-
-fn random_b64(bytes: usize) -> String {
+pub(crate) fn random_b64(bytes: usize) -> String {
     let mut buffer = vec![0_u8; bytes];
     OsRng.fill_bytes(&mut buffer);
     URL_SAFE_NO_PAD.encode(buffer)

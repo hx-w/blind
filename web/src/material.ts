@@ -23,6 +23,7 @@ const fragmentShader = `
   uniform vec3 fillDirection;
   uniform vec4 lighting;
   uniform vec3 finish;
+  uniform vec4 tone;
   varying vec3 viewNormal;
   varying vec3 viewPosition;
 
@@ -42,7 +43,7 @@ const fragmentShader = `
     float facing = wrappedDiffuse(dot(normal, viewDirection), finish.y);
     float light = lighting.x + key * lighting.y + fill * lighting.z
       + hemisphere * lighting.w + facing * finish.x;
-    light = clamp((light - 0.72) * finish.z + 0.72, 0.42, 1.04);
+    light = clamp((light - tone.x) * finish.z + tone.x, tone.y, tone.z);
     gl_FragColor = vec4(baseColor * light, opacity);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -69,26 +70,30 @@ export function createMatteMaterial(style: MeshMaterialStyle): THREE.ShaderMater
       fillDirection: { value: new THREE.Vector3(...shader.fill_direction) },
       lighting: { value: new THREE.Vector4(shader.ambient, shader.key, shader.fill, shader.hemisphere) },
       finish: { value: new THREE.Vector3(shader.view, shader.wrap, shader.contrast) },
+      tone: { value: new THREE.Vector4(shader.contrast_pivot, shader.light_min, shader.light_max, shader.translucent_threshold) },
       depthBias: { value: style.layer * shader.depth_bias_step },
     },
-    side: style.opacity < 1 ? THREE.FrontSide : THREE.DoubleSide,
-    transparent: style.opacity < 1,
-    depthWrite: style.opacity >= 1,
+    side: isTranslucent(style.opacity) ? THREE.FrontSide : THREE.DoubleSide,
+    transparent: isTranslucent(style.opacity),
+    depthWrite: !isTranslucent(style.opacity),
     wireframe: style.wireframe,
   });
   material.forceSinglePass = true;
   return material;
 }
 
+function isTranslucent(opacity: number): boolean {
+  return opacity < shader.translucent_threshold;
+}
+
 export function updateMatteMaterial(material: THREE.ShaderMaterial, style: MeshMaterialStyle): void {
+  const translucent = isTranslucent(style.opacity);
   (material.uniforms.baseColor.value as THREE.Color).set(style.color);
   material.uniforms.opacity.value = style.opacity;
   material.uniforms.flatShading.value = style.flat;
   material.uniforms.depthBias.value = style.layer * shader.depth_bias_step;
-  material.transparent = style.opacity < 1;
-  material.side = style.opacity < 1 ? THREE.FrontSide : THREE.DoubleSide;
-  material.depthWrite = style.opacity >= 1;
-  material.forceSinglePass = true;
+  material.transparent = translucent;
+  material.side = translucent ? THREE.FrontSide : THREE.DoubleSide;
+  material.depthWrite = !translucent;
   material.wireframe = style.wireframe;
-  material.needsUpdate = true;
 }

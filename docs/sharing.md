@@ -20,7 +20,7 @@ The encrypted descriptor contains:
 - Visibility, selected Mesh, color, and opacity.
 - Camera position, target, up vector, field of view, zoom, projection, and orthographic height.
 - Captured frame dimensions.
-- Surface mode, grid, axes, and gray background mode.
+- Surface mode, axes, and gray background mode.
 
 The registry payload never contains a PAT or Mesh bytes. XChaCha20-Poly1305 encrypts and authenticates the compressed descriptor before SQLite receives it.
 

@@ -17,7 +17,6 @@ export interface ViewState {
   shading: Shading;
   projection: Projection;
   background: Background;
-  grid: boolean;
   axes: boolean;
   frame: { width: number; height: number };
   camera: CameraState | null;

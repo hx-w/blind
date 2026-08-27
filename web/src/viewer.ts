@@ -6,9 +6,14 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { apiError } from './api';
 import type { PublicMesh, PublicScene, SceneUpdate, ViewState } from './api';
 import { createMatteMaterial, updateMatteMaterial } from './material';
+import shader from '../../shaders/matte.json';
 
-const DARK_BACKGROUND = '#292c32';
-const LIGHT_BACKGROUND = '#e7e9ec';
+// The library class carries a target at runtime that its typings omit.
+declare module 'three/addons/controls/ArcballControls.js' {
+  interface ArcballControls {
+    target: THREE.Vector3;
+  }
+}
 
 interface Model {
   info: PublicMesh;
@@ -18,13 +23,14 @@ interface Model {
 export class MeshViewer {
   private readonly scene = new THREE.Scene();
   private readonly renderer: THREE.WebGLRenderer;
-  private readonly perspective = new THREE.PerspectiveCamera(34, 1, 0.001, 1_000_000);
+  private readonly perspective = new THREE.PerspectiveCamera(shader.camera.fov_degrees, 1, 0.001, 1_000_000);
   private readonly orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1_000_000);
-  private readonly controls: ArcballControls & { target: THREE.Vector3 };
+  private readonly controls: ArcballControls;
   private readonly axes = new THREE.AxesHelper(1);
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private readonly resizeObserver: ResizeObserver;
+  private readonly visibleBounds = new THREE.Box3();
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   private models: Model[] = [];
   private state!: ViewState;
@@ -41,11 +47,7 @@ export class MeshViewer {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.root.append(this.renderer.domElement);
     this.camera = this.perspective;
-    this.controls = new ArcballControls(
-      this.camera,
-      this.renderer.domElement,
-      this.scene,
-    ) as ArcballControls & { target: THREE.Vector3 };
+    this.controls = new ArcballControls(this.camera, this.renderer.domElement, this.scene);
     this.controls.enableAnimations = false;
     this.controls.enableFocus = false;
     this.controls.enableGrid = false;
@@ -93,6 +95,7 @@ export class MeshViewer {
       this.scene.add(object);
     });
     this.applyState();
+    this.refreshVisibleBounds();
     this.resize();
     await settledLayout();
     if (scene.state.camera) this.restoreCamera(scene.state);
@@ -118,6 +121,7 @@ export class MeshViewer {
     if (!model) return;
     model.info.visible = visible;
     model.object.visible = visible;
+    this.refreshVisibleBounds();
     this.resizeHelpers();
     this.updateClipping();
     this.dirty = true;
@@ -129,9 +133,10 @@ export class MeshViewer {
   setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.dirty = true; }
   setBackground(background: ViewState['background']): void {
     this.state.background = background;
-    this.scene.background = new THREE.Color(background === 'light' ? LIGHT_BACKGROUND : DARK_BACKGROUND);
+    const theme = background === 'light' ? shader.background_light : shader.background_dark;
+    this.scene.background = new THREE.Color(theme);
     document.documentElement.dataset.theme = background;
-    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', background === 'light' ? LIGHT_BACKGROUND : DARK_BACKGROUND);
+    document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme);
     this.dirty = true;
   }
 
@@ -154,9 +159,8 @@ export class MeshViewer {
   }
 
   fitAll(animate = true): void {
-    const box = this.visibleBounds();
-    if (box.isEmpty()) return;
-    this.fitBox(box, animate);
+    if (this.visibleBounds.isEmpty()) return;
+    this.fitBox(this.visibleBounds, animate);
   }
 
   focusSelected(): void {
@@ -166,7 +170,7 @@ export class MeshViewer {
   }
 
   setCanonicalView(code: string): void {
-    const box = this.visibleBounds(); if (box.isEmpty()) return;
+    const box = this.visibleBounds; if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     const distance = box.getSize(new THREE.Vector3()).length() * 1.8;
     const directions: Record<string, THREE.Vector3> = {
@@ -200,7 +204,6 @@ export class MeshViewer {
   }
 
   private applyState(): void {
-    this.state.grid = false;
     this.setBackground(this.state.background); this.axes.visible = this.state.axes;
     this.models.forEach((model) => { model.object.visible = model.info.visible; });
     if (this.state.projection === 'orthographic') { this.state.projection = 'perspective'; this.setProjection('orthographic'); }
@@ -232,7 +235,7 @@ export class MeshViewer {
   private exportState(): ViewState {
     return {
       selected: this.selected, shading: this.state.shading, projection: this.state.projection,
-      background: this.state.background, grid: false, axes: this.axes.visible,
+      background: this.state.background, axes: this.axes.visible,
       frame: { width: Math.round(this.root.clientWidth), height: Math.round(this.root.clientHeight) },
       camera: {
         position: this.camera.position.toArray() as [number, number, number],
@@ -250,10 +253,11 @@ export class MeshViewer {
     const aspect = Math.max(this.root.clientWidth / Math.max(this.root.clientHeight, 1), 0.1);
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
     const fitFov = Math.min(verticalFov, horizontalFov);
-    const distance = Math.max(radius / Math.sin(fitFov / 2), 0.001) * 1.15;
+    const distance = Math.max(radius / Math.sin(fitFov / 2), 0.001) * shader.camera.fit_padding;
     const direction = this.camera.position.clone().sub(this.controls.target).normalize();
     if (!Number.isFinite(direction.x) || direction.lengthSq() < 1e-12) {
-      direction.set(1, 0.7, 1).normalize();
+      const [x, y, z] = shader.camera.default_view_direction;
+      direction.set(x, y, z).normalize();
     }
     const destination = center.clone().addScaledVector(direction, distance);
     if (animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
@@ -269,13 +273,13 @@ export class MeshViewer {
   }
 
   private updateClipping(): void {
-    const box = this.visibleBounds();
+    const box = this.visibleBounds;
     if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 1e-6);
     const distance = this.camera.position.distanceTo(center);
-    const near = Math.max(radius * 1e-4, distance - radius * 4);
-    const far = Math.max(near * 100, distance + radius * 4);
+    const near = Math.max(radius * shader.camera.near_floor_factor, distance - radius * shader.camera.near_radius_spans);
+    const far = Math.max(near * shader.camera.far_multiple, distance + radius * shader.camera.near_radius_spans);
     this.camera.near = near;
     this.camera.far = far;
     this.camera.updateProjectionMatrix();
@@ -286,13 +290,16 @@ export class MeshViewer {
     this.camera.updateMatrixWorld();
     this.updateClipping();
     this.controls.setCamera(this.camera);
-    this.controls.setGizmosVisible(false);
     this.dirty = true;
   }
 
-  private visibleBounds(): THREE.Box3 { const box = new THREE.Box3(); for (const model of this.models) if (model.info.visible) box.expandByObject(model.object); return box; }
+  // Refresh the cached joint bounds; only visibility and model changes alter them.
+  private refreshVisibleBounds(): void {
+    this.visibleBounds.makeEmpty();
+    for (const model of this.models) if (model.info.visible) this.visibleBounds.expandByObject(model.object);
+  }
   private resizeHelpers(): void {
-    const box = this.visibleBounds(); if (box.isEmpty()) return; const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.001);
+    const box = this.visibleBounds; if (box.isEmpty()) return; const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.001);
     this.axes.scale.setScalar(size * 0.09); this.axes.position.copy(box.min);
     this.dirty = true;
   }

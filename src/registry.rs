@@ -6,14 +6,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::{RngCore, rngs::OsRng};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::{
-    config::{Config, registry_path},
+    config::{Config, random_b64, registry_path},
     scene::SceneDescriptor,
     token::{Scope, TokenCodec},
 };
@@ -100,8 +98,15 @@ impl Registry {
 
     pub fn register(&self, scene: &SceneDescriptor) -> Result<Registration> {
         let now = now();
-        let expires_at = now + SHORT_TTL_SECONDS;
         let fingerprint = self.fingerprint(scene)?;
+        // An identical active scene reuses its code without resealing its payload.
+        {
+            let connection = self.lock()?;
+            if let Some(existing) = existing_registration(&connection, &fingerprint, now)? {
+                return Ok(existing);
+            }
+        }
+        let expires_at = now + SHORT_TTL_SECONDS;
         let payload = self.codec.seal(Scope::Public, scene)?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
@@ -121,23 +126,6 @@ impl Registry {
                 )",
                 params![now, total - MAX_REGISTRY_ROWS + 1],
             )?;
-        }
-        if let Some(existing) = transaction
-            .query_row(
-                "SELECT code, owner_secret FROM scenes
-                 WHERE fingerprint = ?1 AND payload IS NOT NULL AND expires_at > ?2",
-                params![fingerprint, now],
-                |row| {
-                    Ok(Registration {
-                        code: row.get(0)?,
-                        owner_secret: row.get(1)?,
-                    })
-                },
-            )
-            .optional()?
-        {
-            transaction.commit()?;
-            return Ok(existing);
         }
         let active: i64 = transaction.query_row(
             "SELECT count(*) FROM scenes WHERE payload IS NOT NULL AND expires_at > ?1",
@@ -169,20 +157,7 @@ impl Registry {
                 transaction.commit()?;
                 return Ok(registration);
             }
-            if let Some(existing) = transaction
-                .query_row(
-                    "SELECT code, owner_secret FROM scenes
-                     WHERE fingerprint = ?1 AND payload IS NOT NULL AND expires_at > ?2",
-                    params![fingerprint, now],
-                    |row| {
-                        Ok(Registration {
-                            code: row.get(0)?,
-                            owner_secret: row.get(1)?,
-                        })
-                    },
-                )
-                .optional()?
-            {
+            if let Some(existing) = existing_registration(&transaction, &fingerprint, now)? {
                 transaction.commit()?;
                 return Ok(existing);
             }
@@ -214,12 +189,15 @@ impl Registry {
         let Some(stored) = row else {
             return Err(RegistryLookupError::NotFound);
         };
-        if stored.expires_at <= now || stored.gone_at.is_some() || stored.payload.is_none() {
+        if stored.expires_at <= now || stored.gone_at.is_some() {
             return Err(RegistryLookupError::Gone);
         }
+        let Some(payload) = stored.payload else {
+            return Err(RegistryLookupError::Gone);
+        };
         let envelope = self
             .codec
-            .open(stored.payload.as_deref().unwrap_or_default())
+            .open(&payload)
             .map_err(RegistryLookupError::Internal)?;
         Ok(RegisteredScene {
             scene: envelope.scene,
@@ -300,9 +278,29 @@ pub fn is_short_secret(value: &str) -> bool {
 }
 
 fn short_secret() -> String {
-    let mut bytes = [0_u8; 5];
-    OsRng.fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)[..SHORT_CODE_LEN].to_string()
+    random_b64(5)[..SHORT_CODE_LEN].to_string()
+}
+
+/// Active scene already registered under this fingerprint, if any.
+fn existing_registration(
+    connection: &Connection,
+    fingerprint: &[u8],
+    now: i64,
+) -> Result<Option<Registration>> {
+    connection
+        .query_row(
+            "SELECT code, owner_secret FROM scenes
+             WHERE fingerprint = ?1 AND payload IS NOT NULL AND expires_at > ?2",
+            params![fingerprint, now],
+            |row| {
+                Ok(Registration {
+                    code: row.get(0)?,
+                    owner_secret: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
 }
 
 fn now() -> i64 {

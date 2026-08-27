@@ -36,6 +36,7 @@ struct Uniform {
     camera_position: [f32; 4],
     camera_up: [f32; 4],
     finish: [f32; 4],
+    tone: [f32; 4],
 }
 
 #[derive(Clone, Deserialize)]
@@ -50,6 +51,23 @@ struct MatteShader {
     wrap: f32,
     contrast: f32,
     depth_bias_step: f32,
+    translucent_threshold: f32,
+    contrast_pivot: f32,
+    light_min: f32,
+    light_max: f32,
+    background_dark: String,
+    background_light: String,
+    camera: CameraSpec,
+}
+
+#[derive(Clone, Deserialize)]
+struct CameraSpec {
+    fov_degrees: f32,
+    fit_padding: f32,
+    default_view_direction: [f32; 3],
+    near_floor_factor: f32,
+    near_radius_spans: f32,
+    far_multiple: f32,
 }
 
 pub struct Renderer {
@@ -233,6 +251,12 @@ impl Renderer {
                 self.material.wrap,
                 self.material.contrast,
                 0.0,
+            ],
+            tone: [
+                self.material.contrast_pivot,
+                self.material.light_min,
+                self.material.light_max,
+                self.material.translucent_threshold,
             ],
         };
         let uniform_buffer = self
@@ -422,18 +446,17 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         let (min, max) = geometry.bounds();
         bounds_min = bounds_min.min(Vec3::from_array(min));
         bounds_max = bounds_max.max(Vec3::from_array(max));
-        loaded.push((layer, mesh, geometry));
+        loaded.push((layer, mesh, geometry, min, max));
     }
     let mut mesh_batches = Vec::new();
     let mut line_vertices = Vec::new();
     let wire = scene.state.shading == Shading::Wire;
     let flat = scene.state.shading == Shading::Flat;
-    for (layer, mesh, geometry) in loaded {
+    for (layer, mesh, geometry, mesh_min, mesh_max) in loaded {
         let color = parse_color(&mesh.color, mesh.opacity)?;
         let depth_bias = layer as f32 * material.depth_bias_step;
         let normals = (!flat).then(|| geometry.smooth_normals());
         let mut vertices = Vec::with_capacity(geometry.indices.len());
-        let (mesh_min, mesh_max) = geometry.bounds();
         for triangle in geometry.indices.chunks_exact(3) {
             let face_normal = if flat {
                 let a = Vec3::from_array(geometry.positions[triangle[0] as usize]);
@@ -468,7 +491,7 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         if !vertices.is_empty() {
             mesh_batches.push(MeshBatch {
                 vertices,
-                translucent: mesh.opacity < 0.999,
+                translucent: mesh.opacity < material.translucent_threshold,
                 center: (Vec3::from_array(mesh_min) + Vec3::from_array(mesh_max)) * 0.5,
             });
         }
@@ -481,13 +504,18 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
     let center = (bounds_min + bounds_max) * 0.5;
     let diagonal = (bounds_max - bounds_min).length().max(0.001);
     let camera = scene.state.camera.as_ref();
-    let default_fov = 34.0_f32.to_radians();
+    let camera_spec = &material.camera;
+    let default_fov = camera_spec.fov_degrees.to_radians();
     let horizontal_fov = 2.0 * ((default_fov * 0.5).tan() * aspect).atan();
     let fit_fov = default_fov.min(horizontal_fov);
-    let default_distance = diagonal * 0.5 / (fit_fov * 0.5).sin() * 1.15;
+    let default_distance = diagonal * 0.5 / (fit_fov * 0.5).sin() * camera_spec.fit_padding;
     let position = camera
         .map(|value| Vec3::from_array(value.position))
-        .unwrap_or(center + Vec3::new(1.0, 0.7, 1.0).normalize() * default_distance);
+        .unwrap_or(
+            center
+                + Vec3::from_array(camera_spec.default_view_direction).normalize_or_zero()
+                    * default_distance,
+        );
     let target = camera
         .map(|value| Vec3::from_array(value.target))
         .unwrap_or(center);
@@ -514,11 +542,16 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
     });
     let radius = diagonal * 0.5;
     let camera_distance = position.distance(center);
-    let near = (radius * 0.0001).max(camera_distance - radius * 4.0);
-    let far = (near * 100.0).max(camera_distance + radius * 4.0);
+    let near = (radius * camera_spec.near_floor_factor)
+        .max(camera_distance - radius * camera_spec.near_radius_spans);
+    let far = (near * camera_spec.far_multiple)
+        .max(camera_distance + radius * camera_spec.near_radius_spans);
     let projection = match scene.state.projection {
         Projection::Perspective => Mat4::perspective_rh(
-            camera.map(|value| value.fov).unwrap_or(34.0).to_radians(),
+            camera
+                .map(|value| value.fov)
+                .unwrap_or(camera_spec.fov_degrees)
+                .to_radians(),
             aspect,
             near,
             far,
@@ -538,18 +571,8 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         }
     };
     let background = match scene.state.background {
-        Background::Dark => wgpu::Color {
-            r: srgb_to_linear(0x29 as f64 / 255.0),
-            g: srgb_to_linear(0x2c as f64 / 255.0),
-            b: srgb_to_linear(0x32 as f64 / 255.0),
-            a: 1.0,
-        },
-        Background::Light => wgpu::Color {
-            r: srgb_to_linear(0xe7 as f64 / 255.0),
-            g: srgb_to_linear(0xe9 as f64 / 255.0),
-            b: srgb_to_linear(0xec as f64 / 255.0),
-            a: 1.0,
-        },
+        Background::Dark => clear_color(&material.background_dark)?,
+        Background::Light => clear_color(&material.background_light)?,
     };
     Ok(RenderInput {
         mesh_batches,
@@ -621,6 +644,17 @@ fn parse_color(value: &str, alpha: f32) -> Result<[f32; 4]> {
         srgb_to_linear(b as f64) as f32,
         alpha,
     ])
+}
+
+/// sRGB hex string converted to the linear clear color the GPU expects.
+fn clear_color(hex: &str) -> Result<wgpu::Color> {
+    let [r, g, b] = parse_hex_color(hex).context("invalid background color")?;
+    Ok(wgpu::Color {
+        r: srgb_to_linear(r as f64),
+        g: srgb_to_linear(g as f64),
+        b: srgb_to_linear(b as f64),
+        a: 1.0,
+    })
 }
 
 fn srgb_to_linear(value: f64) -> f64 {
