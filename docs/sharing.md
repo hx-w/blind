@@ -52,7 +52,8 @@ Blind never partially restores a scene because a surviving subset could misrepre
 The image route:
 
 1. Decrypts and validates the descriptor.
-2. Parses all visible PLY, STL, and OBJ sources.
+2. Parses all visible PLY, STL, OBJ, and PTS sources. PTS rings use one shared
+   generated tube-and-sphere triangle representation in both render paths.
 3. Rebuilds the camera, shared matte material, colors, deterministic overlap bias, and axes.
 4. Renders with the host graphics adapter into an offscreen texture.
 5. Encodes PNG in memory and releases request resources.

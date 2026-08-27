@@ -26,10 +26,11 @@ use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use crate::{
     config::{Config, normalize_origin},
+    mesh::pts_geometry,
     network::{HostCandidate, discover},
     registry::{RegisteredScene, Registry, RegistryLookupError, is_short_secret},
     render::Renderer,
-    scene::{SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
+    scene::{MeshFormat, SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
     token::{Scope, TokenCodec},
 };
 
@@ -434,10 +435,23 @@ async fn get_mesh(
         mark_scene_gone(&state, &token);
         return Err(SceneGone.into());
     }
+    let (bytes, content_type) = if mesh.format == MeshFormat::Pts {
+        let geometry = tokio::task::spawn_blocking(move || {
+            let geometry = pts_geometry(&bytes)?;
+            geometry.to_binary_ply()
+        })
+        .await
+        .map_err(|error| AppError::internal(&error.to_string()))?
+        .map_err(|error| AppError::unprocessable(&error.to_string()))?;
+        (geometry, MeshFormat::Ply.mime())
+    } else {
+        (bytes, mesh.format.mime())
+    };
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mesh.format.mime())
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, NO_STORE)
+        .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))?)
 }
 

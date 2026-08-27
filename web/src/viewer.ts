@@ -320,7 +320,9 @@ export class MeshViewer {
 async function loadObject(info: PublicMesh): Promise<THREE.Object3D> {
   const response = await fetch(info.source_url, { cache: 'no-store' }); if (!response.ok) throw await apiError(response);
   const buffer = await response.arrayBuffer();
-  if (info.format === 'ply') return new THREE.Mesh(new PLYLoader().parse(buffer));
+  if (info.format === 'ply' || info.format === 'pts') {
+    return new THREE.Mesh(new PLYLoader().parse(buffer));
+  }
   if (info.format === 'stl') return new THREE.Mesh(new STLLoader().parse(buffer));
   return new OBJLoader().parse(new TextDecoder().decode(buffer));
 }

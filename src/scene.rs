@@ -33,12 +33,13 @@ pub struct MeshRef {
     pub visible: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum MeshFormat {
     Ply,
     Stl,
     Obj,
+    Pts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -248,8 +249,9 @@ impl MeshFormat {
             Some("ply") => Ok(Self::Ply),
             Some("stl") => Ok(Self::Stl),
             Some("obj") => Ok(Self::Obj),
+            Some("pts") => Ok(Self::Pts),
             _ => bail!(
-                "{} is not a supported PLY, STL, or OBJ file",
+                "{} is not a supported PLY, STL, OBJ, or PTS file",
                 path.display()
             ),
         }
@@ -260,6 +262,7 @@ impl MeshFormat {
             Self::Ply => "application/vnd.ply",
             Self::Stl => "model/stl",
             Self::Obj => "model/obj",
+            Self::Pts => "text/plain; charset=utf-8",
         }
     }
 }
@@ -328,6 +331,10 @@ mod tests {
         let path = directory.path().join("mesh.glb");
         std::fs::write(&path, b"glTF").unwrap();
         let error = SceneDescriptor::create(&[path], None).await.unwrap_err();
-        assert!(error.to_string().contains("supported PLY, STL, or OBJ"));
+        assert!(
+            error
+                .to_string()
+                .contains("supported PLY, STL, OBJ, or PTS")
+        );
     }
 }

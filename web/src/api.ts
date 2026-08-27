@@ -1,4 +1,4 @@
-export type MeshFormat = 'ply' | 'stl' | 'obj';
+export type MeshFormat = 'ply' | 'stl' | 'obj' | 'pts';
 export type Shading = 'smooth' | 'flat' | 'wire';
 export type Projection = 'perspective' | 'orthographic';
 export type Background = 'dark' | 'light';

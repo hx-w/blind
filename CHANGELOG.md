@@ -7,7 +7,8 @@ All notable changes to Blind are documented here. This project follows
 
 ### Added
 
-- A single macOS CLI and embedded mobile-first viewer for PLY, STL, and OBJ.
+- A single macOS CLI and embedded mobile-first viewer for PLY, STL, OBJ, and
+  Denta PTS rings.
 - Multi-Mesh scenes with unrestricted arcball rotation, pan, zoom, automatic
   fit, canonical views, visibility, color, opacity, shading, projection, axes,
   and gray themes.
@@ -16,6 +17,7 @@ All notable changes to Blind are documented here. This project follows
 - Immediate PNG links rendered on demand without a render cache.
 - A shared, high-detail matte material model for interactive and offscreen
   rendering, with deterministic overlap handling and no background grid.
+- Continuous PTS tube rendering with a sphere at every original ordered point.
 - Owner-only Complete information sharing with source paths and both links.
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.

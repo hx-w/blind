@@ -7,7 +7,7 @@
 
 Instant mobile 3D review for Meshes on your Mac.
 
-Blind is one CLI binary that serves local PLY, STL, and OBJ files through a
+Blind is one CLI binary that serves local PLY, STL, OBJ, and Denta PTS files through a
 mobile-first 3D viewer. It discovers usable Host addresses, preserves camera
 and style state behind six-character links, and can render the same scene
 directly as a PNG. There is no Mesh copy or render cache; a bounded local
@@ -66,6 +66,9 @@ blind serve
 
 # Create one scene from one or more local Meshes.
 blind share crown.ply preparation.stl --format json
+
+# Mix a Mesh with a Denta ordered point ring.
+blind share cropped_jaw.ply marginline.pts --format view
 
 # Optional: emit a long self-contained link without using the registry.
 blind share crown.ply --stateless --format view
@@ -132,6 +135,7 @@ this contract instead of reimplementing scene or lifecycle logic.
 - The axis control selects canonical front, back, left, right, top, or bottom
   views.
 - Mesh opens the object list with selection and visibility controls.
+- PTS rings render as a continuous tube with a sphere at every original point.
 - Style changes color, opacity, surface mode, projection, axes, and the
   gray background theme.
 - On phones, Mesh uses a compact content-height sheet. Style starts at a short
@@ -167,6 +171,12 @@ Interactive WebGL and offscreen WebGPU use the same matte material definition,
 color-space rules, camera state, deterministic overlap bias, and light model.
 The target-specific GLSL and WGSL adapters are isolated from scene handling so
 future material definitions can be added without coupling them to the viewer.
+
+For PTS, Blind accepts Denta's `BEGIN`/`END`, numbered marker variants, and
+bare finite `x y z` rows. The ordered points form a closed ring;
+`SELECTION_SEED` metadata is retained in the source but is not rendered. Blind
+derives a mobile-visible tube and point size from the ring bounds and limits
+one PTS resource to 4,096 points.
 
 See [the sharing contract](docs/sharing.md) for the exact capability and
 lifecycle semantics.
