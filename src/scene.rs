@@ -176,14 +176,24 @@ impl SceneDescriptor {
         })
     }
 
-    pub async fn validate(&self) -> Result<(), SceneGone> {
+    /// Cheap staleness gate: every source file must still exist with the recorded size.
+    pub async fn verify_source_lengths(&self) -> Result<(), SceneGone> {
         for mesh in &self.meshes {
             let path = Path::new(&mesh.path);
             let metadata = tokio::fs::metadata(path).await.map_err(|_| SceneGone)?;
             if !metadata.is_file() || metadata.len() != mesh.byte_size {
                 return Err(SceneGone);
             }
-            let revision = hash_file(path).await.map_err(|_| SceneGone)?;
+        }
+        Ok(())
+    }
+
+    pub async fn validate(&self) -> Result<(), SceneGone> {
+        self.verify_source_lengths().await?;
+        for mesh in &self.meshes {
+            let revision = hash_file(Path::new(&mesh.path))
+                .await
+                .map_err(|_| SceneGone)?;
             if revision != mesh.revision {
                 return Err(SceneGone);
             }
@@ -278,10 +288,21 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
+/// Parse a `#rrggbb` color into normalized sRGB channels.
+pub(crate) fn parse_hex_color(value: &str) -> Option<[f32; 3]> {
+    if !(value.len() == 7 && value.starts_with('#')) {
+        return None;
+    }
+    let number = u32::from_str_radix(&value[1..], 16).ok()?;
+    Some([
+        ((number >> 16) & 255) as f32 / 255.0,
+        ((number >> 8) & 255) as f32 / 255.0,
+        (number & 255) as f32 / 255.0,
+    ])
+}
+
 fn is_hex_color(value: &str) -> bool {
-    value.len() == 7
-        && value.starts_with('#')
-        && value[1..].bytes().all(|value| value.is_ascii_hexdigit())
+    parse_hex_color(value).is_some()
 }
 
 #[cfg(test)]

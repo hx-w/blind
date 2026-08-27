@@ -1,7 +1,6 @@
 mod config;
 mod mesh;
 mod network;
-mod process;
 mod render;
 mod scene;
 mod server;
@@ -16,7 +15,7 @@ use config::{Config, config_path, normalize_origin};
 use network::discover;
 use scene::SceneDescriptor;
 use serde::Serialize;
-use server::links_for;
+use server::{ControlHealth, ShareLinks, links_for};
 use token::TokenCodec;
 
 #[derive(Parser)]
@@ -46,7 +45,7 @@ enum Command {
     },
     #[command(
         about = "Run the foreground server, or succeed if it is already running",
-        long_about = "Run Blind in the foreground. Only one Blind server is allowed per user configuration. If one is already running, this command prints its PID and exits successfully, so agents may call it idempotently. Press Ctrl-C or run `blind stop` from another terminal to stop a manually started server."
+        long_about = "Run Blind in the foreground. Blind verifies the configured port through an authenticated control handshake. If the same server is already running, this command prints its PID and exits successfully, so agents may call it idempotently. A different or incompatible service on the port is reported explicitly. Press Ctrl-C or run `blind stop` from another terminal to stop a manually started server."
     )]
     Serve {
         #[arg(
@@ -57,7 +56,7 @@ enum Command {
     },
     #[command(
         about = "Stop the manually running server",
-        long_about = "Stop the Blind process recorded for the current user configuration. This command also succeeds when the server is already stopped. A service installed with `blind service install` may be restarted by the service manager; use `blind service uninstall` to remove that managed service."
+        long_about = "Stop the Blind server through its authenticated local control endpoint. This command also succeeds when the server is already stopped. A service installed with `blind service install` may be restarted by the service manager; use `blind service uninstall` to remove that managed service."
     )]
     Stop,
     #[command(
@@ -135,9 +134,8 @@ enum OutputFormat {
 
 #[derive(Serialize)]
 struct CliShareOutput {
-    viewer_url: String,
-    image_url: String,
-    owner_url: String,
+    #[serde(flatten)]
+    links: ShareLinks,
     hosts: Vec<network::HostCandidate>,
     resources: Vec<ResourceOutput>,
 }
@@ -164,30 +162,34 @@ async fn main() -> Result<()> {
             if created {
                 eprintln!("Created {}", config_path()?.display());
             }
-            match process::acquire()? {
-                process::Acquire::AlreadyRunning(pid) => {
-                    println!(
-                        "Blind server is already running (PID {pid}). Skip this command or run `blind stop` first."
-                    );
+            if let Some(listen) = listen {
+                listen
+                    .parse::<std::net::SocketAddr>()
+                    .context("--listen must be a socket address such as 0.0.0.0:7400")?;
+                config.listen = listen;
+                config.save()?;
+            }
+            if let Some(health) = server::probe(&config).await? {
+                report_running(&health);
+            } else {
+                let port = config.port()?;
+                eprintln!("Available hosts:");
+                for host in discover(port, config.preferred_origin.as_deref())? {
+                    eprintln!("  {}", host.origin);
                 }
-                process::Acquire::Acquired(_guard) => {
-                    if let Some(listen) = listen {
-                        listen
-                            .parse::<std::net::SocketAddr>()
-                            .context("--listen must be a socket address such as 0.0.0.0:7400")?;
-                        config.listen = listen;
-                        config.save()?;
+                let retry_config = config.clone();
+                if let Err(error) = server::serve(config).await {
+                    match server::probe(&retry_config).await? {
+                        Some(health) => report_running(&health),
+                        None => return Err(error),
                     }
-                    let port = config.port()?;
-                    eprintln!("Available hosts:");
-                    for host in discover(port, config.preferred_origin.as_deref())? {
-                        eprintln!("  {}", host.origin);
-                    }
-                    server::serve(config, None).await?;
                 }
             }
         }
-        Command::Stop => println!("{}", process::stop()?),
+        Command::Stop => {
+            let (config, _) = Config::load_or_create()?;
+            println!("{}", server::stop(&config).await?);
+        }
         Command::Share {
             meshes,
             title,
@@ -205,7 +207,11 @@ async fn main() -> Result<()> {
             println!("Rotated the scene key. Existing links are now invalid.");
         }
         Command::Service { command } => match command {
-            ServiceCommand::Install => println!("Installed {}", service::install()?.display()),
+            ServiceCommand::Install => {
+                let (config, _) = Config::load_or_create()?;
+                let _ = server::stop(&config).await?;
+                println!("Installed {}", service::install()?.display());
+            }
             ServiceCommand::Uninstall => println!("Removed {}", service::uninstall()?.display()),
             ServiceCommand::Status => println!(
                 "{}",
@@ -218,6 +224,13 @@ async fn main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+fn report_running(health: &ControlHealth) {
+    println!(
+        "Blind server is already running (PID {}). Skip this command or run `blind stop` first.",
+        health.pid
+    );
 }
 
 fn init(host: Option<String>, show_pat: bool) -> Result<()> {
@@ -243,10 +256,10 @@ async fn share(
     host: Option<String>,
     format: OutputFormat,
 ) -> Result<()> {
-    if process::running_pid()?.is_none() {
+    let (config, _) = Config::load_or_create()?;
+    if server::probe(&config).await?.is_none() {
         anyhow::bail!("Blind server is not running; run `blind serve` first");
     }
-    let (config, _) = Config::load_or_create()?;
     let scene = SceneDescriptor::create(&meshes, title).await?;
     let hosts = discover(config.port()?, config.preferred_origin.as_deref())?;
     let origin = match host {
@@ -269,9 +282,7 @@ async fn share(
         OutputFormat::Full => println!("{}", links.full_text.as_deref().unwrap_or_default()),
         OutputFormat::Json => {
             let output = CliShareOutput {
-                viewer_url: links.viewer_url,
-                image_url: links.image_url,
-                owner_url: links.owner_url.unwrap_or_default(),
+                links,
                 hosts,
                 resources: scene
                     .meshes
@@ -309,8 +320,9 @@ fn hosts(json: bool) -> Result<()> {
 async fn status(json: bool) -> Result<()> {
     let (config, _) = Config::load_or_create()?;
     let port = config.port()?;
-    let pid = process::running_pid()?;
-    let online = pid.is_some();
+    let health = server::probe(&config).await?;
+    let online = health.is_some();
+    let pid = health.map(|health| health.pid);
     if json {
         println!(
             "{}",

@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { apiError } from './api';
 import type { PublicMesh, PublicScene, SceneUpdate, ViewState } from './api';
 
 const DARK_BACKGROUND = '#292c32';
@@ -28,6 +29,7 @@ export class MeshViewer {
   private models: Model[] = [];
   private state!: ViewState;
   private selected = 0;
+  private dirty = true;
   private pointerStart: { x: number; y: number } | null = null;
   private lastTap = { index: -1, time: 0 };
   onSelectionChange?: (index: number) => void;
@@ -53,17 +55,16 @@ export class MeshViewer {
     const key = new THREE.DirectionalLight(0xf4f7fb, 3.5); key.position.set(4, 6, 5); this.scene.add(key);
     const fill = new THREE.DirectionalLight(0xc8d5dd, 1.5); fill.position.set(-5, 2, -3); this.scene.add(fill);
     const rim = new THREE.DirectionalLight(0xaebfd6, 1.0); rim.position.set(2, -3, -5); this.scene.add(rim);
-    const gridMaterials = Array.isArray(this.grid.material) ? this.grid.material : [this.grid.material];
-    gridMaterials.forEach((gridMaterial) => { gridMaterial.transparent = true; gridMaterial.opacity = 0.32; });
+    setHelperOpacity(this.grid, 0.32);
     this.scene.add(this.grid);
-    const axesMaterials = Array.isArray(this.axes.material) ? this.axes.material : [this.axes.material];
-    axesMaterials.forEach((axesMaterial) => { axesMaterial.transparent = true; axesMaterial.opacity = 0.78; });
+    setHelperOpacity(this.axes, 0.78);
     this.scene.add(this.axes);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(root);
     this.renderer.domElement.addEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
+    this.controls.addEventListener('change', () => { this.dirty = true; });
     this.animate();
   }
 
@@ -71,19 +72,20 @@ export class MeshViewer {
     this.disposeModels();
     this.state = structuredClone(scene.state);
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
-    for (const info of scene.meshes) {
-      const object = await loadObject(info);
-      object.userData.modelIndex = this.models.length;
+    const objects = await Promise.all(scene.meshes.map(loadObject));
+    objects.forEach((object, index) => {
+      const info = scene.meshes[index];
+      object.userData.modelIndex = index;
       object.traverse((child) => {
         if (!(child instanceof THREE.Mesh)) return;
-        child.userData.modelIndex = this.models.length;
+        child.userData.modelIndex = index;
         const geometry = child.geometry as THREE.BufferGeometry;
         if (!geometry.attributes.normal) geometry.computeVertexNormals();
         child.material = material(info.color, info.opacity);
       });
       this.models.push({ info: { ...info }, object });
       this.scene.add(object);
-    }
+    });
     this.applyState();
     if (scene.state.camera) this.restoreCamera(scene.state);
     else this.fitAll(false);
@@ -108,18 +110,20 @@ export class MeshViewer {
     if (!model) return;
     model.info.visible = visible;
     model.object.visible = visible;
+    this.dirty = true;
   }
 
   setColor(color: string): void { const model = this.models[this.selected]; if (model) { model.info.color = color; this.applyMaterials(); } }
   setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); } }
   setShading(shading: ViewState['shading']): void { this.state.shading = shading; this.applyMaterials(); }
-  setGrid(visible: boolean): void { this.state.grid = visible; this.grid.visible = visible; }
-  setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; }
+  setGrid(visible: boolean): void { this.state.grid = visible; this.grid.visible = visible; this.dirty = true; }
+  setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.dirty = true; }
   setBackground(background: ViewState['background']): void {
     this.state.background = background;
     this.scene.background = new THREE.Color(background === 'light' ? LIGHT_BACKGROUND : DARK_BACKGROUND);
     document.documentElement.dataset.theme = background;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', background === 'light' ? LIGHT_BACKGROUND : DARK_BACKGROUND);
+    this.dirty = true;
   }
 
   setProjection(projection: ViewState['projection']): void {
@@ -142,8 +146,7 @@ export class MeshViewer {
   }
 
   fitAll(animate = true): void {
-    const box = new THREE.Box3();
-    for (const model of this.models) if (model.info.visible) box.expandByObject(model.object);
+    const box = this.visibleBounds();
     if (box.isEmpty()) return;
     this.fitBox(box, animate);
   }
@@ -184,6 +187,7 @@ export class MeshViewer {
     const orthographicHeight = this.orthographic.userData.height ?? 2;
     this.orthographic.left = -orthographicHeight * aspect / 2; this.orthographic.right = orthographicHeight * aspect / 2;
     this.orthographic.top = orthographicHeight / 2; this.orthographic.bottom = -orthographicHeight / 2; this.orthographic.updateProjectionMatrix();
+    this.dirty = true;
   }
 
   private applyState(): void {
@@ -203,6 +207,7 @@ export class MeshViewer {
       current.emissive.set(index === this.selected ? model.info.color : '#30333a'); current.emissiveIntensity = index === this.selected ? 0.055 : 0;
       current.needsUpdate = true;
     }));
+    this.dirty = true;
   }
 
   private restoreCamera(state: ViewState): void {
@@ -251,6 +256,7 @@ export class MeshViewer {
     const box = this.visibleBounds(); if (box.isEmpty()) return; const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.001);
     this.grid.scale.setScalar(size / 10); this.grid.position.y = box.min.y - size * 0.025;
     this.axes.scale.setScalar(size * 0.09); this.axes.position.copy(box.min);
+    this.dirty = true;
   }
   private pointerDown = (event: PointerEvent): void => { this.pointerStart = { x: event.clientX, y: event.clientY }; };
   private pointerUp = (event: PointerEvent): void => {
@@ -264,15 +270,27 @@ export class MeshViewer {
     this.lastTap = { index, time: now }; this.select(index);
   };
   private disposeModels(): void { for (const model of this.models) { this.scene.remove(model.object); model.object.traverse((child) => { if (child instanceof THREE.Mesh) { child.geometry.dispose(); (child.material as THREE.Material).dispose(); } }); } this.models = []; }
-  private animate = (): void => { requestAnimationFrame(this.animate); this.controls.update(); this.renderer.render(this.scene, this.camera); };
+  private animate = (): void => {
+    requestAnimationFrame(this.animate);
+    const moving = this.controls.update();
+    if (moving || this.dirty) {
+      this.renderer.render(this.scene, this.camera);
+      this.dirty = false;
+    }
+  };
 }
 
 async function loadObject(info: PublicMesh): Promise<THREE.Object3D> {
-  const response = await fetch(info.source_url, { cache: 'no-store' }); if (!response.ok) throw new Error(`Mesh ${response.status}`);
+  const response = await fetch(info.source_url, { cache: 'no-store' }); if (!response.ok) throw await apiError(response);
   const buffer = await response.arrayBuffer();
   if (info.format === 'ply') return new THREE.Mesh(new PLYLoader().parse(buffer));
   if (info.format === 'stl') return new THREE.Mesh(new STLLoader().parse(buffer));
   return new OBJLoader().parse(new TextDecoder().decode(buffer));
+}
+
+function setHelperOpacity(helper: THREE.LineSegments, opacity: number): void {
+  const materials = Array.isArray(helper.material) ? helper.material : [helper.material];
+  materials.forEach((material) => { material.transparent = true; material.opacity = opacity; });
 }
 
 function material(color: string, opacity: number): THREE.MeshStandardMaterial {

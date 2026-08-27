@@ -171,7 +171,8 @@ blind share model.ply --host http://10.0.0.8:7400
 Browser-generated shares keep the origin used to open the current page. For
 remote mobile access, provide a trusted private network or HTTPS reverse proxy.
 Plain HTTP may prevent browser clipboard APIs, in which case Blind uses a
-legacy browser fallback and reports if copying is unavailable.
+visible, preselected text field for manual copying. Blind only reports an
+automatic copy after the browser confirms the clipboard write.
 
 ## Authentication and security
 
@@ -216,6 +217,8 @@ cargo test --locked
 | Route | Access | Purpose |
 | --- | --- | --- |
 | `GET /api/v1/health` | Public | Version and renderer readiness |
+| `GET /api/v1/control/health` | PAT | Verify this configured Blind instance |
+| `POST /api/v1/control/stop` | PAT | Gracefully stop the server |
 | `GET /api/v1/hosts` | PAT | Detected Host candidates |
 | `POST /api/v1/scenes` | PAT | Create a scene from local paths |
 | `GET /api/v1/scenes/:token` | Scene capability | Read validated public state |

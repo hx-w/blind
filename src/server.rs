@@ -1,12 +1,22 @@
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, State},
-    http::{HeaderMap, HeaderValue, Response, StatusCode, header},
-    response::{Html, IntoResponse},
+    extract::{FromRequestParts, Path as AxumPath, State},
+    http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header, request::Parts},
+    response::IntoResponse,
     routing::{get, post},
+};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Empty};
+use hyper_util::{
+    client::legacy::{Client, connect::HttpConnector},
+    rt::TokioExecutor,
 };
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
@@ -31,6 +41,7 @@ pub struct AppState {
     pub codec: TokenCodec,
     pub renderer: Option<Arc<Renderer>>,
     pub image_slots: Arc<tokio::sync::Semaphore>,
+    pub shutdown: tokio::sync::mpsc::Sender<()>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +75,12 @@ struct HealthResponse {
     image_renderer: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlHealth {
+    service: String,
+    pub pid: u32,
+}
+
 #[derive(Debug, Serialize)]
 struct PublicScene {
     title: String,
@@ -84,9 +101,9 @@ struct PublicMesh {
     source_url: String,
 }
 
-pub async fn serve(config: Config, listen_override: Option<String>) -> anyhow::Result<()> {
-    let listen = listen_override.unwrap_or_else(|| config.listen.clone());
-    let address: SocketAddr = listen.parse()?;
+pub async fn serve(config: Config) -> anyhow::Result<()> {
+    let address: SocketAddr = config.listen.parse()?;
+    let listener = tokio::net::TcpListener::bind(address).await?;
     let codec = TokenCodec::new(config.secret_bytes()?);
     let renderer = match Renderer::new().await {
         Ok(renderer) => Some(Arc::new(renderer)),
@@ -95,14 +112,18 @@ pub async fn serve(config: Config, listen_override: Option<String>) -> anyhow::R
             None
         }
     };
+    let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
     let state = AppState {
         config: Arc::new(config),
         codec,
         renderer,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        shutdown: shutdown_tx,
     };
     let app = Router::new()
         .route("/api/v1/health", get(health))
+        .route("/api/v1/control/health", get(control_health))
+        .route("/api/v1/control/stop", post(control_stop))
         .route("/api/v1/hosts", get(hosts))
         .route("/api/v1/scenes", post(create_scene))
         .route("/api/v1/scenes/{token}", get(get_scene))
@@ -129,12 +150,100 @@ pub async fn serve(config: Config, listen_override: Option<String>) -> anyhow::R
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
-    let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(%address, "Blind is ready");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(shutdown(shutdown_rx))
         .await?;
     Ok(())
+}
+
+pub async fn probe(config: &Config) -> anyhow::Result<Option<ControlHealth>> {
+    let Some((status, body)) =
+        control_request(config, Method::GET, "/api/v1/control/health").await?
+    else {
+        return Ok(None);
+    };
+    let health = match status {
+        StatusCode::OK => {
+            let health: ControlHealth = serde_json::from_slice(&body).map_err(|_| {
+                anyhow::anyhow!("configured port returned an invalid Blind control response")
+            })?;
+            if health.service != "blind" {
+                anyhow::bail!("configured port is occupied by a non-Blind service");
+            }
+            health
+        }
+        status => return Err(control_rejection(status)),
+    };
+    Ok(Some(health))
+}
+
+pub async fn stop(config: &Config) -> anyhow::Result<String> {
+    let Some((status, _)) = control_request(config, Method::POST, "/api/v1/control/stop").await?
+    else {
+        return Ok("Blind server is already stopped.".into());
+    };
+    match status {
+        StatusCode::ACCEPTED => Ok("Stopped Blind server.".into()),
+        status => Err(control_rejection(status)),
+    }
+}
+
+fn control_rejection(status: StatusCode) -> anyhow::Error {
+    match status {
+        StatusCode::UNAUTHORIZED => {
+            anyhow::anyhow!("a Blind server is running with a different local configuration")
+        }
+        StatusCode::NOT_FOUND => {
+            anyhow::anyhow!("an older or incompatible service is already using the configured port")
+        }
+        status => anyhow::anyhow!("configured port returned unexpected control status {status}"),
+    }
+}
+
+async fn control_request(
+    config: &Config,
+    method: Method,
+    path: &str,
+) -> anyhow::Result<Option<(StatusCode, Bytes)>> {
+    let address = control_address(config)?;
+    let uri = format!("http://{address}{path}");
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {}", config.pat))
+        .header(header::CONNECTION, "close")
+        .body(Empty::<Bytes>::new())?;
+    let client: Client<HttpConnector, Empty<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let response = match tokio::time::timeout(Duration::from_secs(2), client.request(request)).await
+    {
+        Err(_) => {
+            anyhow::bail!("the configured port accepted a connection but did not answer as Blind")
+        }
+        Ok(Err(error)) if error.is_connect() => return Ok(None),
+        Ok(Err(error)) => return Err(error.into()),
+        Ok(Ok(response)) => response,
+    };
+    let status = response.status();
+    let body = tokio::time::timeout(Duration::from_secs(2), response.into_body().collect())
+        .await
+        .map_err(|_| anyhow::anyhow!("Blind control response timed out"))??
+        .to_bytes();
+    if body.len() > 64 * 1024 {
+        anyhow::bail!("Blind control response is unexpectedly large");
+    }
+    Ok(Some((status, body)))
+}
+
+fn control_address(config: &Config) -> anyhow::Result<SocketAddr> {
+    let configured: SocketAddr = config.listen.parse()?;
+    let ip = match configured.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    Ok(SocketAddr::new(ip, configured.port()))
 }
 
 pub fn links_for(
@@ -169,11 +278,31 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+async fn control_health(_pat: PatAuth) -> Result<impl IntoResponse, AppError> {
+    Ok((
+        no_store(),
+        Json(ControlHealth {
+            service: "blind".into(),
+            pid: std::process::id(),
+        }),
+    ))
+}
+
+async fn control_stop(
+    State(state): State<AppState>,
+    _pat: PatAuth,
+) -> Result<impl IntoResponse, AppError> {
+    state
+        .shutdown
+        .try_send(())
+        .map_err(|_| AppError::unavailable("Blind shutdown is already in progress"))?;
+    Ok((StatusCode::ACCEPTED, no_store()))
+}
+
 async fn hosts(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    _pat: PatAuth,
 ) -> Result<impl IntoResponse, AppError> {
-    require_pat(&headers, &state.config)?;
     Ok((
         no_store(),
         Json(discover(
@@ -185,10 +314,10 @@ async fn hosts(
 
 async fn create_scene(
     State(state): State<AppState>,
+    _pat: PatAuth,
     headers: HeaderMap,
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    require_pat(&headers, &state.config)?;
     let paths = request
         .paths
         .into_iter()
@@ -212,13 +341,8 @@ async fn get_scene(
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    let envelope = state
-        .codec
-        .open(&token)
-        .map_err(|_| AppError::not_found("Scene not found"))?;
-    envelope.scene.validate().await?;
-    let owner = owner_matches(&headers, &state.codec, &envelope.scene);
-    let scene = envelope.scene;
+    let scene = resolved_scene(&state, &token).await?;
+    let owner = owner_matches(&headers, &state.codec, &scene);
     let meshes = scene
         .meshes
         .iter()
@@ -249,13 +373,8 @@ async fn get_mesh(
     State(state): State<AppState>,
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
-    let envelope = state
-        .codec
-        .open(&token)
-        .map_err(|_| AppError::not_found("Scene not found"))?;
-    envelope.scene.validate().await?;
-    let mesh = envelope
-        .scene
+    let scene = open_scene(&state, &token)?;
+    let mesh = scene
         .meshes
         .get(index)
         .ok_or_else(|| AppError::not_found("Mesh not found"))?;
@@ -266,7 +385,7 @@ async fn get_mesh(
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mesh.format.mime())
-        .header(header::CACHE_CONTROL, "no-store, max-age=0")
+        .header(header::CACHE_CONTROL, NO_STORE)
         .body(Body::from(bytes))?)
 }
 
@@ -276,13 +395,8 @@ async fn reshare(
     headers: HeaderMap,
     Json(update): Json<SceneUpdate>,
 ) -> Result<impl IntoResponse, AppError> {
-    let envelope = state
-        .codec
-        .open(&token)
-        .map_err(|_| AppError::not_found("Scene not found"))?;
-    envelope.scene.validate().await?;
-    let owner = owner_matches(&headers, &state.codec, &envelope.scene);
-    let mut scene = envelope.scene;
+    let mut scene = resolved_scene(&state, &token).await?;
+    let owner = owner_matches(&headers, &state.codec, &scene);
     scene
         .apply_update(update)
         .map_err(|error| AppError::bad_request(&error.to_string()))?;
@@ -302,50 +416,45 @@ async fn render_image(
         .try_acquire()
         .map_err(|_| AppError::too_many_requests("Image renderer is busy"))?;
     let token = token.strip_suffix(".png").unwrap_or(&token);
-    let envelope = state
-        .codec
-        .open(token)
-        .map_err(|_| AppError::not_found("Scene not found"))?;
-    envelope.scene.validate().await?;
+    let scene = open_scene(&state, token)?;
+    scene.verify_source_lengths().await?;
     let renderer = state
         .renderer
         .as_ref()
         .ok_or_else(|| AppError::unavailable("Image renderer unavailable"))?;
-    let bytes = renderer.render(&envelope.scene).await.map_err(|error| {
+    let bytes = renderer.render(&scene).await.map_err(|error| {
         tracing::warn!(%error, "image render failed");
         AppError::unprocessable("Image render failed")
     })?;
-    envelope.scene.validate().await?;
+    scene.validate().await?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, "no-store, max-age=0")
+        .header(header::CACHE_CONTROL, NO_STORE)
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))?)
 }
 
-async fn index() -> Result<Html<Vec<u8>>, AppError> {
+fn serve_index() -> Result<Response<Body>, AppError> {
     let asset =
         WebAssets::get("index.html").ok_or_else(|| AppError::not_found("Viewer not built"))?;
-    Ok(Html(asset.data.into_owned()))
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, NO_STORE)
+        .body(Body::from(asset.data.into_owned()))?)
+}
+
+async fn index() -> Result<Response<Body>, AppError> {
+    serve_index()
 }
 
 async fn view_scene(
     State(state): State<AppState>,
     AxumPath(token): AxumPath<String>,
 ) -> Result<Response<Body>, AppError> {
-    let envelope = state
-        .codec
-        .open(&token)
-        .map_err(|_| AppError::not_found("Scene not found"))?;
-    envelope.scene.validate().await?;
-    let asset =
-        WebAssets::get("index.html").ok_or_else(|| AppError::not_found("Viewer not built"))?;
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, "no-store, max-age=0")
-        .body(Body::from(asset.data.into_owned()))?)
+    resolved_scene(&state, &token).await?;
+    serve_index()
 }
 
 async fn asset(uri: axum::http::Uri) -> Result<Response<Body>, AppError> {
@@ -357,7 +466,7 @@ async fn asset(uri: axum::http::Uri) -> Result<Response<Body>, AppError> {
         .header(header::CONTENT_TYPE, mime.as_ref())
         .header(
             header::CACHE_CONTROL,
-            if path.contains('-') {
+            if path.starts_with("assets/") {
                 "public, max-age=31536000, immutable"
             } else {
                 "no-cache"
@@ -434,7 +543,7 @@ fn request_origin(headers: &HeaderMap, config: &Config) -> Result<String, AppErr
         .ok_or_else(|| AppError::internal("No host address available"))
 }
 
-async fn shutdown() {
+async fn shutdown(mut requested: tokio::sync::mpsc::Receiver<()>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -448,7 +557,7 @@ async fn shutdown() {
     };
     #[cfg(not(unix))]
     let terminate = std::future::pending::<()>();
-    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+    tokio::select! { _ = ctrl_c => {}, _ = terminate => {}, _ = requested.recv() => {} }
 }
 
 #[derive(Debug)]
@@ -503,10 +612,37 @@ impl AppError {
 }
 
 fn no_store() -> [(header::HeaderName, HeaderValue); 1] {
-    [(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, max-age=0"),
-    )]
+    [(header::CACHE_CONTROL, HeaderValue::from_static(NO_STORE))]
+}
+
+const NO_STORE: &str = "no-store, max-age=0";
+
+/// Guard for routes that must only be reachable with the local PAT.
+struct PatAuth;
+
+impl FromRequestParts<AppState> for PatAuth {
+    type Rejection = AppError;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        require_pat(&parts.headers, &state.config)?;
+        Ok(PatAuth)
+    }
+}
+
+fn open_scene(state: &AppState, token: &str) -> Result<SceneDescriptor, AppError> {
+    state
+        .codec
+        .open(token)
+        .map(|envelope| envelope.scene)
+        .map_err(|_| AppError::not_found("Scene not found"))
+}
+
+async fn resolved_scene(state: &AppState, token: &str) -> Result<SceneDescriptor, AppError> {
+    let scene = open_scene(state, token)?;
+    scene.validate().await?;
+    Ok(scene)
 }
 
 impl IntoResponse for AppError {

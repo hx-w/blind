@@ -1,4 +1,8 @@
-use std::{cmp::Reverse, collections::HashSet, net::IpAddr};
+use std::{
+    cmp::Reverse,
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr},
+};
 
 use anyhow::Result;
 use if_addrs::get_if_addrs;
@@ -75,9 +79,13 @@ pub fn discover(port: u16, preferred: Option<&str>) -> Result<Vec<HostCandidate>
     Ok(candidates)
 }
 
+fn is_cgnat_v4(ip: Ipv4Addr) -> bool {
+    ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])
+}
+
 fn address_score(ip: IpAddr) -> u8 {
     match ip {
-        IpAddr::V4(ip) if (ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1])) => 5,
+        IpAddr::V4(ip) if is_cgnat_v4(ip) => 5,
         IpAddr::V4(ip) if ip.is_private() => 4,
         IpAddr::V6(ip) if is_unique_local(ip) => 3,
         IpAddr::V4(_) => 2,
@@ -87,11 +95,7 @@ fn address_score(ip: IpAddr) -> u8 {
 
 fn scope(ip: IpAddr) -> &'static str {
     match ip {
-        IpAddr::V4(ip) if ip.is_loopback() => "local",
-        IpAddr::V4(ip) if ip.is_private() => "private",
-        IpAddr::V4(ip) if ip.octets()[0] == 100 && (64..=127).contains(&ip.octets()[1]) => {
-            "private"
-        }
+        IpAddr::V4(ip) if ip.is_private() || is_cgnat_v4(ip) => "private",
         IpAddr::V6(ip) if is_unique_local(ip) => "private",
         _ => "global",
     }

@@ -78,7 +78,7 @@ export async function shareScene(token: string, update: SceneUpdate, owner?: str
   return response.json() as Promise<ShareLinks>;
 }
 
-async function apiError(response: Response): Promise<ApiError> {
+export async function apiError(response: Response): Promise<ApiError> {
   const payload = await response.json().catch(() => ({ error: response.statusText })) as { error?: string };
   return new ApiError(response.status, payload.error ?? response.statusText);
 }

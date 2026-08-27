@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#292c32" />
     <meta name="color-scheme" content="dark light" />
     <title>Blind</title>
-    <script type="module" crossorigin src="/assets/index-Cs0VNPVK.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-B-zn8jd8.css">
+    <script type="module" crossorigin src="/assets/index-B-FUO4eg.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Rt3_s1Lj.css">
   </head>
   <body>
     <a class="skip-link" href="#viewer">跳到 3D 视图</a>
@@ -94,6 +94,11 @@
         <button data-copy="view" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/></svg></span><span><strong>视角链接</strong><small>交互场景与当前视角</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
         <button data-copy="image" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m6 17 4-4 3 3 2-2 3 3"/></svg></span><span><strong>图片链接</strong><small>即时渲染 PNG</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
         <button data-copy="full" id="copy-full" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M8 4h8l3 3v13H8z"/><path d="M16 4v4h4M11 12h5M11 16h5"/></svg></span><span><strong>完整信息</strong><small>Mesh 路径与两个链接</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+      </div>
+      <div class="manual-copy" id="manual-copy" hidden>
+        <p><strong>需要手动复制</strong><span>当前连接不允许浏览器自动写入剪贴板。内容已全选，请长按并选择“复制”。</span></p>
+        <textarea id="manual-copy-value" readonly aria-label="待复制内容"></textarea>
+        <div><button id="select-copy" type="button">重新全选</button><button id="back-share" type="button">返回</button></div>
       </div>
     </dialog>
   </body>

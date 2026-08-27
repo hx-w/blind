@@ -5,7 +5,6 @@ use anyhow::{Context, Result, bail};
 const LABEL: &str = "dev.blind.viewer";
 
 pub fn install() -> Result<PathBuf> {
-    let _ = crate::process::stop()?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let home = std::env::var_os("HOME").context("HOME is not set")?;
     let agents = PathBuf::from(&home).join("Library/LaunchAgents");

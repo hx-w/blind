@@ -8,6 +8,8 @@ const $ = <T extends HTMLElement>(selector: string): T => {
   return element;
 };
 
+const isMobileViewport = (): boolean => matchMedia('(max-width: 759px)').matches;
+
 const shell = $('#app-shell');
 const root = $('#canvas-root');
 const viewerElement = $('#viewer');
@@ -28,7 +30,10 @@ const gridToggle = $('#grid-toggle') as HTMLInputElement;
 const axesToggle = $('#axes-toggle') as HTMLInputElement;
 const lightToggle = $('#light-toggle') as HTMLInputElement;
 const shareDialog = $('#share-sheet') as HTMLDialogElement;
+const shareOptions = $('.share-options');
 const copyFull = $('#copy-full');
+const manualCopy = $('#manual-copy');
+const manualCopyValue = $('#manual-copy-value') as HTMLTextAreaElement;
 const toast = $('#toast');
 const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 
@@ -66,8 +71,10 @@ async function start(): Promise<void> {
     loading.hidden = true;
   } catch (error) {
     loading.hidden = true; hideViewerControls();
-    if (error instanceof ApiError && error.status === 410) invalid.hidden = false;
-    else { invalid.hidden = false; invalid.querySelector('span')!.textContent = error instanceof ApiError ? String(error.status) : 'ERR'; }
+    invalid.hidden = false;
+    if (!(error instanceof ApiError && error.status === 410)) {
+      invalid.querySelector('span')!.textContent = error instanceof ApiError ? String(error.status) : 'ERR';
+    }
   }
 }
 
@@ -93,7 +100,7 @@ function renderMeshList(): void {
     const select = document.createElement('button'); select.type = 'button'; select.className = 'mesh-select';
     select.setAttribute('aria-label', `选择 ${mesh.name}`);
     select.innerHTML = `<span class="mesh-dot" style="--mesh-color:${escapeAttribute(mesh.color)}"></span><span class="mesh-copy"><strong>${escapeHtml(mesh.name)}</strong><small>${mesh.format.toUpperCase()} · ${formatBytes(mesh.byte_size)}</small></span>`;
-    select.addEventListener('click', () => { meshViewer.select(index); if (matchMedia('(max-width: 759px)').matches) closePanel(); });
+    select.addEventListener('click', () => { meshViewer.select(index); if (isMobileViewport()) closePanel(); });
     const eye = document.createElement('button'); eye.type = 'button'; eye.className = 'mesh-eye';
     eye.setAttribute('aria-label', mesh.visible ? `隐藏 ${mesh.name}` : `显示 ${mesh.name}`);
     eye.setAttribute('aria-pressed', String(mesh.visible)); eye.innerHTML = eyeIcon(mesh.visible);
@@ -116,7 +123,7 @@ function syncStyleControls(): void {
   const selected = meshViewer.selectedModel; if (!selected) return;
   panelContext.textContent = activePanel === 'style' ? selected.name : '';
   opacity.value = String(Math.round(selected.opacity * 100)); opacityValue.value = `${opacity.value}%`;
-  document.querySelectorAll<HTMLButtonElement>('.swatch').forEach((button) => button.classList.toggle('active', rgbToHex(button.style.getPropertyValue('--swatch')) === selected.color.toLowerCase()));
+  document.querySelectorAll<HTMLButtonElement>('.swatch').forEach((button) => button.classList.toggle('active', button.style.getPropertyValue('--swatch').trim().toLowerCase() === selected.color.toLowerCase()));
   const state = meshViewer.currentState;
   document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.classList.toggle('active', button.dataset.shading === state.shading));
   document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.classList.toggle('active', button.dataset.projection === state.projection));
@@ -136,7 +143,7 @@ function openPanel(kind: 'meshes' | 'style'): void {
   document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => {
     const active = button.dataset.panel === kind; button.classList.toggle('active', active); button.setAttribute('aria-expanded', String(active));
   });
-  if (matchMedia('(max-width: 759px)').matches) {
+  if (isMobileViewport()) {
     panelHeight = kind === 'meshes' ? Math.min(innerHeight * 0.52, 62 + meshViewer.modelCount * 58) : innerHeight * 0.44;
     setPanelHeight(panelHeight);
   }
@@ -158,7 +165,7 @@ function setPanelHeight(value: number): void {
 }
 
 dragZone.addEventListener('pointerdown', (event) => {
-  if (!activePanel || !matchMedia('(max-width: 759px)').matches) return;
+  if (!activePanel || !isMobileViewport()) return;
   dragStart = { y: event.clientY, height: panelHeight }; dragZone.setPointerCapture(event.pointerId); panel.classList.add('dragging');
 });
 dragZone.addEventListener('pointermove', (event) => { if (dragStart) setPanelHeight(dragStart.height + dragStart.y - event.clientY); });
@@ -174,9 +181,9 @@ dragZone.addEventListener('pointerup', (event) => {
 });
 dragZone.addEventListener('click', () => {
   if (suppressHandleClick) { suppressHandleClick = false; return; }
-  if (activePanel === 'style' && matchMedia('(max-width: 759px)').matches) {
+  if (activePanel === 'style' && isMobileViewport()) {
     expanded = !expanded; applyStyleDetent();
-  } else if (activePanel === 'meshes' && matchMedia('(max-width: 759px)').matches) {
+  } else if (activePanel === 'meshes' && isMobileViewport()) {
     closePanel();
   }
 });
@@ -214,6 +221,7 @@ $('#share-view').addEventListener('click', async () => {
   try {
     shareLinks = await shareScene(token, meshViewer.exportUpdate(), owner);
     copyFull.hidden = !shareLinks.full_text;
+    resetShareSheet();
     shareDialog.showModal();
   } catch (error) { showToast(error instanceof Error ? error.message : '无法创建分享链接'); }
   finally { button.disabled = false; button.classList.remove('working'); }
@@ -225,28 +233,51 @@ document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((button) => 
   const value = kind === 'view' ? shareLinks.viewer_url : kind === 'image' ? shareLinks.image_url : shareLinks.full_text;
   if (!value) return;
   try {
-    await copyText(value);
-    shareDialog.close();
-    showToast(kind === 'view' ? '视角链接已复制' : kind === 'image' ? '图片链接已复制' : '完整信息已复制');
+    if (await copyText(value)) {
+      shareDialog.close();
+      showToast(kind === 'view' ? '视角链接已复制' : kind === 'image' ? '图片链接已复制' : '完整信息已复制');
+    } else {
+      showManualCopy(value);
+    }
   } catch {
-    showToast('复制失败，请使用安全连接后重试');
+    showManualCopy(value);
   }
 }));
-$('#close-share').addEventListener('click', () => shareDialog.close());
-shareDialog.addEventListener('click', (event) => { if (event.target === shareDialog) shareDialog.close(); });
+$('#select-copy').addEventListener('click', selectManualCopy);
+$('#back-share').addEventListener('click', resetShareSheet);
+$('#close-share').addEventListener('click', () => { shareDialog.close(); resetShareSheet(); });
+shareDialog.addEventListener('click', (event) => {
+  if (event.target === shareDialog) { shareDialog.close(); resetShareSheet(); }
+});
 
 window.addEventListener('resize', () => {
-  if (activePanel && matchMedia('(max-width: 759px)').matches) openPanel(activePanel);
+  if (activePanel && isMobileViewport()) openPanel(activePanel);
   else meshViewer.resize();
 });
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
 
-async function copyText(value: string): Promise<void> {
-  if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(value); return; }
-  const textarea = document.createElement('textarea'); textarea.value = value; textarea.style.position = 'fixed'; textarea.style.opacity = '0';
-  document.body.append(textarea); textarea.select();
-  const copied = document.execCommand('copy'); textarea.remove();
-  if (!copied) throw new Error('clipboard unavailable');
+async function copyText(value: string): Promise<boolean> {
+  if (!navigator.clipboard || !window.isSecureContext) return false;
+  await navigator.clipboard.writeText(value);
+  return true;
+}
+
+function showManualCopy(value: string): void {
+  shareOptions.hidden = true;
+  manualCopy.hidden = false;
+  manualCopyValue.value = value;
+  requestAnimationFrame(selectManualCopy);
+}
+
+function selectManualCopy(): void {
+  manualCopyValue.focus();
+  manualCopyValue.setSelectionRange(0, manualCopyValue.value.length);
+}
+
+function resetShareSheet(): void {
+  shareOptions.hidden = false;
+  manualCopy.hidden = true;
+  manualCopyValue.value = '';
 }
 
 function showToast(message: string): void {
@@ -268,4 +299,3 @@ function eyeIcon(visible: boolean): string {
 
 function escapeHtml(value: string): string { const div = document.createElement('div'); div.textContent = value; return div.innerHTML; }
 function escapeAttribute(value: string): string { return value.replace(/["'<>]/g, ''); }
-function rgbToHex(value: string): string { return value.trim().toLowerCase(); }

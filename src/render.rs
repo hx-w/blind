@@ -1,15 +1,14 @@
-use std::{borrow::Cow, io::Cursor, mem, path::Path, sync::Arc};
+use std::{borrow::Cow, io::Cursor, mem, path::Path};
 
 use anyhow::{Context, Result, bail};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use image::{ImageFormat, RgbaImage};
-use tokio::sync::Semaphore;
 use wgpu::util::DeviceExt;
 
 use crate::{
     mesh::Geometry,
-    scene::{Background, Projection, SceneDescriptor, Shading},
+    scene::{Background, Projection, SceneDescriptor, Shading, parse_hex_color},
 };
 
 const MAX_RENDER_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -33,7 +32,9 @@ struct Uniform {
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
-    semaphore: Arc<Semaphore>,
+    camera_layout: wgpu::BindGroupLayout,
+    triangle_pipeline: wgpu::RenderPipeline,
+    line_pipeline: wgpu::RenderPipeline,
 }
 
 impl Renderer {
@@ -58,15 +59,53 @@ impl Renderer {
                 None,
             )
             .await?;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Blind shader"),
+            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("render.wgsl"))),
+        });
+        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Camera layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Blind pipeline layout"),
+            bind_group_layouts: &[&camera_layout],
+            push_constant_ranges: &[],
+        });
+        let triangle_pipeline = create_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let line_pipeline = create_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            wgpu::PrimitiveTopology::LineList,
+        );
         Ok(Self {
             device,
             queue,
-            semaphore: Arc::new(Semaphore::new(2)),
+            camera_layout,
+            triangle_pipeline,
+            line_pipeline,
         })
     }
 
     pub async fn render(&self, scene: &SceneDescriptor) -> Result<Vec<u8>> {
-        let _permit = self.semaphore.acquire().await?;
         let scene = scene.clone();
         let geometry = tokio::task::spawn_blocking(move || load_scene_geometry(&scene)).await??;
         self.render_geometry(&geometry).await
@@ -115,56 +154,14 @@ impl Renderer {
                 contents: bytemuck::bytes_of(&uniform),
                 usage: wgpu::BufferUsages::UNIFORM,
             });
-        let layout = self
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Camera layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Camera bind group"),
-            layout: &layout,
+            layout: &self.camera_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: uniform_buffer.as_entire_binding(),
             }],
         });
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("Blind shader"),
-                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("render.wgsl"))),
-            });
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Blind pipeline layout"),
-                bind_group_layouts: &[&layout],
-                push_constant_ranges: &[],
-            });
-        let triangle_pipeline = create_pipeline(
-            &self.device,
-            &pipeline_layout,
-            &shader,
-            format,
-            wgpu::PrimitiveTopology::TriangleList,
-        );
-        let line_pipeline = create_pipeline(
-            &self.device,
-            &pipeline_layout,
-            &shader,
-            format,
-            wgpu::PrimitiveTopology::LineList,
-        );
         let triangle_buffer = (!input.mesh_vertices.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -221,12 +218,12 @@ impl Renderer {
             });
             pass.set_bind_group(0, &bind_group, &[]);
             if let Some(buffer) = &triangle_buffer {
-                pass.set_pipeline(&triangle_pipeline);
+                pass.set_pipeline(&self.triangle_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..input.mesh_vertices.len() as u32, 0..1);
             }
             if let Some(buffer) = &line_buffer {
-                pass.set_pipeline(&line_pipeline);
+                pass.set_pipeline(&self.line_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..input.line_vertices.len() as u32, 0..1);
             }
@@ -318,22 +315,24 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
     let mut mesh_vertices = Vec::new();
     let mut line_vertices = Vec::new();
     let wire = scene.state.shading == Shading::Wire;
+    let flat = scene.state.shading == Shading::Flat;
     for (mesh, geometry) in loaded {
         let color = parse_color(&mesh.color, mesh.opacity)?;
-        let normals = geometry.smooth_normals();
+        let normals = (!flat).then(|| geometry.smooth_normals());
         for triangle in geometry.indices.chunks_exact(3) {
-            let face_normal = {
+            let face_normal = if flat {
                 let a = Vec3::from_array(geometry.positions[triangle[0] as usize]);
                 let b = Vec3::from_array(geometry.positions[triangle[1] as usize]);
                 let c = Vec3::from_array(geometry.positions[triangle[2] as usize]);
                 (b - a).cross(c - a).normalize_or_zero().to_array()
+            } else {
+                [0.0; 3]
             };
             let make = |index: u32| Vertex {
                 position: geometry.positions[index as usize],
-                normal: if scene.state.shading == Shading::Flat {
-                    face_normal
-                } else {
-                    normals[index as usize]
+                normal: match &normals {
+                    Some(normals) => normals[index as usize],
+                    None => face_normal,
                 },
                 color,
             };
@@ -502,16 +501,8 @@ fn append_axes(vertices: &mut Vec<Vertex>, min: Vec3, max: Vec3) {
 }
 
 fn parse_color(value: &str, alpha: f32) -> Result<[f32; 4]> {
-    if value.len() != 7 {
-        bail!("invalid color");
-    }
-    let number = u32::from_str_radix(&value[1..], 16)?;
-    Ok([
-        ((number >> 16) & 255) as f32 / 255.0,
-        ((number >> 8) & 255) as f32 / 255.0,
-        (number & 255) as f32 / 255.0,
-        alpha,
-    ])
+    let [r, g, b] = parse_hex_color(value).context("invalid color")?;
+    Ok([r, g, b, alpha])
 }
 
 fn align_to(value: u32, alignment: u32) -> u32 {
