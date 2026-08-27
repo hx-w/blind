@@ -5,10 +5,14 @@ All notable changes to Blind are documented here. This project follows
 
 ## Unreleased
 
+## [0.3.0] - 2026-08-27
+
 ### Added
 
 - Mobile-first screen markup with touch-locked drawing, four colors, undo,
   clear, encrypted view-link restore, and matching PNG composition.
+- Host-aware browser sharing with an in-sheet address picker for every
+  discovered local interface.
 
 ### Changed
 
@@ -20,6 +24,10 @@ All notable changes to Blind are documented here. This project follows
   and rotation, while oversized PNGs scale both dimensions together.
 - Matte Mesh lighting has stronger directional separation, restrained
   highlights, and subtle grazing-angle definition in both WebGL and WebGPU.
+- Partially expanded mobile drawers remain scrollable and overlay a stable 3D
+  viewport without resizing or flashing the WebGL drawing buffer.
+- Generated viewer bundles are built by CI and releases without being stored
+  in Git.
 
 ## [0.2.0] - 2026-08-27
 
@@ -53,5 +61,6 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.3.0]: https://github.com/hx-w/blind/releases/tag/v0.3.0
 [0.2.0]: https://github.com/hx-w/blind/releases/tag/v0.2.0
 [0.1.0]: https://github.com/hx-w/blind/releases/tag/v0.1.0
