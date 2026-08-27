@@ -58,7 +58,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5"
 uuid = { version = "1.12", features = ["v4"] }
-wgpu = "0.20.1"
+wgpu = "26.0.1"
 zstd = "0.13"
 
 [build-dependencies]
