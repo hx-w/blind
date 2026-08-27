@@ -22,7 +22,7 @@ Use the native San Francisco family with PingFang SC fallback. Blind is a dense 
 
 ## 4. Components
 
-Buttons use a 10px radius and 42px minimum hit target. The bottom dock uses a 16px outer radius. Press feedback is a 0.96 scale. The share action opens a focused action sheet with three explicit outputs.
+Buttons use a 10px radius and 42px minimum hit target. The bottom dock uses a 16px outer radius. Press feedback is a 0.96 scale. The share action opens a focused action sheet with three explicit outputs. Brush mode replaces the dock with a compact color-and-action tool strip; its ink uses a 4.25px round stroke over a restrained 7px separation edge.
 
 ## 5. Layout
 
@@ -40,13 +40,16 @@ Depth comes from background lightness steps and restrained shadows. No blur glas
 - Do not bind product language to a network vendor.
 - Do not use pure black or pure white.
 - Keep view, image, and full-info sharing as separate choices.
+- Brush mode must fully intercept pointer input so drawing never rotates the scene.
+- Screen markup must disappear as soon as camera framing changes.
 
 ## 8. Responsive behavior
 
-Phone mesh sheets use content height up to 52dvh. Style sheets snap to 44dvh and 82dvh. Content scroll begins only at the expanded detent. Landscape and widths above 760px use a right sheet. Safe-area insets are respected.
+Phone mesh sheets use content height up to 52dvh. Style sheets snap to 44dvh and 82dvh. Content scroll begins only at the expanded detent. Landscape and widths above 760px use a right sheet. Safe-area insets are respected. Below 360px, the brush strip becomes two compact rows so every target remains at least 40px.
 
 ## 9. Agent prompt guide
 
 - "Add an icon action using a 42px hit area, 10px radius, graphite surface, and 0.96 press scale."
 - "Add a mobile sheet using 44dvh and 82dvh detents, 16px top radius, no blur, and a 48px drag header."
 - "Add a selected row using only an accent dot and surface lightness step, without a decorative side rail."
+- "Add a screen-markup action using a pointer-blocking canvas, 4.25px round ink, a 7px dark separation edge, four high-contrast colors, and a compact two-row layout below 360px."

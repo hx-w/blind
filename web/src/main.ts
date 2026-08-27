@@ -1,5 +1,6 @@
 import './styles.css';
-import { ApiError, loadScene, shareScene, type PublicScene, type ShareLinks } from './api';
+import { ApiError, loadScene, shareScene, type HostCandidate, type PublicScene, type ShareResponse } from './api';
+import { MarkupCanvas } from './markup';
 import { MeshViewer } from './viewer';
 
 const $ = <T extends HTMLElement>(selector: string): T => {
@@ -9,6 +10,7 @@ const $ = <T extends HTMLElement>(selector: string): T => {
 };
 
 const isMobileViewport = (): boolean => matchMedia('(max-width: 759px)').matches;
+const meshSheetHeight = (): number => Math.min(innerHeight * 0.52, 62 + meshViewer.modelCount * 58);
 
 const shell = $('#app-shell');
 const root = $('#canvas-root');
@@ -30,27 +32,45 @@ const axesToggle = $('#axes-toggle') as HTMLInputElement;
 const lightToggle = $('#light-toggle') as HTMLInputElement;
 const shareDialog = $('#share-sheet') as HTMLDialogElement;
 const shareOptions = $('.share-options');
+const shareTitle = $('#share-title');
+const backHost = $('#back-host') as HTMLButtonElement;
+const shareHostTrigger = $('#share-host-trigger') as HTMLButtonElement;
+const shareHostCurrent = $('#share-host-current');
+const shareHostPicker = $('#share-host-picker');
+const shareHostList = $('#share-host-list');
 const copyFull = $('#copy-full');
 const manualCopy = $('#manual-copy');
 const manualCopyValue = $('#manual-copy-value') as HTMLTextAreaElement;
 const toast = $('#toast');
+const brushToolbar = $('#brush-toolbar');
+const brushTool = $('#brush-tool') as HTMLButtonElement;
+const drawHint = $('#draw-hint');
+const undoBrush = $('#undo-brush') as HTMLButtonElement;
+const clearBrush = $('#clear-brush') as HTMLButtonElement;
 const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 
 const token = location.pathname.match(/^\/(?:s|v)\/([^/]+)$/)?.[1];
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
 let activePanel: 'meshes' | 'style' | null = null;
-let shareLinks: ShareLinks | undefined;
+let shareLinks: ShareResponse | undefined;
 let toastTimer = 0;
 let panelHeight = 0;
 let dragStart: { y: number; height: number } | null = null;
 let suppressHandleClick = false;
 let expanded = false;
 const meshViewer = new MeshViewer(root);
+const markup = new MarkupCanvas($('#markup-canvas') as HTMLCanvasElement);
 
 meshViewer.onSelectionChange = () => {
   renderMeshList(); syncStyleControls();
 };
+meshViewer.onViewChangeStart = invalidateMarkupForViewChange;
+markup.onChange = () => {
+  meshViewer.setStrokes(markup.exportStrokes());
+  syncBrushControls();
+};
+markup.onActiveChange = (active) => shell.classList.toggle('drawing-stroke', active);
 
 void start();
 
@@ -62,6 +82,7 @@ async function start(): Promise<void> {
   try {
     scene = await loadScene(token, owner);
     await meshViewer.load(scene);
+    markup.load(scene.state.strokes ?? []);
     title.textContent = scene.title;
     meta.textContent = `${scene.meshes.length} ${scene.meshes.length === 1 ? 'mesh' : 'meshes'} · ${formatBytes(scene.meshes.reduce((sum, mesh) => sum + mesh.byte_size, 0))}`;
     meshCount.textContent = String(scene.meshes.length);
@@ -89,7 +110,7 @@ function restoreOwner(sceneToken: string): string | undefined {
 }
 
 function hideViewerControls(): void {
-  document.querySelectorAll<HTMLElement>('.review-dock,.top-actions,.view-control,.gesture-hint').forEach((element) => { element.hidden = true; });
+  document.querySelectorAll<HTMLElement>('[data-viewer-chrome]').forEach((element) => { element.hidden = true; });
 }
 
 function renderMeshList(): void {
@@ -143,24 +164,23 @@ function openPanel(kind: 'meshes' | 'style'): void {
     const active = button.dataset.panel === kind; button.classList.toggle('active', active); button.setAttribute('aria-expanded', String(active));
   });
   if (isMobileViewport()) {
-    panelHeight = kind === 'meshes' ? Math.min(innerHeight * 0.52, 62 + meshViewer.modelCount * 58) : innerHeight * 0.44;
+    panelHeight = kind === 'meshes' ? meshSheetHeight() : innerHeight * 0.44;
     setPanelHeight(panelHeight);
   }
   dragZone.setAttribute('aria-label', kind === 'style' ? '展开样式面板' : '关闭 Mesh 面板');
   shell.classList.add('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'false');
-  syncStyleControls(); requestAnimationFrame(() => meshViewer.resize());
+  syncStyleControls();
 }
 
 function closePanel(): void {
   activePanel = null; shell.classList.remove('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'true');
   document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => { button.classList.remove('active'); button.setAttribute('aria-expanded', 'false'); });
-  shell.style.setProperty('--sheet-height', '0px'); requestAnimationFrame(() => meshViewer.resize());
+  shell.style.setProperty('--sheet-height', '0px');
 }
 
 function setPanelHeight(value: number): void {
   panelHeight = Math.max(0, Math.min(value, innerHeight * 0.82));
   shell.style.setProperty('--sheet-height', `${panelHeight}px`);
-  requestAnimationFrame(() => meshViewer.resize());
 }
 
 dragZone.addEventListener('pointerdown', (event) => {
@@ -176,7 +196,7 @@ dragZone.addEventListener('pointerup', (event) => {
   if (activePanel === 'style') {
     expanded = panelHeight > innerHeight * 0.62 || delta > 70;
     applyStyleDetent();
-  } else setPanelHeight(Math.min(innerHeight * 0.52, 62 + meshViewer.modelCount * 58));
+  } else setPanelHeight(meshSheetHeight());
 });
 dragZone.addEventListener('click', () => {
   if (suppressHandleClick) { suppressHandleClick = false; return; }
@@ -203,6 +223,8 @@ $('#close-panel').addEventListener('click', closePanel);
 $('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast('已适配全部可见 Mesh'); });
 opacity.addEventListener('input', () => { meshViewer.setOpacity(Number(opacity.value) / 100); opacityValue.value = `${opacity.value}%`; });
 document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.addEventListener('click', () => { meshViewer.setShading(button.dataset.shading as 'smooth' | 'flat' | 'wire'); syncStyleControls(); }));
+// Framing changes surface through meshViewer.onViewChangeStart from the viewer
+// itself, so programmatic actions clear marks the same way gestures do.
 document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.addEventListener('click', () => { meshViewer.setProjection(button.dataset.projection as 'perspective' | 'orthographic'); syncStyleControls(); }));
 axesToggle.addEventListener('change', () => meshViewer.setAxes(axesToggle.checked));
 lightToggle.addEventListener('change', () => meshViewer.setBackground(lightToggle.checked ? 'light' : 'dark'));
@@ -213,17 +235,55 @@ document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => 
 
 $('#fullscreen').addEventListener('click', async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await shell.requestFullscreen(); });
 
+brushTool.addEventListener('click', enterDrawMode);
+$('#finish-brush').addEventListener('click', exitDrawMode);
+undoBrush.addEventListener('click', () => markup.undo());
+clearBrush.addEventListener('click', () => markup.clear());
+document.querySelectorAll<HTMLButtonElement>('[data-brush-color]').forEach((button) => button.addEventListener('click', () => {
+  const color = button.dataset.brushColor!;
+  markup.setColor(color);
+  document.querySelectorAll<HTMLButtonElement>('[data-brush-color]').forEach((candidate) => {
+    const active = candidate === button;
+    candidate.classList.toggle('active', active);
+    candidate.setAttribute('aria-pressed', String(active));
+  });
+}));
+
 $('#share-view').addEventListener('click', async () => {
   if (!token) return;
   const button = $('#share-view') as HTMLButtonElement; button.disabled = true; button.classList.add('working');
   try {
-    shareLinks = await shareScene(token, meshViewer.exportUpdate(), owner);
-    copyFull.hidden = !shareLinks.full_text;
+    await refreshShareLinks();
     resetShareSheet();
     shareDialog.showModal();
   } catch (error) { showToast(error instanceof Error ? error.message : '无法创建分享链接'); }
   finally { button.disabled = false; button.classList.remove('working'); }
 });
+
+shareHostTrigger.addEventListener('click', openHostPicker);
+backHost.addEventListener('click', showShareMain);
+
+async function refreshShareLinks(origin?: string): Promise<void> {
+  if (!token) return;
+  markup.finishActive();
+  shareLinks = await shareScene(token, meshViewer.exportUpdate(), owner, origin);
+  renderShareHosts(shareLinks);
+  copyFull.hidden = !shareLinks.full_text;
+}
+
+async function selectShareHost(origin: string): Promise<void> {
+  if (!token || !shareLinks) return;
+  setShareBusy(true);
+  try {
+    await refreshShareLinks(origin);
+    showShareMain();
+    showToast('链接地址已切换');
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '无法切换链接地址');
+  } finally {
+    setShareBusy(false);
+  }
+}
 
 document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((button) => button.addEventListener('click', async () => {
   if (!shareLinks) return;
@@ -249,10 +309,46 @@ shareDialog.addEventListener('click', (event) => {
 });
 
 window.addEventListener('resize', () => {
-  if (activePanel && isMobileViewport()) openPanel(activePanel);
-  else meshViewer.resize();
+  if (!activePanel || !isMobileViewport()) return;
+  if (activePanel === 'meshes') setPanelHeight(meshSheetHeight());
+  else applyStyleDetent();
 });
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
+
+function enterDrawMode(): void {
+  if (markup.isEnabled) return;
+  closePanel();
+  viewPopover.classList.remove('open');
+  viewPopover.setAttribute('aria-hidden', 'true');
+  axisOrb.setAttribute('aria-expanded', 'false');
+  markup.setEnabled(true);
+  meshViewer.setInteractionEnabled(false);
+  shell.classList.add('draw-mode');
+  brushToolbar.hidden = false;
+  drawHint.hidden = false;
+  brushTool.setAttribute('aria-pressed', 'true');
+  syncBrushControls();
+}
+
+function exitDrawMode(): void {
+  if (!markup.isEnabled) return;
+  markup.setEnabled(false);
+  meshViewer.setInteractionEnabled(true);
+  shell.classList.remove('draw-mode', 'drawing-stroke');
+  brushToolbar.hidden = true;
+  drawHint.hidden = true;
+  brushTool.setAttribute('aria-pressed', 'false');
+}
+
+function invalidateMarkupForViewChange(): void {
+  if (!markup.hasStrokes) return;
+  markup.clear();
+  showToast('视角已改变，批注已隐藏');
+}
+
+function syncBrushControls(): void {
+  undoBrush.disabled = clearBrush.disabled = !markup.hasStrokes;
+}
 
 async function copyText(value: string): Promise<boolean> {
   if (!navigator.clipboard || !window.isSecureContext) return false;
@@ -273,9 +369,57 @@ function selectManualCopy(): void {
 }
 
 function resetShareSheet(): void {
-  shareOptions.hidden = false;
+  showShareMain();
   manualCopy.hidden = true;
   manualCopyValue.value = '';
+}
+
+function renderShareHosts(response: ShareResponse): void {
+  shareHostCurrent.textContent = response.origin;
+  shareHostList.replaceChildren(...response.hosts.map((host) => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'share-host-row';
+    row.setAttribute('role', 'radio');
+    row.setAttribute('aria-checked', String(host.origin === response.origin));
+    row.setAttribute('aria-label', `使用 ${host.origin}`);
+    row.innerHTML = `<span><small>${hostKind(host)}</small><code>${escapeHtml(host.origin)}</code></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4.2 4.2L19 6.5"/></svg>`;
+    row.addEventListener('click', () => { void selectShareHost(host.origin); });
+    return row;
+  }));
+}
+
+function hostKind(host: HostCandidate): string {
+  if (host.primary) return '首选';
+  if (host.scope === 'configured') return '已配置';
+  if (host.scope === 'current') return '当前地址';
+  if (host.scope === 'local') return '本机';
+  if (host.address.includes(':')) return host.scope === 'private' ? '私有 IPv6' : 'IPv6';
+  return host.scope === 'private' ? '私有网络' : '全局地址';
+}
+
+function setShareBusy(busy: boolean): void {
+  shareHostTrigger.disabled = busy;
+  shareOptions.querySelectorAll<HTMLButtonElement>('button[data-copy]').forEach((button) => { button.disabled = busy; });
+  shareHostList.querySelectorAll<HTMLButtonElement>('button').forEach((button) => { button.disabled = busy; });
+}
+
+function openHostPicker(): void {
+  shareOptions.hidden = true;
+  manualCopy.hidden = true;
+  shareHostPicker.hidden = false;
+  backHost.hidden = false;
+  shareHostTrigger.setAttribute('aria-expanded', 'true');
+  shareTitle.textContent = '链接地址';
+  requestAnimationFrame(() => shareHostList.querySelector<HTMLButtonElement>('[aria-checked="true"]')?.focus());
+}
+
+function showShareMain(): void {
+  shareOptions.hidden = false;
+  shareHostPicker.hidden = true;
+  backHost.hidden = true;
+  shareHostTrigger.setAttribute('aria-expanded', 'false');
+  shareTitle.textContent = '分享';
 }
 
 function showToast(message: string): void {

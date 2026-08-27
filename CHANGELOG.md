@@ -3,6 +3,24 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Added
+
+- Mobile-first screen markup with touch-locked drawing, four colors, undo,
+  clear, encrypted view-link restore, and matching PNG composition.
+
+### Changed
+
+- Screen markup disappears after camera framing changes so a 2D mark is never
+  presented as though it followed the Mesh in 3D.
+- Fast and interrupted pointer strokes retain their captured samples, and the
+  committed path keeps the same curve geometry shown while drawing.
+- Shared camera poses now preserve the rendered Arcball orientation after pan
+  and rotation, while oversized PNGs scale both dimensions together.
+- Matte Mesh lighting has stronger directional separation, restrained
+  highlights, and subtle grazing-angle definition in both WebGL and WebGPU.
+
 ## [0.2.0] - 2026-08-27
 
 ### Added

@@ -138,6 +138,10 @@ this contract instead of reimplementing scene or lifecycle logic.
 - PTS rings render as a continuous tube with a sphere at every original point.
 - Style changes color, opacity, surface mode, projection, axes, and the
   gray background theme.
+- Brush enters a touch-locked screen-markup mode with four high-contrast
+  colors, undo, and clear. Strokes can cross Meshes and empty canvas space.
+- Screen markup belongs to the captured view. Any later rotate, pan, zoom,
+  Fit, canonical-view, or projection action hides it immediately.
 - On phones, Mesh uses a compact content-height sheet. Style starts at a short
   detent and expands by tapping or dragging its handle. The 3D viewport shrinks
   above the sheet so the model remains visible.
@@ -147,7 +151,8 @@ not duplicate visibility with a Solo mode.
 
 ## Sharing
 
-The share action captures the current camera and presentation state, then
+The share action captures the current camera, presentation state, and visible
+screen markup, then
 offers three outputs:
 
 1. **View link** restores the interactive scene at the captured view.
@@ -171,6 +176,9 @@ Interactive WebGL and offscreen WebGPU use the same matte material definition,
 color-space rules, camera state, deterministic overlap bias, and light model.
 The target-specific GLSL and WGSL adapters are isolated from scene handling so
 future material definitions can be added without coupling them to the viewer.
+The browser draws screen markup in a dedicated 2D layer. The image renderer
+composites the same normalized strokes after the 3D pass, so a view link and
+its image link show the same captured marks.
 
 For PTS, Blind accepts Denta's `BEGIN`/`END`, numbered marker variants, and
 bare finite `x y z` rows. The ordered points form a closed ring;
@@ -193,8 +201,17 @@ blind init --host https://mesh.example.test
 blind share model.ply --host http://10.0.0.8:7400
 ```
 
-Browser-generated shares keep the origin used to open the current page. For
-remote mobile access, provide a trusted private network or HTTPS reverse proxy.
+Browser-generated shares initially keep the origin used to open the current
+page. The Share sheet lists every detected Host and can regenerate the view,
+image, and Complete information links with another selected origin.
+
+For CLI automation, `--host` always wins. Without it, Blind uses a configured
+origin from `blind init --host` when present; otherwise it prefers private IPv4
+addresses in `100.64.0.0/10`, LAN IPv4, private IPv6, other IPv4, then other
+IPv6. Interface name and address break ties, and loopback is last. `blind hosts`
+shows the current order and marks the default with `*`.
+
+For remote mobile access, provide a trusted private network or HTTPS reverse proxy.
 Plain HTTP may prevent browser clipboard APIs, in which case Blind uses a
 visible, preselected text field for manual copying. Blind only reports an
 automatic copy after the browser confirms the clipboard write.
@@ -228,8 +245,9 @@ npm run build --prefix web
 cargo build --locked --release
 ```
 
-The installed binary embeds `web/dist` and does not require Node.js. Before a
-pull request, run:
+The installed binary embeds the generated `web/dist` and does not require
+Node.js. The directory is intentionally excluded from version control. Before
+a pull request, run:
 
 ```sh
 cargo fmt --check

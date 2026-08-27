@@ -73,6 +73,8 @@ pub struct ShareLinks {
 struct ShareResponse {
     #[serde(flatten)]
     links: ShareLinks,
+    /// Origin used to compose the links, echoed for the share-sheet host picker.
+    origin: String,
     hosts: Vec<HostCandidate>,
 }
 
@@ -80,6 +82,13 @@ struct ShareResponse {
 struct CreateSceneRequest {
     paths: Vec<String>,
     title: Option<String>,
+    origin: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReshareRequest {
+    #[serde(flatten)]
+    update: SceneUpdate,
     origin: Option<String>,
 }
 
@@ -388,7 +397,14 @@ async fn create_scene(
         state.config.port()?,
         state.config.preferred_origin.as_deref(),
     )?;
-    Ok((no_store(), Json(ShareResponse { links, hosts })))
+    Ok((
+        no_store(),
+        Json(ShareResponse {
+            links,
+            hosts,
+            origin,
+        }),
+    ))
 }
 
 async fn get_scene(
@@ -469,18 +485,24 @@ async fn reshare(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
-    Json(update): Json<SceneUpdate>,
+    Json(request): Json<ReshareRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let opened = resolved_scene(&state, &token, peer.ip()).await?;
     let owner = owner_matches(&headers, &state, &opened);
     let mut scene = opened.scene;
     scene
-        .apply_update(update)
+        .apply_update(request.update)
         .map_err(|error| AppError::bad_request(&error.to_string()))?;
-    let origin = request_origin(&headers, &state.config)?;
+    let current_origin = request_origin(&headers, &state.config)?;
+    let hosts = share_hosts(&state.config, &current_origin)?;
+    let origin = select_share_origin(request.origin, &current_origin, &hosts)?;
     Ok((
         no_store(),
-        Json(links_for(&state.registry, &scene, &origin, owner)?),
+        Json(ShareResponse {
+            links: links_for(&state.registry, &scene, &origin, owner)?,
+            origin,
+            hosts,
+        }),
     ))
 }
 
@@ -630,6 +652,40 @@ fn request_origin(headers: &HeaderMap, config: &Config) -> Result<String, AppErr
         .first()
         .map(|host| host.origin.clone())
         .ok_or_else(|| AppError::internal("No host address available"))
+}
+
+fn share_hosts(config: &Config, current_origin: &str) -> Result<Vec<HostCandidate>, AppError> {
+    let mut hosts = discover(config.port()?, config.preferred_origin.as_deref())?;
+    if !hosts.iter().any(|host| host.origin == current_origin) {
+        hosts.insert(
+            0,
+            HostCandidate {
+                origin: current_origin.to_string(),
+                address: current_origin.to_string(),
+                scope: "current",
+                interface: "request".into(),
+                primary: false,
+            },
+        );
+    }
+    Ok(hosts)
+}
+
+fn select_share_origin(
+    requested: Option<String>,
+    current_origin: &str,
+    hosts: &[HostCandidate],
+) -> Result<String, AppError> {
+    let Some(requested) = requested else {
+        return Ok(current_origin.to_string());
+    };
+    let requested = normalize_origin(&requested)?;
+    // `share_hosts` always inserts the current origin, so membership is the
+    // only check needed.
+    if hosts.iter().any(|host| host.origin == requested) {
+        return Ok(requested);
+    }
+    Err(AppError::bad_request("Selected Host is not available"))
 }
 
 async fn shutdown(mut requested: tokio::sync::mpsc::Receiver<()>) {
@@ -836,5 +892,42 @@ impl From<SceneGone> for AppError {
 impl From<axum::http::Error> for AppError {
     fn from(error: axum::http::Error) -> Self {
         Self::internal(&error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn host(origin: &str) -> HostCandidate {
+        HostCandidate {
+            origin: origin.into(),
+            address: origin.into(),
+            scope: "private",
+            interface: "test".into(),
+            primary: false,
+        }
+    }
+
+    #[test]
+    fn share_origin_must_be_current_or_discovered() {
+        let hosts = vec![host("http://100.100.100.100:7400")];
+        assert_eq!(
+            select_share_origin(
+                Some("http://100.100.100.100:7400".into()),
+                "http://192.168.1.2:7400",
+                &hosts,
+            )
+            .unwrap(),
+            "http://100.100.100.100:7400"
+        );
+        assert!(
+            select_share_origin(
+                Some("http://example.com:7400".into()),
+                "http://192.168.1.2:7400",
+                &hosts,
+            )
+            .is_err()
+        );
     }
 }

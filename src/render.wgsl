@@ -7,6 +7,7 @@ struct Camera {
   camera_up: vec4<f32>,
   finish: vec4<f32>,
   tone: vec4<f32>,
+  surface: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -50,8 +51,13 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @l
   let hemisphere = dot(normal, normalize(camera.camera_up.xyz)) * 0.5 + 0.5;
   let view_direction = normalize(camera.camera_position.xyz - input.world_position);
   let facing = clamp((dot(normal, view_direction) + camera.finish.y) / (1.0 + camera.finish.y), 0.0, 1.0);
+  let half_direction = normalize(normalize(camera.key_direction.xyz) + view_direction);
+  let specular = pow(max(dot(normal, half_direction), 0.0), camera.surface.w) * camera.surface.z;
+  let rim = pow(1.0 - clamp(dot(normal, view_direction), 0.0, 1.0), camera.surface.y) * camera.surface.x;
   var light = camera.lighting.x + key * camera.lighting.y + fill * camera.lighting.z
     + hemisphere * camera.lighting.w + facing * camera.finish.x;
   light = clamp((light - camera.tone.x) * camera.finish.z + camera.tone.x, camera.tone.y, camera.tone.z);
-  return vec4<f32>(input.color.rgb * light, input.color.a);
+  var shaded = input.color.rgb * light + vec3<f32>(specular);
+  shaded *= 1.0 - rim;
+  return vec4<f32>(shaded, input.color.a);
 }

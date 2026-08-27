@@ -32,7 +32,6 @@ jobs:
         run: |
           npm ci --prefix web
           npm run build --prefix web
-          git diff --exit-code -- web/dist
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Build binary

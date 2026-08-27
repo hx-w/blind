@@ -12,6 +12,12 @@ export interface CameraState {
   orthographic_height: number;
 }
 
+export interface ScreenStroke {
+  color: string;
+  aspect: number;
+  points: Array<[number, number]>;
+}
+
 export interface ViewState {
   selected: number;
   shading: Shading;
@@ -20,6 +26,7 @@ export interface ViewState {
   axes: boolean;
   frame: { width: number; height: number };
   camera: CameraState | null;
+  strokes: ScreenStroke[];
 }
 
 export interface PublicMesh {
@@ -47,6 +54,20 @@ export interface ShareLinks {
   full_text?: string;
 }
 
+export interface HostCandidate {
+  origin: string;
+  address: string;
+  scope: 'configured' | 'current' | 'private' | 'global' | 'local';
+  interface: string;
+  primary: boolean;
+}
+
+export interface ShareResponse extends ShareLinks {
+  /** Origin used to compose the links. */
+  origin: string;
+  hosts: HostCandidate[];
+}
+
 export interface SceneUpdate {
   meshes: Array<{ color: string; opacity: number; visible: boolean }>;
   state: ViewState;
@@ -66,15 +87,15 @@ export async function loadScene(token: string, owner?: string): Promise<PublicSc
   return response.json() as Promise<PublicScene>;
 }
 
-export async function shareScene(token: string, update: SceneUpdate, owner?: string): Promise<ShareLinks> {
+export async function shareScene(token: string, update: SceneUpdate, owner?: string, origin?: string): Promise<ShareResponse> {
   const response = await fetch(`/api/v1/scenes/${token}/share`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers(owner) },
-    body: JSON.stringify(update),
+    body: JSON.stringify({ ...update, ...(origin ? { origin } : {}) }),
     cache: 'no-store',
   });
   if (!response.ok) throw await apiError(response);
-  return response.json() as Promise<ShareLinks>;
+  return response.json() as Promise<ShareResponse>;
 }
 
 export async function apiError(response: Response): Promise<ApiError> {

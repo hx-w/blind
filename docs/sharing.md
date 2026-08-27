@@ -21,6 +21,9 @@ The encrypted descriptor contains:
 - Camera position, target, up vector, field of view, zoom, projection, and orthographic height.
 - Captured frame dimensions.
 - Surface mode, axes, and gray background mode.
+- Screen strokes as a color, capture aspect ratio, and bounded normalized
+  points. A scene permits 64 strokes, 512 points per stroke, and 4,096 points
+  in total.
 
 The registry payload never contains a PAT or Mesh bytes. XChaCha20-Poly1305 encrypts and authenticates the compressed descriptor before SQLite receives it.
 
@@ -33,6 +36,11 @@ An independent six-character owner secret is placed in the URL fragment of `owne
 ## Exact restore
 
 New scenes run Fit against the joint bounds of all visible Meshes after the viewport is ready. Camera pose and styling in a captured scene restore exactly and do not run Fit again. The captured vertical framing remains stable across aspect ratios, while a different device may reveal more or less content horizontally.
+
+Screen markup is tied to that exact camera framing rather than Mesh geometry.
+It can cross empty space and remaps across viewport aspect ratios. The first
+rotate, pan, zoom, Fit, canonical-view, or projection action hides all marks in
+that browser session; reloading the immutable link restores the snapshot.
 
 ## Lifecycle
 
@@ -56,7 +64,9 @@ The image route:
    generated tube-and-sphere triangle representation in both render paths.
 3. Rebuilds the camera, shared matte material, colors, deterministic overlap bias, and axes.
 4. Renders with the host graphics adapter into an offscreen texture.
-5. Encodes PNG in memory and releases request resources.
+5. Composites the captured screen strokes with anti-aliased round joins and
+   the same display widths used by the browser.
+6. Encodes PNG in memory and releases request resources.
 
 The response uses `Cache-Control: no-store, max-age=0`. Blind writes no rendered image to disk and bounds concurrent renders with a semaphore. Interactive WebGL and offscreen WebGPU consume the same material parameters and lighting formula, with target-specific shader adapters. Visible sources for one image request are limited to 512 MiB and 2,000,000 triangles. These limits apply only to the server-side PNG renderer; the interactive browser viewer remains independent.
 

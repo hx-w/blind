@@ -11,6 +11,9 @@ use tokio::io::AsyncReadExt;
 pub const PALETTE: [&str; 6] = [
     "#8fa9c9", "#8ca49c", "#b2a4ad", "#bf8078", "#8f8bb2", "#b7b3aa",
 ];
+pub const MAX_SCREEN_STROKES: usize = 64;
+pub const MAX_SCREEN_STROKE_POINTS: usize = 512;
+pub const MAX_SCREEN_POINTS: usize = 4_096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneDescriptor {
@@ -51,6 +54,15 @@ pub struct ViewState {
     pub axes: bool,
     pub frame: Frame,
     pub camera: Option<CameraState>,
+    #[serde(default)]
+    pub strokes: Vec<ScreenStroke>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenStroke {
+    pub color: String,
+    pub aspect: f32,
+    pub points: Vec<[f32; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +129,7 @@ impl Default for ViewState {
                 height: 900,
             },
             camera: None,
+            strokes: Vec::new(),
         }
     }
 }
@@ -164,7 +177,7 @@ impl SceneDescriptor {
             }
         });
         Ok(Self {
-            schema: 1,
+            schema: 2,
             title,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -221,6 +234,8 @@ impl SceneDescriptor {
             camera.zoom = camera.zoom.clamp(0.01, 100.0);
             camera.orthographic_height = camera.orthographic_height.clamp(0.0001, 1_000_000.0);
         }
+        validate_screen_strokes(&state.strokes)?;
+        self.schema = self.schema.max(2);
         self.state = state;
         Ok(())
     }
@@ -234,6 +249,39 @@ impl SceneDescriptor {
             .join("\n");
         format!("Blind scene\n\nMeshes:\n{paths}\n\nView:\n{viewer_url}\n\nImage:\n{image_url}")
     }
+}
+
+fn validate_screen_strokes(strokes: &[ScreenStroke]) -> Result<()> {
+    if strokes.len() > MAX_SCREEN_STROKES {
+        bail!("a scene can contain at most {MAX_SCREEN_STROKES} screen strokes");
+    }
+    let mut total_points = 0_usize;
+    for stroke in strokes {
+        if !is_hex_color(&stroke.color) {
+            bail!("invalid screen stroke color");
+        }
+        if !stroke.aspect.is_finite() || !(0.1..=10.0).contains(&stroke.aspect) {
+            bail!("invalid screen stroke aspect ratio");
+        }
+        if !(2..=MAX_SCREEN_STROKE_POINTS).contains(&stroke.points.len()) {
+            bail!("a screen stroke must contain between 2 and {MAX_SCREEN_STROKE_POINTS} points");
+        }
+        total_points = total_points
+            .checked_add(stroke.points.len())
+            .context("screen stroke point count overflow")?;
+        if total_points > MAX_SCREEN_POINTS {
+            bail!("a scene can contain at most {MAX_SCREEN_POINTS} screen stroke points");
+        }
+        if stroke
+            .points
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+        {
+            bail!("screen stroke points must be finite normalized coordinates");
+        }
+    }
+    Ok(())
 }
 
 impl MeshFormat {
@@ -333,6 +381,70 @@ mod tests {
             error
                 .to_string()
                 .contains("supported PLY, STL, OBJ, or PTS")
+        );
+    }
+
+    #[test]
+    fn legacy_view_state_defaults_to_no_screen_strokes() {
+        let value = serde_json::json!({
+            "selected": 0,
+            "shading": "smooth",
+            "projection": "perspective",
+            "background": "dark",
+            "axes": true,
+            "frame": { "width": 1200, "height": 900 },
+            "camera": null
+        });
+        let state: ViewState = serde_json::from_value(value).unwrap();
+        assert!(state.strokes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn screen_stroke_payloads_are_bounded_and_validated() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mesh.ply");
+        std::fs::write(&path, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
+        let mut state = scene.state.clone();
+        state.strokes.push(ScreenStroke {
+            color: "#ff6b5e".into(),
+            aspect: 1.0,
+            points: vec![[0.1, 0.2], [0.4, 0.6]],
+        });
+        scene
+            .apply_update(SceneUpdate {
+                meshes: scene
+                    .meshes
+                    .iter()
+                    .map(|mesh| MeshStyleUpdate {
+                        color: mesh.color.clone(),
+                        opacity: mesh.opacity,
+                        visible: mesh.visible,
+                    })
+                    .collect(),
+                state,
+            })
+            .unwrap();
+        assert_eq!(scene.schema, 2);
+        assert_eq!(scene.state.strokes.len(), 1);
+
+        let mut invalid = scene.state.clone();
+        invalid.strokes[0].points[0][0] = f32::NAN;
+        assert!(
+            scene
+                .apply_update(SceneUpdate {
+                    meshes: scene
+                        .meshes
+                        .iter()
+                        .map(|mesh| MeshStyleUpdate {
+                            color: mesh.color.clone(),
+                            opacity: mesh.opacity,
+                            visible: mesh.visible,
+                        })
+                        .collect(),
+                    state: invalid,
+                })
+                .is_err()
         );
     }
 }

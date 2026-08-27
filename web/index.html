@@ -15,7 +15,7 @@
           <h1 id="scene-title">Blind</h1>
           <p id="scene-meta">正在读取场景</p>
         </div>
-        <div class="top-actions">
+        <div class="top-actions" data-viewer-chrome>
           <button class="icon-button share-button" id="share-view" type="button" aria-label="分享当前场景">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 8l4-4 4 4"/><path d="M5 12v7h14v-7"/></svg>
           </button>
@@ -27,7 +27,8 @@
 
       <main id="viewer" class="viewer" tabindex="-1">
         <div id="canvas-root" class="canvas-root" aria-label="可交互 3D Mesh 视图"></div>
-        <div class="view-control">
+        <canvas id="markup-canvas" class="markup-canvas" aria-label="屏幕批注画布" aria-hidden="true"></canvas>
+        <div class="view-control" data-viewer-chrome>
           <button class="axis-orb" id="axis-orb" type="button" aria-label="打开标准视角" aria-expanded="false">
             <span class="axis-y">Y</span><span class="axis-x">X</span><span class="axis-z">Z</span><span class="axis-center"></span>
           </button>
@@ -36,7 +37,8 @@
             <button data-view="nx" type="button">左</button><button data-view="nz" type="button">后</button><button data-view="ny" type="button">下</button>
           </div>
         </div>
-        <div class="gesture-hint" id="gesture-hint" role="status"><span>单指旋转</span><i></i><span>双指移动</span><i></i><span>捏合缩放</span></div>
+        <div class="gesture-hint" id="gesture-hint" role="status" data-viewer-chrome><span>单指旋转</span><i></i><span>双指移动</span><i></i><span>捏合缩放</span></div>
+        <div class="draw-hint" id="draw-hint" role="status" hidden data-viewer-chrome><span></span>单指绘制，完成后可旋转</div>
         <div class="loading-state" id="loading-state"><span></span><p>正在读取 Mesh</p></div>
         <div class="invalid-state" id="invalid-state" hidden>
           <span class="invalid-code">410</span><h2>场景已失效</h2><p>一个或多个源 Mesh 已被删除、修改或无法读取。</p>
@@ -47,7 +49,7 @@
         <div class="toast" id="toast" role="status" aria-live="polite"></div>
       </main>
 
-      <nav class="review-dock" aria-label="查看工具">
+      <nav class="review-dock" aria-label="查看工具" data-viewer-chrome>
         <button class="dock-tool" id="fit-view" type="button" aria-label="适配全部可见 Mesh">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/><circle cx="12" cy="12" r="2.5"/></svg><span>Fit</span>
         </button>
@@ -57,7 +59,25 @@
         <button class="dock-tool panel-trigger" data-panel="style" type="button" aria-label="打开样式设置" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>样式</span>
         </button>
+        <button class="dock-tool" id="brush-tool" type="button" aria-label="进入画笔模式" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5 4 4L9 19l-5 1 1-5 9.5-9.5Z"/><path d="m12.5 7.5 4 4"/></svg><span>画笔</span>
+        </button>
       </nav>
+
+      <div class="brush-toolbar" id="brush-toolbar" role="toolbar" aria-label="画笔工具" hidden data-viewer-chrome>
+        <div class="brush-colors" aria-label="画笔颜色">
+          <button class="brush-color active" data-brush-color="#ff6b5e" type="button" aria-label="珊瑚红" aria-pressed="true"><i></i></button>
+          <button class="brush-color" data-brush-color="#ffc857" type="button" aria-label="琥珀黄" aria-pressed="false"><i></i></button>
+          <button class="brush-color" data-brush-color="#5fb4ff" type="button" aria-label="标记蓝" aria-pressed="false"><i></i></button>
+          <button class="brush-color" data-brush-color="#f4f2ea" type="button" aria-label="柔白" aria-pressed="false"><i></i></button>
+        </div>
+        <span class="brush-divider" aria-hidden="true"></span>
+        <div class="brush-actions">
+          <button id="undo-brush" type="button" aria-label="撤销上一笔" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 8-4 4 4 4"/><path d="M5 12h8a5 5 0 0 1 5 5"/></svg></button>
+          <button id="clear-brush" type="button" aria-label="清除全部批注" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M8 10v8M12 10v8M16 10v8M6 7l1 14h10l1-14"/></svg></button>
+          <button class="finish-brush" id="finish-brush" type="button">完成</button>
+        </div>
+      </div>
 
       <aside class="control-panel" id="control-panel" aria-hidden="true">
         <div class="panel-drag-zone" id="panel-drag-zone" role="button" tabindex="0" aria-label="调整面板高度"><div class="panel-handle" aria-hidden="true"></div></div>
@@ -86,11 +106,23 @@
 
     <dialog class="share-sheet" id="share-sheet">
       <div class="share-grabber"></div>
-      <div class="share-heading"><h2>分享</h2><button id="close-share" type="button" aria-label="关闭分享"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+      <div class="share-heading">
+        <button class="share-back" id="back-host" type="button" aria-label="返回分享" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg></button>
+        <h2 id="share-title">分享</h2>
+        <button id="close-share" type="button" aria-label="关闭分享"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+      </div>
       <div class="share-options">
+        <button class="share-host-trigger" id="share-host-trigger" type="button" aria-haspopup="true" aria-expanded="false">
+          <span><small>链接地址</small><strong id="share-host-current"></strong></span>
+          <svg class="share-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
         <button data-copy="view" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/></svg></span><span><strong>视角链接</strong><small>交互场景与当前视角</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
         <button data-copy="image" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m6 17 4-4 3 3 2-2 3 3"/></svg></span><span><strong>图片链接</strong><small>即时渲染 PNG</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
         <button data-copy="full" id="copy-full" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M8 4h8l3 3v13H8z"/><path d="M16 4v4h4M11 12h5M11 16h5"/></svg></span><span><strong>完整信息</strong><small>Mesh 路径与两个链接</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+      </div>
+      <div class="share-host-picker" id="share-host-picker" hidden>
+        <p>选择复制内容使用的地址</p>
+        <div class="share-host-list" id="share-host-list" role="radiogroup" aria-label="分享链接地址"></div>
       </div>
       <div class="manual-copy" id="manual-copy" hidden>
         <p><strong>需要手动复制</strong><span>当前连接不允许浏览器自动写入剪贴板。内容已全选，请长按并选择“复制”。</span></p>

@@ -4,7 +4,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { apiError } from './api';
-import type { PublicMesh, PublicScene, SceneUpdate, ViewState } from './api';
+import type { PublicMesh, PublicScene, SceneUpdate, ScreenStroke, ViewState } from './api';
 import { createMatteMaterial, updateMatteMaterial } from './material';
 import shader from '../../shaders/matte.json';
 
@@ -39,6 +39,7 @@ export class MeshViewer {
   private pointerStart: { x: number; y: number } | null = null;
   private lastTap = { index: -1, time: 0 };
   onSelectionChange?: (index: number) => void;
+  onViewChangeStart?: () => void;
 
   constructor(private readonly root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -62,6 +63,7 @@ export class MeshViewer {
     this.resizeObserver.observe(root);
     this.renderer.domElement.addEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
+    this.controls.addEventListener('start', () => this.onViewChangeStart?.());
     this.controls.addEventListener('change', () => { this.updateClipping(); this.dirty = true; });
     this.animate();
   }
@@ -69,6 +71,7 @@ export class MeshViewer {
   async load(scene: PublicScene): Promise<void> {
     this.disposeModels();
     this.state = structuredClone(scene.state);
+    this.state.strokes ??= [];
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
     const objects = await Promise.all(scene.meshes.map(loadObject));
     objects.forEach((object, index) => {
@@ -109,6 +112,10 @@ export class MeshViewer {
   get modelInfos(): PublicMesh[] { return this.models.map((model) => model.info); }
   get currentState(): ViewState { return this.exportState(); }
 
+  setInteractionEnabled(enabled: boolean): void { this.controls.enabled = enabled; }
+  // Takes ownership of the array handed over by MarkupCanvas.exportStrokes().
+  setStrokes(strokes: ScreenStroke[]): void { this.state.strokes = strokes; }
+
   select(index: number): void {
     if (!this.models[index]) return;
     this.selected = index;
@@ -142,6 +149,7 @@ export class MeshViewer {
 
   setProjection(projection: ViewState['projection']): void {
     if (projection === this.state.projection) return;
+    this.onViewChangeStart?.();
     const position = this.camera.position.clone();
     const target = this.controls.target.clone();
     if (projection === 'orthographic') {
@@ -179,6 +187,7 @@ export class MeshViewer {
       pz: new THREE.Vector3(0, 0, 1), nz: new THREE.Vector3(0, 0, -1),
     };
     const direction = directions[code]; if (!direction) return;
+    this.onViewChangeStart?.();
     this.camera.position.copy(center).addScaledVector(direction, distance);
     this.camera.up.set(0, 1, 0);
     if (Math.abs(direction.y) > 0.9) this.camera.up.set(0, 0, direction.y > 0 ? -1 : 1);
@@ -233,21 +242,36 @@ export class MeshViewer {
   }
 
   private exportState(): ViewState {
+    const cameraPose = this.captureCameraPose();
     return {
       selected: this.selected, shading: this.state.shading, projection: this.state.projection,
       background: this.state.background, axes: this.axes.visible,
       frame: { width: Math.round(this.root.clientWidth), height: Math.round(this.root.clientHeight) },
       camera: {
-        position: this.camera.position.toArray() as [number, number, number],
-        target: this.controls.target.toArray() as [number, number, number],
-        up: this.camera.up.toArray() as [number, number, number],
+        position: cameraPose.position.toArray() as [number, number, number],
+        target: cameraPose.target.toArray() as [number, number, number],
+        up: cameraPose.up.toArray() as [number, number, number],
         fov: this.perspective.fov, zoom: this.orthographic.zoom,
         orthographic_height: this.orthographic.userData.height ?? 2,
       },
+      strokes: this.state.strokes,
     };
   }
 
+  private captureCameraPose(): { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 } {
+    const position = this.camera.position.clone();
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion).normalize();
+    const center = this.visibleBounds.getCenter(new THREE.Vector3());
+    const centerDepth = center.sub(position).dot(forward);
+    const fallbackDepth = Math.max(position.distanceTo(this.controls.target), 0.001);
+    const target = position.clone().addScaledVector(forward, centerDepth > 0.001 ? centerDepth : fallbackDepth);
+    return { position, target, up };
+  }
+
   private fitBox(box: THREE.Box3, animate: boolean): void {
+    // Every fit flows through here, including double-tap-to-focus.
+    this.onViewChangeStart?.();
     const center = box.getCenter(new THREE.Vector3()); const size = box.getSize(new THREE.Vector3()); const radius = size.length() * 0.5;
     const verticalFov = THREE.MathUtils.degToRad(this.perspective.fov);
     const aspect = Math.max(this.root.clientWidth / Math.max(this.root.clientHeight, 1), 0.1);

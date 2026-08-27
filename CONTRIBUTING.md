@@ -14,9 +14,9 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 ```
 
-`web/dist` is committed because the Rust binary embeds it. Rebuild the viewer
-and include the generated changes whenever `web/src` or `web/index.html`
-changes.
+`web/dist` is generated and intentionally ignored. Build it before invoking
+Cargo because the Rust binary embeds the generated viewer. Do not include
+generated assets in pull requests.
 
 Keep changes small, add tests for behavior contracts, and update the README or
 sharing contract when user-visible behavior changes. Never commit a PAT,

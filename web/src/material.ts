@@ -24,6 +24,7 @@ const fragmentShader = `
   uniform vec4 lighting;
   uniform vec3 finish;
   uniform vec4 tone;
+  uniform vec4 surface;
   varying vec3 viewNormal;
   varying vec3 viewPosition;
 
@@ -41,10 +42,15 @@ const fragmentShader = `
     float hemisphere = normal.y * 0.5 + 0.5;
     vec3 viewDirection = normalize(-viewPosition);
     float facing = wrappedDiffuse(dot(normal, viewDirection), finish.y);
+    vec3 halfDirection = normalize(normalize(keyDirection) + viewDirection);
+    float specular = pow(max(dot(normal, halfDirection), 0.0), surface.w) * surface.z;
+    float rim = pow(1.0 - clamp(dot(normal, viewDirection), 0.0, 1.0), surface.y) * surface.x;
     float light = lighting.x + key * lighting.y + fill * lighting.z
       + hemisphere * lighting.w + facing * finish.x;
     light = clamp((light - tone.x) * finish.z + tone.x, tone.y, tone.z);
-    gl_FragColor = vec4(baseColor * light, opacity);
+    vec3 shaded = baseColor * light + vec3(specular);
+    shaded *= 1.0 - rim;
+    gl_FragColor = vec4(shaded, opacity);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
@@ -71,6 +77,7 @@ export function createMatteMaterial(style: MeshMaterialStyle): THREE.ShaderMater
       lighting: { value: new THREE.Vector4(shader.ambient, shader.key, shader.fill, shader.hemisphere) },
       finish: { value: new THREE.Vector3(shader.view, shader.wrap, shader.contrast) },
       tone: { value: new THREE.Vector4(shader.contrast_pivot, shader.light_min, shader.light_max, shader.translucent_threshold) },
+      surface: { value: new THREE.Vector4(shader.rim, shader.rim_power, shader.specular, shader.shininess) },
       depthBias: { value: style.layer * shader.depth_bias_step },
     },
     side: isTranslucent(style.opacity) ? THREE.FrontSide : THREE.DoubleSide,

@@ -5,11 +5,12 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use image::{ImageFormat, RgbaImage};
 use serde::Deserialize;
+use tiny_skia::{LineCap, LineJoin, Paint, PathBuilder, PixmapMut, Stroke, Transform};
 use wgpu::util::DeviceExt;
 
 use crate::{
     mesh::Geometry,
-    scene::{Background, Projection, SceneDescriptor, Shading, parse_hex_color},
+    scene::{Background, Projection, SceneDescriptor, ScreenStroke, Shading, parse_hex_color},
 };
 
 const MAX_RENDER_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -37,6 +38,7 @@ struct Uniform {
     camera_up: [f32; 4],
     finish: [f32; 4],
     tone: [f32; 4],
+    surface: [f32; 4],
 }
 
 #[derive(Clone, Deserialize)]
@@ -50,6 +52,10 @@ struct MatteShader {
     view: f32,
     wrap: f32,
     contrast: f32,
+    rim: f32,
+    rim_power: f32,
+    specular: f32,
+    shininess: f32,
     depth_bias_step: f32,
     translucent_threshold: f32,
     contrast_pivot: f32,
@@ -70,6 +76,15 @@ struct CameraSpec {
     far_multiple: f32,
 }
 
+/// Appearance of screen strokes, shared with the browser markup layer.
+#[derive(Clone, Deserialize)]
+struct ScreenInk {
+    ink_width: f32,
+    outline_width: f32,
+    outline_color: [u8; 3],
+    outline_alpha: f32,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -78,6 +93,7 @@ pub struct Renderer {
     translucent_triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     material: MatteShader,
+    ink: ScreenInk,
 }
 
 impl Renderer {
@@ -105,6 +121,8 @@ impl Renderer {
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let material: MatteShader = serde_json::from_str(include_str!("../shaders/matte.json"))
             .context("invalid shared matte shader definition")?;
+        let ink: ScreenInk = serde_json::from_str(include_str!("../shaders/stroke.json"))
+            .context("invalid shared screen stroke definition")?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Blind shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("render.wgsl"))),
@@ -162,6 +180,7 @@ impl Renderer {
             translucent_triangle_pipeline,
             line_pipeline,
             material,
+            ink,
         })
     }
 
@@ -174,8 +193,7 @@ impl Renderer {
     }
 
     async fn render_geometry(&self, input: &RenderInput) -> Result<Vec<u8>> {
-        let width = input.width.clamp(240, 2048);
-        let height = input.height.clamp(240, 2048);
+        let (width, height) = render_dimensions(input.width, input.height);
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let color_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Blind render target"),
@@ -257,6 +275,12 @@ impl Renderer {
                 self.material.light_min,
                 self.material.light_max,
                 self.material.translucent_threshold,
+            ],
+            surface: [
+                self.material.rim,
+                self.material.rim_power,
+                self.material.specular,
+                self.material.shininess,
             ],
         };
         let uniform_buffer = self
@@ -388,7 +412,15 @@ impl Renderer {
         }
         drop(mapped);
         output_buffer.unmap();
-        let image = RgbaImage::from_raw(width, height, pixels).context("invalid render buffer")?;
+        let mut image =
+            RgbaImage::from_raw(width, height, pixels).context("invalid render buffer")?;
+        overlay_screen_strokes(
+            &mut image,
+            &input.strokes,
+            &self.ink,
+            input.width,
+            input.height,
+        )?;
         let mut encoded = Cursor::new(Vec::new());
         image.write_to(&mut encoded, ImageFormat::Png)?;
         Ok(encoded.into_inner())
@@ -406,6 +438,7 @@ struct RenderInput {
     key_direction: Vec3,
     fill_direction: Vec3,
     background: wgpu::Color,
+    strokes: Vec<ScreenStroke>,
 }
 
 struct MeshBatch {
@@ -585,7 +618,105 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         key_direction: camera_direction(material.key_direction),
         fill_direction: camera_direction(material.fill_direction),
         background,
+        strokes: scene.state.strokes.clone(),
     })
+}
+
+fn overlay_screen_strokes(
+    image: &mut RgbaImage,
+    strokes: &[ScreenStroke],
+    ink: &ScreenInk,
+    source_width: u32,
+    source_height: u32,
+) -> Result<()> {
+    if strokes.is_empty() {
+        return Ok(());
+    }
+    let width = image.width();
+    let height = image.height();
+    let frame_aspect = source_width as f32 / source_height.max(1) as f32;
+    let scale = (width as f32 / source_width.max(1) as f32)
+        .min(height as f32 / source_height.max(1) as f32);
+    let mut pixmap = PixmapMut::from_bytes(image.as_mut(), width, height)
+        .context("invalid screen stroke target")?;
+
+    let stroke_style = |width: f32| Stroke {
+        width,
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Default::default()
+    };
+    let outline = stroke_style(ink.outline_width * scale);
+    let core = stroke_style(ink.ink_width * scale);
+    let mut outline_paint = Paint::default();
+    outline_paint.set_color_rgba8(
+        ink.outline_color[0],
+        ink.outline_color[1],
+        ink.outline_color[2],
+        (ink.outline_alpha * 255.0).round() as u8,
+    );
+    outline_paint.anti_alias = true;
+
+    for stroke in strokes {
+        let mut builder = PathBuilder::new();
+        let display_points = stroke
+            .points
+            .iter()
+            .map(|point| {
+                let ndc_x = point[0] * 2.0 - 1.0;
+                let x = ((ndc_x * stroke.aspect / frame_aspect + 1.0) * 0.5) * width as f32;
+                let y = point[1] * height as f32;
+                [x, y]
+            })
+            .collect::<Vec<_>>();
+        let Some(first) = display_points.first() else {
+            continue;
+        };
+        builder.move_to(first[0], first[1]);
+        for points in display_points[1..].windows(2) {
+            let point = points[0];
+            let next = points[1];
+            builder.quad_to(
+                point[0],
+                point[1],
+                (point[0] + next[0]) * 0.5,
+                (point[1] + next[1]) * 0.5,
+            );
+        }
+        if let Some(last) = display_points.last() {
+            builder.line_to(last[0], last[1]);
+        }
+        let Some(path) = builder.finish() else {
+            continue;
+        };
+
+        pixmap.stroke_path(&path, &outline_paint, &outline, Transform::identity(), None);
+
+        let [red, green, blue] = parse_hex_color(&stroke.color)
+            .context("invalid screen stroke color during rendering")?;
+        let mut core_paint = Paint::default();
+        core_paint.set_color_rgba8(
+            (red * 255.0).round() as u8,
+            (green * 255.0).round() as u8,
+            (blue * 255.0).round() as u8,
+            255,
+        );
+        core_paint.anti_alias = true;
+        pixmap.stroke_path(&path, &core_paint, &core, Transform::identity(), None);
+    }
+    Ok(())
+}
+
+fn render_dimensions(width: u32, height: u32) -> (u32, u32) {
+    let longest = width.max(height);
+    if longest <= 2048 {
+        return (width, height);
+    }
+    let scale = 2048.0 / longest as f64;
+    (
+        (width as f64 * scale).round().max(1.0) as u32,
+        (height as f64 * scale).round().max(1.0) as u32,
+    )
 }
 
 fn create_pipeline(
@@ -667,4 +798,41 @@ fn srgb_to_linear(value: f64) -> f64 {
 
 fn align_to(value: u32, alignment: u32) -> u32 {
     value.div_ceil(alignment) * alignment
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::Rgba;
+
+    #[test]
+    fn oversized_render_dimensions_keep_the_scene_aspect_ratio() {
+        assert_eq!(render_dimensions(4096, 2160), (2048, 1080));
+        assert_eq!(render_dimensions(1200, 900), (1200, 900));
+    }
+
+    #[test]
+    fn screen_strokes_are_composited_over_the_rendered_pixels() {
+        let background = Rgba([41, 44, 50, 255]);
+        let mut image = RgbaImage::from_pixel(100, 100, background);
+        overlay_screen_strokes(
+            &mut image,
+            &[ScreenStroke {
+                color: "#ff6b5e".into(),
+                aspect: 1.0,
+                points: vec![[0.2, 0.5], [0.8, 0.5]],
+            }],
+            &ScreenInk {
+                ink_width: 4.25,
+                outline_width: 7.0,
+                outline_color: [13, 16, 20],
+                outline_alpha: 0.46,
+            },
+            100,
+            100,
+        )
+        .unwrap();
+        assert_ne!(*image.get_pixel(50, 50), background);
+        assert_eq!(*image.get_pixel(2, 2), background);
+    }
 }
