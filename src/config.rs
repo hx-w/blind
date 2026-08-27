@@ -115,6 +115,13 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(dirs.config_dir().join("config.json"))
 }
 
+pub fn registry_path() -> Result<PathBuf> {
+    Ok(config_path()?
+        .parent()
+        .context("config path has no parent")?
+        .join("scenes.sqlite3"))
+}
+
 pub fn normalize_origin(value: &str) -> Result<String> {
     let value = value.trim_end_matches('/');
     let url = url::Url::parse(value).context("host URL must include http:// or https://")?;

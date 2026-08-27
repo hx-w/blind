@@ -9,8 +9,9 @@ Instant mobile 3D review for Meshes on your Mac.
 
 Blind is one CLI binary that serves local PLY, STL, and OBJ files through a
 mobile-first 3D viewer. It discovers usable Host addresses, preserves camera
-and style state inside encrypted links, and can render the same scene directly
-as a PNG. There is no Mesh copy, scene database, or render cache.
+and style state behind six-character links, and can render the same scene
+directly as a PNG. There is no Mesh copy or render cache; a bounded local
+SQLite registry stores only encrypted scene descriptors.
 
 ## Why Blind
 
@@ -66,6 +67,9 @@ blind serve
 # Create one scene from one or more local Meshes.
 blind share crown.ply preparation.stl --format json
 
+# Optional: emit a long self-contained link without using the registry.
+blind share crown.ply --stateless --format view
+
 # Stop a manually started server.
 blind stop
 ```
@@ -96,9 +100,9 @@ The JSON result contains:
 
 ```json
 {
-  "viewer_url": "http://host:7400/v/...",
-  "image_url": "http://host:7400/i/....png",
-  "owner_url": "http://host:7400/v/...#owner=...",
+  "viewer_url": "http://host:7400/s/aB3_xZ",
+  "image_url": "http://host:7400/i/aB3_xZ.png",
+  "owner_url": "http://host:7400/s/aB3_xZ#owner=q7_Kp2",
   "hosts": [],
   "resources": [
     {
@@ -122,13 +126,13 @@ this contract instead of reimplementing scene or lifecycle logic.
 
 ## Viewer interaction
 
-- One finger or primary drag rotates.
+- One finger or primary drag uses a full arcball rotation without polar limits.
 - Two fingers pinch to zoom and move together to pan.
 - Fit frames all visible Meshes.
 - The axis control selects canonical front, back, left, right, top, or bottom
   views.
 - Mesh opens the object list with selection and visibility controls.
-- Style changes color, opacity, surface mode, projection, grid, axes, and the
+- Style changes color, opacity, surface mode, projection, axes, and the
   gray background theme.
 - On phones, Mesh uses a compact content-height sheet. Style starts at a short
   detent and expands by tapping or dragging its handle. The 3D viewport shrinks
@@ -148,10 +152,21 @@ offers three outputs:
    available only from `owner_url`.
 
 The scene descriptor is compressed, encrypted, and authenticated with
-XChaCha20-Poly1305. It contains no PAT and no Mesh bytes. Every route verifies
-the SHA-256 revision of every source before responding. Restarting the server
-keeps links valid because the scene key persists; `blind key rotate`
+XChaCha20-Poly1305, then stored in a local bounded registry. The default link
+has an absolute seven-day lifetime. Blind reuses the code for an identical
+active scene, permits at most 10,000 active scenes, and caps retained rows at
+12,000 so SQLite cannot grow without bound. It contains no PAT and no Mesh
+bytes. Every route verifies the SHA-256 revision of every source before
+responding. Restarting the server keeps links valid; `blind key rotate`
 intentionally invalidates all existing links.
+
+`blind share --stateless` is the explicit exception: it emits a long encrypted
+`/v/` URL and writes no registry row.
+
+Interactive WebGL and offscreen WebGPU use the same matte material definition,
+color-space rules, camera state, deterministic overlap bias, and light model.
+The target-specific GLSL and WGSL adapters are isolated from scene handling so
+future material definitions can be added without coupling them to the viewer.
 
 See [the sharing contract](docs/sharing.md) for the exact capability and
 lifecycle semantics.
@@ -224,7 +239,8 @@ cargo test --locked
 | `GET /api/v1/scenes/:token` | Scene capability | Read validated public state |
 | `GET /api/v1/scenes/:token/meshes/:index` | Scene capability | Stream a validated Mesh |
 | `POST /api/v1/scenes/:token/share` | Scene capability | Capture camera and style state |
-| `GET /v/:token` | Scene capability | Open the viewer |
+| `GET /s/:code` | Short scene capability | Open the default viewer link |
+| `GET /v/:token` | Stateless scene capability | Open an explicit long link |
 | `GET /i/:token.png` | Scene capability | Render a fresh PNG |
 
 ## License

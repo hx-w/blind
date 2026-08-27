@@ -111,7 +111,7 @@ impl Default for ViewState {
             shading: Shading::Smooth,
             projection: Projection::Perspective,
             background: Background::Dark,
-            grid: true,
+            grid: false,
             axes: true,
             frame: Frame {
                 width: 1200,

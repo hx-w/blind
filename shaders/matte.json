@@ -1,0 +1,12 @@
+{
+  "key_direction": [0.42, 0.58, 0.7],
+  "fill_direction": [-0.68, 0.18, 0.54],
+  "ambient": 0.3,
+  "key": 0.28,
+  "fill": 0.17,
+  "hemisphere": 0.08,
+  "view": 0.22,
+  "wrap": 0.55,
+  "contrast": 1.08,
+  "depth_bias_step": 0.000001
+}

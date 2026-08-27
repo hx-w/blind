@@ -26,7 +26,6 @@ const meshList = $('#mesh-list');
 const meshCount = $('#mesh-count');
 const opacity = $('#opacity-range') as HTMLInputElement;
 const opacityValue = $('#opacity-value') as HTMLOutputElement;
-const gridToggle = $('#grid-toggle') as HTMLInputElement;
 const axesToggle = $('#axes-toggle') as HTMLInputElement;
 const lightToggle = $('#light-toggle') as HTMLInputElement;
 const shareDialog = $('#share-sheet') as HTMLDialogElement;
@@ -37,7 +36,7 @@ const manualCopyValue = $('#manual-copy-value') as HTMLTextAreaElement;
 const toast = $('#toast');
 const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 
-const token = location.pathname.match(/^\/v\/([^/]+)$/)?.[1];
+const token = location.pathname.match(/^\/(?:s|v)\/([^/]+)$/)?.[1];
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
 let activePanel: 'meshes' | 'style' | null = null;
@@ -127,7 +126,7 @@ function syncStyleControls(): void {
   const state = meshViewer.currentState;
   document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.classList.toggle('active', button.dataset.shading === state.shading));
   document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.classList.toggle('active', button.dataset.projection === state.projection));
-  gridToggle.checked = state.grid; axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
+  axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
 }
 
 document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => button.addEventListener('click', () => {
@@ -205,7 +204,6 @@ $('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast(
 opacity.addEventListener('input', () => { meshViewer.setOpacity(Number(opacity.value) / 100); opacityValue.value = `${opacity.value}%`; });
 document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.addEventListener('click', () => { meshViewer.setShading(button.dataset.shading as 'smooth' | 'flat' | 'wire'); syncStyleControls(); }));
 document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.addEventListener('click', () => { meshViewer.setProjection(button.dataset.projection as 'perspective' | 'orthographic'); syncStyleControls(); }));
-gridToggle.addEventListener('change', () => meshViewer.setGrid(gridToggle.checked));
 axesToggle.addEventListener('change', () => meshViewer.setAxes(axesToggle.checked));
 lightToggle.addEventListener('change', () => meshViewer.setBackground(lightToggle.checked ? 'light' : 'dark'));
 

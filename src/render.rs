@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use image::{ImageFormat, RgbaImage};
+use serde::Deserialize;
 use wgpu::util::DeviceExt;
 
 use crate::{
@@ -13,6 +14,8 @@ use crate::{
 
 const MAX_RENDER_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RENDER_TRIANGLES: usize = 2_000_000;
+const SAMPLE_COUNT: u32 = 4;
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -20,21 +23,43 @@ struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
     color: [f32; 4],
+    depth_bias: f32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniform {
     view_projection: [[f32; 4]; 4],
-    light_direction: [f32; 4],
+    key_direction: [f32; 4],
+    fill_direction: [f32; 4],
+    lighting: [f32; 4],
+    camera_position: [f32; 4],
+    camera_up: [f32; 4],
+    finish: [f32; 4],
+}
+
+#[derive(Clone, Deserialize)]
+struct MatteShader {
+    key_direction: [f32; 3],
+    fill_direction: [f32; 3],
+    ambient: f32,
+    key: f32,
+    fill: f32,
+    hemisphere: f32,
+    view: f32,
+    wrap: f32,
+    contrast: f32,
+    depth_bias_step: f32,
 }
 
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     camera_layout: wgpu::BindGroupLayout,
-    triangle_pipeline: wgpu::RenderPipeline,
+    opaque_triangle_pipeline: wgpu::RenderPipeline,
+    translucent_triangle_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    material: MatteShader,
 }
 
 impl Renderer {
@@ -60,6 +85,8 @@ impl Renderer {
             )
             .await?;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let material: MatteShader = serde_json::from_str(include_str!("../shaders/matte.json"))
+            .context("invalid shared matte shader definition")?;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Blind shader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(include_str!("render.wgsl"))),
@@ -82,12 +109,23 @@ impl Renderer {
             bind_group_layouts: &[&camera_layout],
             push_constant_ranges: &[],
         });
-        let triangle_pipeline = create_pipeline(
+        let opaque_triangle_pipeline = create_pipeline(
             &device,
             &pipeline_layout,
             &shader,
             format,
             wgpu::PrimitiveTopology::TriangleList,
+            None,
+            true,
+        );
+        let translucent_triangle_pipeline = create_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            wgpu::PrimitiveTopology::TriangleList,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
         );
         let line_pipeline = create_pipeline(
             &device,
@@ -95,19 +133,25 @@ impl Renderer {
             &shader,
             format,
             wgpu::PrimitiveTopology::LineList,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            true,
         );
         Ok(Self {
             device,
             queue,
             camera_layout,
-            triangle_pipeline,
+            opaque_triangle_pipeline,
+            translucent_triangle_pipeline,
             line_pipeline,
+            material,
         })
     }
 
     pub async fn render(&self, scene: &SceneDescriptor) -> Result<Vec<u8>> {
         let scene = scene.clone();
-        let geometry = tokio::task::spawn_blocking(move || load_scene_geometry(&scene)).await??;
+        let material = self.material.clone();
+        let geometry =
+            tokio::task::spawn_blocking(move || load_scene_geometry(&scene, &material)).await??;
         self.render_geometry(&geometry).await
     }
 
@@ -129,6 +173,20 @@ impl Renderer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
+        let msaa_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Blind multisample target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
         let depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Blind depth"),
             size: wgpu::Extent3d {
@@ -137,15 +195,45 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
-            sample_count: 1,
+            sample_count: SAMPLE_COUNT,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth24Plus,
+            format: DEPTH_FORMAT,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
         let uniform = Uniform {
             view_projection: input.view_projection.to_cols_array_2d(),
-            light_direction: [0.45, 0.75, 0.55, 0.0],
+            key_direction: [
+                input.key_direction.x,
+                input.key_direction.y,
+                input.key_direction.z,
+                0.0,
+            ],
+            fill_direction: [
+                input.fill_direction.x,
+                input.fill_direction.y,
+                input.fill_direction.z,
+                0.0,
+            ],
+            lighting: [
+                self.material.ambient,
+                self.material.key,
+                self.material.fill,
+                self.material.hemisphere,
+            ],
+            camera_position: [
+                input.camera_position.x,
+                input.camera_position.y,
+                input.camera_position.z,
+                0.0,
+            ],
+            camera_up: [input.camera_up.x, input.camera_up.y, input.camera_up.z, 0.0],
+            finish: [
+                self.material.view,
+                self.material.wrap,
+                self.material.contrast,
+                0.0,
+            ],
         };
         let uniform_buffer = self
             .device
@@ -162,14 +250,18 @@ impl Renderer {
                 resource: uniform_buffer.as_entire_binding(),
             }],
         });
-        let triangle_buffer = (!input.mesh_vertices.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Mesh vertices"),
-                    contents: bytemuck::cast_slice(&input.mesh_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
+        let mesh_buffers: Vec<_> = input
+            .mesh_batches
+            .iter()
+            .map(|batch| {
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Mesh vertices"),
+                        contents: bytemuck::cast_slice(&batch.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            })
+            .collect();
         let line_buffer = (!input.line_vertices.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -188,6 +280,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         let color_view = color_texture.create_view(&Default::default());
+        let msaa_view = msaa_texture.create_view(&Default::default());
         let depth_view = depth_texture.create_view(&Default::default());
         let mut encoder = self
             .device
@@ -198,8 +291,8 @@ impl Renderer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Blind render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    resolve_target: None,
+                    view: &msaa_view,
+                    resolve_target: Some(&color_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(input.background),
                         store: wgpu::StoreOp::Store,
@@ -217,10 +310,14 @@ impl Renderer {
                 occlusion_query_set: None,
             });
             pass.set_bind_group(0, &bind_group, &[]);
-            if let Some(buffer) = &triangle_buffer {
-                pass.set_pipeline(&self.triangle_pipeline);
+            for (batch, buffer) in input.mesh_batches.iter().zip(&mesh_buffers) {
+                pass.set_pipeline(if batch.translucent {
+                    &self.translucent_triangle_pipeline
+                } else {
+                    &self.opaque_triangle_pipeline
+                });
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..input.mesh_vertices.len() as u32, 0..1);
+                pass.draw(0..batch.vertices.len() as u32, 0..1);
             }
             if let Some(buffer) = &line_buffer {
                 pass.set_pipeline(&self.line_pipeline);
@@ -275,16 +372,31 @@ impl Renderer {
 }
 
 struct RenderInput {
-    mesh_vertices: Vec<Vertex>,
+    mesh_batches: Vec<MeshBatch>,
     line_vertices: Vec<Vertex>,
     width: u32,
     height: u32,
     view_projection: Mat4,
+    camera_position: Vec3,
+    camera_up: Vec3,
+    key_direction: Vec3,
+    fill_direction: Vec3,
     background: wgpu::Color,
 }
 
-fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
-    let visible: Vec<_> = scene.meshes.iter().filter(|mesh| mesh.visible).collect();
+struct MeshBatch {
+    vertices: Vec<Vertex>,
+    translucent: bool,
+    center: Vec3,
+}
+
+fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Result<RenderInput> {
+    let visible: Vec<_> = scene
+        .meshes
+        .iter()
+        .enumerate()
+        .filter(|(_, mesh)| mesh.visible)
+        .collect();
     if visible.is_empty() {
         bail!("scene has no visible Meshes");
     }
@@ -293,7 +405,7 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
     let mut triangles = 0_usize;
     let mut bounds_min = Vec3::splat(f32::INFINITY);
     let mut bounds_max = Vec3::splat(f32::NEG_INFINITY);
-    for mesh in visible {
+    for (layer, mesh) in visible {
         source_bytes = source_bytes
             .checked_add(mesh.byte_size)
             .context("render source size overflow")?;
@@ -310,15 +422,18 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
         let (min, max) = geometry.bounds();
         bounds_min = bounds_min.min(Vec3::from_array(min));
         bounds_max = bounds_max.max(Vec3::from_array(max));
-        loaded.push((mesh, geometry));
+        loaded.push((layer, mesh, geometry));
     }
-    let mut mesh_vertices = Vec::new();
+    let mut mesh_batches = Vec::new();
     let mut line_vertices = Vec::new();
     let wire = scene.state.shading == Shading::Wire;
     let flat = scene.state.shading == Shading::Flat;
-    for (mesh, geometry) in loaded {
+    for (layer, mesh, geometry) in loaded {
         let color = parse_color(&mesh.color, mesh.opacity)?;
+        let depth_bias = layer as f32 * material.depth_bias_step;
         let normals = (!flat).then(|| geometry.smooth_normals());
+        let mut vertices = Vec::with_capacity(geometry.indices.len());
+        let (mesh_min, mesh_max) = geometry.bounds();
         for triangle in geometry.indices.chunks_exact(3) {
             let face_normal = if flat {
                 let a = Vec3::from_array(geometry.positions[triangle[0] as usize]);
@@ -335,6 +450,7 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
                     None => face_normal,
                 },
                 color,
+                depth_bias,
             };
             if wire {
                 line_vertices.extend([
@@ -346,17 +462,16 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
                     make(triangle[0]),
                 ]);
             } else {
-                mesh_vertices.extend([make(triangle[0]), make(triangle[1]), make(triangle[2])]);
+                vertices.extend([make(triangle[0]), make(triangle[1]), make(triangle[2])]);
             }
         }
-    }
-    if scene.state.grid {
-        append_grid(
-            &mut line_vertices,
-            bounds_min,
-            bounds_max,
-            scene.state.background == Background::Light,
-        );
+        if !vertices.is_empty() {
+            mesh_batches.push(MeshBatch {
+                vertices,
+                translucent: mesh.opacity < 0.999,
+                center: (Vec3::from_array(mesh_min) + Vec3::from_array(mesh_max)) * 0.5,
+            });
+        }
     }
     if scene.state.axes {
         append_axes(&mut line_vertices, bounds_min, bounds_max);
@@ -366,9 +481,13 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
     let center = (bounds_min + bounds_max) * 0.5;
     let diagonal = (bounds_max - bounds_min).length().max(0.001);
     let camera = scene.state.camera.as_ref();
+    let default_fov = 34.0_f32.to_radians();
+    let horizontal_fov = 2.0 * ((default_fov * 0.5).tan() * aspect).atan();
+    let fit_fov = default_fov.min(horizontal_fov);
+    let default_distance = diagonal * 0.5 / (fit_fov * 0.5).sin() * 1.15;
     let position = camera
         .map(|value| Vec3::from_array(value.position))
-        .unwrap_or(center + Vec3::new(diagonal * 1.15, diagonal * 0.85, diagonal * 1.45));
+        .unwrap_or(center + Vec3::new(1.0, 0.7, 1.0).normalize() * default_distance);
     let target = camera
         .map(|value| Vec3::from_array(value.target))
         .unwrap_or(center);
@@ -376,12 +495,33 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
         .map(|value| Vec3::from_array(value.up))
         .unwrap_or(Vec3::Y);
     let view = Mat4::look_at_rh(position, target, up);
+    let forward = (target - position).normalize_or_zero();
+    let camera_right = forward.cross(up).normalize_or_zero();
+    let camera_up = camera_right.cross(forward).normalize_or_zero();
+    let camera_back = -forward;
+    let camera_direction = |value: [f32; 3]| {
+        (camera_right * value[0] + camera_up * value[1] + camera_back * value[2])
+            .normalize_or_zero()
+    };
+    mesh_batches.sort_by(|left, right| match (left.translucent, right.translucent) {
+        (false, true) => std::cmp::Ordering::Less,
+        (true, false) => std::cmp::Ordering::Greater,
+        (true, true) => right
+            .center
+            .distance_squared(position)
+            .total_cmp(&left.center.distance_squared(position)),
+        (false, false) => std::cmp::Ordering::Equal,
+    });
+    let radius = diagonal * 0.5;
+    let camera_distance = position.distance(center);
+    let near = (radius * 0.0001).max(camera_distance - radius * 4.0);
+    let far = (near * 100.0).max(camera_distance + radius * 4.0);
     let projection = match scene.state.projection {
         Projection::Perspective => Mat4::perspective_rh(
             camera.map(|value| value.fov).unwrap_or(34.0).to_radians(),
             aspect,
-            diagonal * 0.001,
-            diagonal * 100.0,
+            near,
+            far,
         ),
         Projection::Orthographic => {
             let height = camera
@@ -392,31 +532,35 @@ fn load_scene_geometry(scene: &SceneDescriptor) -> Result<RenderInput> {
                 height * aspect / 2.0,
                 -height / 2.0,
                 height / 2.0,
-                diagonal * 0.001,
-                diagonal * 100.0,
+                near,
+                far,
             )
         }
     };
     let background = match scene.state.background {
         Background::Dark => wgpu::Color {
-            r: 0.033,
-            g: 0.038,
-            b: 0.047,
+            r: srgb_to_linear(0x29 as f64 / 255.0),
+            g: srgb_to_linear(0x2c as f64 / 255.0),
+            b: srgb_to_linear(0x32 as f64 / 255.0),
             a: 1.0,
         },
         Background::Light => wgpu::Color {
-            r: 0.84,
-            g: 0.86,
-            b: 0.89,
+            r: srgb_to_linear(0xe7 as f64 / 255.0),
+            g: srgb_to_linear(0xe9 as f64 / 255.0),
+            b: srgb_to_linear(0xec as f64 / 255.0),
             a: 1.0,
         },
     };
     Ok(RenderInput {
-        mesh_vertices,
+        mesh_batches,
         line_vertices,
         width: frame.width,
         height: frame.height,
         view_projection: projection * view,
+        camera_position: position,
+        camera_up,
+        key_direction: camera_direction(material.key_direction),
+        fill_direction: camera_direction(material.fill_direction),
         background,
     })
 }
@@ -427,59 +571,26 @@ fn create_pipeline(
     shader: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
     topology: wgpu::PrimitiveTopology,
+    blend: Option<wgpu::BlendState>,
+    depth_write_enabled: bool,
 ) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("Blind pipeline"), layout: Some(layout),
         vertex: wgpu::VertexState { module: shader, entry_point: "vs_main", compilation_options: Default::default(), buffers: &[wgpu::VertexBufferLayout {
             array_stride: mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32],
         }] },
         fragment: Some(wgpu::FragmentState { module: shader, entry_point: "fs_main", compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState {
-            format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL,
+            format, blend, write_mask: wgpu::ColorWrites::ALL,
         })] }),
         primitive: wgpu::PrimitiveState { topology, cull_mode: None, ..Default::default() },
-        depth_stencil: Some(wgpu::DepthStencilState { format: wgpu::TextureFormat::Depth24Plus, depth_write_enabled: true, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
-        multisample: Default::default(), multiview: None,
+        depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
+        multisample: wgpu::MultisampleState { count: SAMPLE_COUNT, ..Default::default() }, multiview: None,
     })
 }
 
-fn append_grid(vertices: &mut Vec<Vertex>, min: Vec3, max: Vec3, light: bool) {
-    let size = (max - min).length().max(1.0) * 1.5;
-    let center = (min + max) * 0.5;
-    let y = min.y - size * 0.03;
-    let color = if light {
-        [0.22, 0.25, 0.29, 0.22]
-    } else {
-        [0.55, 0.60, 0.66, 0.18]
-    };
-    let normal = [0.0, 1.0, 0.0];
-    for step in -10..=10 {
-        let offset = step as f32 / 10.0 * size;
-        vertices.push(Vertex {
-            position: [center.x - size, y, center.z + offset],
-            normal,
-            color,
-        });
-        vertices.push(Vertex {
-            position: [center.x + size, y, center.z + offset],
-            normal,
-            color,
-        });
-        vertices.push(Vertex {
-            position: [center.x + offset, y, center.z - size],
-            normal,
-            color,
-        });
-        vertices.push(Vertex {
-            position: [center.x + offset, y, center.z + size],
-            normal,
-            color,
-        });
-    }
-}
-
 fn append_axes(vertices: &mut Vec<Vertex>, min: Vec3, max: Vec3) {
-    let length = (max - min).length().max(1.0) * 0.25;
+    let length = (max - min).length().max(1.0) * 0.09;
     let origin = Vec3::new(min.x, min.y, min.z);
     let normal = [0.0, 1.0, 0.0];
     for (direction, color) in [
@@ -491,18 +602,33 @@ fn append_axes(vertices: &mut Vec<Vertex>, min: Vec3, max: Vec3) {
             position: origin.to_array(),
             normal,
             color,
+            depth_bias: 0.0,
         });
         vertices.push(Vertex {
             position: (origin + direction * length).to_array(),
             normal,
             color,
+            depth_bias: 0.0,
         });
     }
 }
 
 fn parse_color(value: &str, alpha: f32) -> Result<[f32; 4]> {
     let [r, g, b] = parse_hex_color(value).context("invalid color")?;
-    Ok([r, g, b, alpha])
+    Ok([
+        srgb_to_linear(r as f64) as f32,
+        srgb_to_linear(g as f64) as f32,
+        srgb_to_linear(b as f64) as f32,
+        alpha,
+    ])
+}
+
+fn srgb_to_linear(value: f64) -> f64 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn align_to(value: u32, alignment: u32) -> u32 {

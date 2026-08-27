@@ -1,6 +1,7 @@
 mod config;
 mod mesh;
 mod network;
+mod registry;
 mod render;
 mod scene;
 mod server;
@@ -13,9 +14,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use config::{Config, config_path, normalize_origin};
 use network::discover;
+use registry::Registry;
 use scene::SceneDescriptor;
 use serde::Serialize;
-use server::{ControlHealth, ShareLinks, links_for};
+use server::{ControlHealth, ShareLinks, links_for, stateless_links_for};
 use token::TokenCodec;
 
 #[derive(Parser)]
@@ -23,7 +25,7 @@ use token::TokenCodec;
     name = "blind",
     version,
     about = "Serve local PLY, STL, and OBJ Meshes for instant 3D review",
-    long_about = "Blind runs one local Mesh-review server and creates stateless review links.\n\nAgent workflow:\n  1. Start once:  blind serve\n  2. Share Meshes: blind share crown.ply prep.stl --format json\n  3. Use owner_url to review and public viewer_url/image_url to share.\n  4. Stop manually: blind stop\n\nRunning `blind serve` again is safe. It exits successfully when a Blind server is already running. Source files remain on the host; deleting or changing any source invalidates both the viewer and image links. Host addresses are discovered automatically, and `--host` selects a specific origin when needed.",
+    long_about = "Blind runs one local Mesh-review server and creates short-lived review links.\n\nAgent workflow:\n  1. Start once:  blind serve\n  2. Share Meshes: blind share crown.ply prep.stl --format json\n  3. Use owner_url to review and public viewer_url/image_url to share.\n  4. Stop manually: blind stop\n\nRunning `blind serve` again is safe. It exits successfully when a Blind server is already running. Source files remain on the host; deleting or changing any source invalidates both the viewer and image links. Host addresses are discovered automatically, and `--host` selects a specific origin when needed.",
     after_help = "Examples:\n  blind serve\n  blind share upper.ply lower.ply --format json\n  blind share model.obj --format view\n  blind hosts\n  blind status\n  blind stop"
 )]
 struct Cli {
@@ -60,8 +62,8 @@ enum Command {
     )]
     Stop,
     #[command(
-        about = "Create stateless viewer and image links for one or more Meshes",
-        long_about = "Create one scene from local PLY, STL, or OBJ files. Blind stores no Mesh copy and no scene record. The encrypted links carry camera and style state while the source paths stay on this host. Any source deletion or content change makes the entire scene return HTTP 410.\n\nUse `--format json` for agents. It includes viewer_url, image_url, owner_url, every detected Host candidate, canonical source paths, and SHA-256 revisions. Use owner_url for your own review because it enables the Complete information share option without exposing that permission in public links."
+        about = "Create short viewer and image links for one or more Meshes",
+        long_about = "Create one scene from local PLY, STL, or OBJ files. By default Blind stores only an encrypted scene record in its bounded local registry and returns a six-character /s/ link valid for seven days. It never copies or caches Meshes or rendered images. Use `--stateless` only when a long self-contained link is preferred. Any source deletion or content change makes the entire scene return HTTP 410.\n\nUse `--format json` for agents. It includes viewer_url, image_url, owner_url, every detected Host candidate, canonical source paths, and SHA-256 revisions. Use owner_url for your own review because it enables the Complete information share option without exposing that permission in public links."
     )]
     Share {
         #[arg(
@@ -76,6 +78,11 @@ enum Command {
             help = "Use this HTTP(S) origin instead of the primary discovered Host"
         )]
         host: Option<String>,
+        #[arg(
+            long,
+            help = "Create a long self-contained link without writing the scene registry"
+        )]
+        stateless: bool,
         #[arg(
             long,
             value_enum,
@@ -194,8 +201,9 @@ async fn main() -> Result<()> {
             meshes,
             title,
             host,
+            stateless,
             format,
-        } => share(meshes, title, host, format).await?,
+        } => share(meshes, title, host, stateless, format).await?,
         Command::Hosts { json } => hosts(json)?,
         Command::Status { json } => status(json).await?,
         Command::Doctor => doctor().await?,
@@ -203,6 +211,12 @@ async fn main() -> Result<()> {
             command: KeyCommand::Rotate,
         } => {
             let (mut config, _) = Config::load_or_create()?;
+            if server::probe(&config).await?.is_some() {
+                anyhow::bail!(
+                    "Blind server is running; stop it before `blind key rotate` so the server and registry cannot use different keys"
+                );
+            }
+            Registry::open(&config)?.clear()?;
             config.rotate_key()?;
             println!("Rotated the scene key. Existing links are now invalid.");
         }
@@ -254,6 +268,7 @@ async fn share(
     meshes: Vec<PathBuf>,
     title: Option<String>,
     host: Option<String>,
+    stateless: bool,
     format: OutputFormat,
 ) -> Result<()> {
     let (config, _) = Config::load_or_create()?;
@@ -270,12 +285,16 @@ async fn share(
             .origin
             .clone(),
     };
-    let links = links_for(
-        &TokenCodec::new(config.secret_bytes()?),
-        &scene,
-        &origin,
-        true,
-    )?;
+    let links = if stateless {
+        stateless_links_for(
+            &TokenCodec::new(config.secret_bytes()?),
+            &scene,
+            &origin,
+            true,
+        )?
+    } else {
+        links_for(&Registry::open(&config)?, &scene, &origin, true)?
+    };
     match format {
         OutputFormat::View => println!("{}", links.viewer_url),
         OutputFormat::Image => println!("{}", links.image_url),
@@ -343,6 +362,12 @@ async fn doctor() -> Result<()> {
     println!("ok  listen  {}", config.listen);
     let hosts = discover(config.port()?, config.preferred_origin.as_deref())?;
     println!("ok  hosts   {} detected", hosts.len());
+    let registry = Registry::open(&config)?;
+    let (active, total) = registry.stats()?;
+    println!(
+        "ok  scenes  {active} active, {total} rows at {}",
+        registry.path().display()
+    );
     render::Renderer::new()
         .await
         .context("image renderer is unavailable")?;

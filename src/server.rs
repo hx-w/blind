@@ -1,13 +1,14 @@
 use std::{
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use axum::{
     Json, Router,
     body::Body,
-    extract::{FromRequestParts, Path as AxumPath, State},
+    extract::{ConnectInfo, FromRequestParts, Path as AxumPath, State},
     http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header, request::Parts},
     response::IntoResponse,
     routing::{get, post},
@@ -26,6 +27,7 @@ use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 use crate::{
     config::{Config, normalize_origin},
     network::{HostCandidate, discover},
+    registry::{RegisteredScene, Registry, RegistryLookupError, is_short_secret},
     render::Renderer,
     scene::{SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
     token::{Scope, TokenCodec},
@@ -39,9 +41,21 @@ struct WebAssets;
 pub struct AppState {
     pub config: Arc<Config>,
     pub codec: TokenCodec,
+    pub registry: Arc<Registry>,
     pub renderer: Option<Arc<Renderer>>,
     pub image_slots: Arc<tokio::sync::Semaphore>,
     pub shutdown: tokio::sync::mpsc::Sender<()>,
+    short_misses: Arc<Mutex<MissLimiter>>,
+}
+
+#[derive(Default)]
+struct MissLimiter {
+    clients: HashMap<IpAddr, MissWindow>,
+}
+
+struct MissWindow {
+    started: Instant,
+    misses: u16,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +119,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let address: SocketAddr = config.listen.parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     let codec = TokenCodec::new(config.secret_bytes()?);
+    let registry = Arc::new(Registry::open(&config)?);
     let renderer = match Renderer::new().await {
         Ok(renderer) => Some(Arc::new(renderer)),
         Err(error) => {
@@ -116,9 +131,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let state = AppState {
         config: Arc::new(config),
         codec,
+        registry,
         renderer,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         shutdown: shutdown_tx,
+        short_misses: Arc::new(Mutex::new(MissLimiter::default())),
     };
     let app = Router::new()
         .route("/api/v1/health", get(health))
@@ -130,6 +147,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/v1/scenes/{token}/meshes/{index}", get(get_mesh))
         .route("/api/v1/scenes/{token}/share", post(reshare))
         .route("/i/{*token}", get(render_image))
+        .route("/s/{token}", get(view_scene))
         .route("/v/{token}", get(view_scene))
         .route("/", get(index))
         .fallback(asset)
@@ -151,9 +169,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     tracing::info!(%address, "Blind is ready");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown(shutdown_rx))
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown(shutdown_rx))
+    .await?;
     Ok(())
 }
 
@@ -246,7 +267,7 @@ fn control_address(config: &Config) -> anyhow::Result<SocketAddr> {
     Ok(SocketAddr::new(ip, configured.port()))
 }
 
-pub fn links_for(
+pub fn stateless_links_for(
     codec: &TokenCodec,
     scene: &SceneDescriptor,
     origin: &str,
@@ -261,6 +282,26 @@ pub fn links_for(
     } else {
         None
     };
+    let full_text = include_owner.then(|| scene.full_text(&viewer_url, &image_url));
+    Ok(ShareLinks {
+        viewer_url,
+        image_url,
+        owner_url,
+        full_text,
+    })
+}
+
+pub fn links_for(
+    registry: &Registry,
+    scene: &SceneDescriptor,
+    origin: &str,
+    include_owner: bool,
+) -> anyhow::Result<ShareLinks> {
+    let registration = registry.register(scene)?;
+    let viewer_url = format!("{origin}/s/{}", registration.code);
+    let image_url = format!("{origin}/i/{}.png", registration.code);
+    let owner_url =
+        include_owner.then(|| format!("{viewer_url}#owner={}", registration.owner_secret));
     let full_text = include_owner.then(|| scene.full_text(&viewer_url, &image_url));
     Ok(ShareLinks {
         viewer_url,
@@ -328,7 +369,7 @@ async fn create_scene(
         Some(origin) => normalize_origin(&origin)?,
         None => request_origin(&headers, &state.config)?,
     };
-    let links = links_for(&state.codec, &scene, &origin, true)?;
+    let links = links_for(&state.registry, &scene, &origin, true)?;
     let hosts = discover(
         state.config.port()?,
         state.config.preferred_origin.as_deref(),
@@ -338,11 +379,13 @@ async fn create_scene(
 
 async fn get_scene(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    let scene = resolved_scene(&state, &token).await?;
-    let owner = owner_matches(&headers, &state.codec, &scene);
+    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let owner = owner_matches(&headers, &state, &opened);
+    let scene = opened.scene;
     let meshes = scene
         .meshes
         .iter()
@@ -371,15 +414,24 @@ async fn get_scene(
 
 async fn get_mesh(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
-    let scene = open_scene(&state, &token)?;
+    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let scene = opened.scene;
     let mesh = scene
         .meshes
         .get(index)
         .ok_or_else(|| AppError::not_found("Mesh not found"))?;
-    let bytes = tokio::fs::read(&mesh.path).await.map_err(|_| SceneGone)?;
+    let bytes = match tokio::fs::read(&mesh.path).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            mark_scene_gone(&state, &token);
+            return Err(SceneGone.into());
+        }
+    };
     if hash_bytes(&bytes) != mesh.revision {
+        mark_scene_gone(&state, &token);
         return Err(SceneGone.into());
     }
     Ok(Response::builder()
@@ -391,24 +443,27 @@ async fn get_mesh(
 
 async fn reshare(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
     Json(update): Json<SceneUpdate>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut scene = resolved_scene(&state, &token).await?;
-    let owner = owner_matches(&headers, &state.codec, &scene);
+    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let owner = owner_matches(&headers, &state, &opened);
+    let mut scene = opened.scene;
     scene
         .apply_update(update)
         .map_err(|error| AppError::bad_request(&error.to_string()))?;
     let origin = request_origin(&headers, &state.config)?;
     Ok((
         no_store(),
-        Json(links_for(&state.codec, &scene, &origin, owner)?),
+        Json(links_for(&state.registry, &scene, &origin, owner)?),
     ))
 }
 
 async fn render_image(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
 ) -> Result<Response<Body>, AppError> {
     let _permit = state
@@ -416,8 +471,12 @@ async fn render_image(
         .try_acquire()
         .map_err(|_| AppError::too_many_requests("Image renderer is busy"))?;
     let token = token.strip_suffix(".png").unwrap_or(&token);
-    let scene = open_scene(&state, token)?;
-    scene.verify_source_lengths().await?;
+    let opened = open_scene(&state, token, peer.ip())?;
+    let scene = opened.scene;
+    if scene.verify_source_lengths().await.is_err() {
+        mark_scene_gone(&state, token);
+        return Err(SceneGone.into());
+    }
     let renderer = state
         .renderer
         .as_ref()
@@ -426,7 +485,10 @@ async fn render_image(
         tracing::warn!(%error, "image render failed");
         AppError::unprocessable("Image render failed")
     })?;
-    scene.validate().await?;
+    if scene.validate().await.is_err() {
+        mark_scene_gone(&state, token);
+        return Err(SceneGone.into());
+    }
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
@@ -451,9 +513,10 @@ async fn index() -> Result<Response<Body>, AppError> {
 
 async fn view_scene(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
 ) -> Result<Response<Body>, AppError> {
-    resolved_scene(&state, &token).await?;
+    resolved_scene(&state, &token, peer.ip()).await?;
     serve_index()
 }
 
@@ -492,14 +555,17 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .strip_prefix("Bearer ")
 }
 
-fn owner_matches(headers: &HeaderMap, codec: &TokenCodec, scene: &SceneDescriptor) -> bool {
+fn owner_matches(headers: &HeaderMap, state: &AppState, opened: &OpenedScene) -> bool {
     let Some(token) = bearer(headers) else {
         return false;
     };
-    let Ok(owner) = codec.open(token) else {
+    if let Some(expected) = &opened.owner_secret {
+        return state.registry.owner_matches(expected, token);
+    }
+    let Ok(owner) = state.codec.open(token) else {
         return false;
     };
-    owner.scope == Scope::Owner && same_sources(&owner.scene, scene)
+    owner.scope == Scope::Owner && same_sources(&owner.scene, &opened.scene)
 }
 
 fn same_sources(a: &SceneDescriptor, b: &SceneDescriptor) -> bool {
@@ -579,6 +645,12 @@ impl AppError {
             message: message.into(),
         }
     }
+    fn gone(message: &str) -> Self {
+        Self {
+            status: StatusCode::GONE,
+            message: message.into(),
+        }
+    }
     fn unauthorized(message: &str) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
@@ -631,18 +703,87 @@ impl FromRequestParts<AppState> for PatAuth {
     }
 }
 
-fn open_scene(state: &AppState, token: &str) -> Result<SceneDescriptor, AppError> {
+struct OpenedScene {
+    scene: SceneDescriptor,
+    owner_secret: Option<String>,
+}
+
+fn open_scene(state: &AppState, token: &str, peer: IpAddr) -> Result<OpenedScene, AppError> {
+    if is_short_secret(token) {
+        return match state.registry.resolve(token) {
+            Ok(RegisteredScene {
+                scene,
+                owner_secret,
+            }) => Ok(OpenedScene {
+                scene,
+                owner_secret: Some(owner_secret),
+            }),
+            Err(RegistryLookupError::NotFound) => {
+                if allow_short_miss(state, peer) {
+                    Err(AppError::not_found("Scene not found"))
+                } else {
+                    Err(AppError::too_many_requests("Too many invalid short links"))
+                }
+            }
+            Err(RegistryLookupError::Gone) => {
+                Err(AppError::gone("Scene expired or source is gone"))
+            }
+            Err(RegistryLookupError::Internal(error)) => {
+                Err(AppError::internal(&error.to_string()))
+            }
+        };
+    }
     state
         .codec
         .open(token)
-        .map(|envelope| envelope.scene)
+        .map(|envelope| OpenedScene {
+            scene: envelope.scene,
+            owner_secret: None,
+        })
         .map_err(|_| AppError::not_found("Scene not found"))
 }
 
-async fn resolved_scene(state: &AppState, token: &str) -> Result<SceneDescriptor, AppError> {
-    let scene = open_scene(state, token)?;
-    scene.validate().await?;
-    Ok(scene)
+async fn resolved_scene(
+    state: &AppState,
+    token: &str,
+    peer: IpAddr,
+) -> Result<OpenedScene, AppError> {
+    let opened = open_scene(state, token, peer)?;
+    if opened.scene.validate().await.is_err() {
+        mark_scene_gone(state, token);
+        return Err(SceneGone.into());
+    }
+    Ok(opened)
+}
+
+fn allow_short_miss(state: &AppState, peer: IpAddr) -> bool {
+    const WINDOW: Duration = Duration::from_secs(60);
+    const LIMIT: u16 = 30;
+    let now = Instant::now();
+    let Ok(mut limiter) = state.short_misses.lock() else {
+        return false;
+    };
+    if limiter.clients.len() > 1024 {
+        limiter
+            .clients
+            .retain(|_, window| now.duration_since(window.started) < WINDOW);
+    }
+    let window = limiter.clients.entry(peer).or_insert(MissWindow {
+        started: now,
+        misses: 0,
+    });
+    if now.duration_since(window.started) >= WINDOW {
+        window.started = now;
+        window.misses = 0;
+    }
+    window.misses = window.misses.saturating_add(1);
+    window.misses <= LIMIT
+}
+
+fn mark_scene_gone(state: &AppState, token: &str) {
+    if let Err(error) = state.registry.mark_gone(token) {
+        tracing::warn!(%error, "failed to tombstone invalid short scene");
+    }
 }
 
 impl IntoResponse for AppError {

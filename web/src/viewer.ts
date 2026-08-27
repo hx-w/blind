@@ -1,10 +1,11 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { ArcballControls } from 'three/addons/controls/ArcballControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { apiError } from './api';
 import type { PublicMesh, PublicScene, SceneUpdate, ViewState } from './api';
+import { createMatteMaterial, updateMatteMaterial } from './material';
 
 const DARK_BACKGROUND = '#292c32';
 const LIGHT_BACKGROUND = '#e7e9ec';
@@ -19,8 +20,7 @@ export class MeshViewer {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly perspective = new THREE.PerspectiveCamera(34, 1, 0.001, 1_000_000);
   private readonly orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1_000_000);
-  private readonly controls: OrbitControls;
-  private readonly grid = new THREE.GridHelper(10, 20, 0x626b75, 0x41474f);
+  private readonly controls: ArcballControls & { target: THREE.Vector3 };
   private readonly axes = new THREE.AxesHelper(1);
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
@@ -37,26 +37,22 @@ export class MeshViewer {
   constructor(private readonly root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.06;
+    this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.root.append(this.renderer.domElement);
     this.camera = this.perspective;
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.dampingFactor = 0.075;
-    this.controls.screenSpacePanning = true;
+    this.controls = new ArcballControls(
+      this.camera,
+      this.renderer.domElement,
+      this.scene,
+    ) as ArcballControls & { target: THREE.Vector3 };
+    this.controls.enableAnimations = false;
+    this.controls.enableFocus = false;
+    this.controls.enableGrid = false;
+    this.controls.adjustNearFar = false;
+    this.controls.setGizmosVisible(false);
     this.controls.minDistance = 0.0001;
     this.controls.maxDistance = 1_000_000;
-    this.controls.touches.ONE = THREE.TOUCH.ROTATE;
-    this.controls.touches.TWO = THREE.TOUCH.DOLLY_PAN;
-
-    this.scene.add(new THREE.HemisphereLight(0xeef3f8, 0x343840, 2.05));
-    const key = new THREE.DirectionalLight(0xf4f7fb, 3.5); key.position.set(4, 6, 5); this.scene.add(key);
-    const fill = new THREE.DirectionalLight(0xc8d5dd, 1.5); fill.position.set(-5, 2, -3); this.scene.add(fill);
-    const rim = new THREE.DirectionalLight(0xaebfd6, 1.0); rim.position.set(2, -3, -5); this.scene.add(rim);
-    setHelperOpacity(this.grid, 0.32);
-    this.scene.add(this.grid);
     setHelperOpacity(this.axes, 0.78);
     this.scene.add(this.axes);
 
@@ -64,7 +60,7 @@ export class MeshViewer {
     this.resizeObserver.observe(root);
     this.renderer.domElement.addEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
-    this.controls.addEventListener('change', () => { this.dirty = true; });
+    this.controls.addEventListener('change', () => { this.updateClipping(); this.dirty = true; });
     this.animate();
   }
 
@@ -80,15 +76,27 @@ export class MeshViewer {
         if (!(child instanceof THREE.Mesh)) return;
         child.userData.modelIndex = index;
         const geometry = child.geometry as THREE.BufferGeometry;
-        if (!geometry.attributes.normal) geometry.computeVertexNormals();
-        child.material = material(info.color, info.opacity);
+        normalizeGeometry(geometry);
+        // Review the geometry itself rather than trusting optional exporter normals,
+        // which are frequently quantized or face-split in scan files.
+        geometry.deleteAttribute('normal');
+        geometry.computeVertexNormals();
+        child.material = createMatteMaterial({
+          color: info.color,
+          opacity: info.opacity,
+          flat: scene.state.shading === 'flat',
+          wireframe: scene.state.shading === 'wire',
+          layer: index,
+        });
       });
       this.models.push({ info: { ...info }, object });
       this.scene.add(object);
     });
     this.applyState();
+    this.resize();
+    await settledLayout();
     if (scene.state.camera) this.restoreCamera(scene.state);
-    else this.fitAll(false);
+    else this.fitAll(true);
     this.resizeHelpers();
   }
 
@@ -110,13 +118,14 @@ export class MeshViewer {
     if (!model) return;
     model.info.visible = visible;
     model.object.visible = visible;
+    this.resizeHelpers();
+    this.updateClipping();
     this.dirty = true;
   }
 
   setColor(color: string): void { const model = this.models[this.selected]; if (model) { model.info.color = color; this.applyMaterials(); } }
   setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); } }
   setShading(shading: ViewState['shading']): void { this.state.shading = shading; this.applyMaterials(); }
-  setGrid(visible: boolean): void { this.state.grid = visible; this.grid.visible = visible; this.dirty = true; }
   setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.dirty = true; }
   setBackground(background: ViewState['background']): void {
     this.state.background = background;
@@ -140,9 +149,8 @@ export class MeshViewer {
       this.camera = this.perspective;
     }
     this.state.projection = projection;
-    this.controls.object = this.camera;
     this.controls.target.copy(target);
-    this.resize(); this.controls.update();
+    this.resize(); this.syncCamera();
   }
 
   fitAll(animate = true): void {
@@ -170,7 +178,7 @@ export class MeshViewer {
     this.camera.position.copy(center).addScaledVector(direction, distance);
     this.camera.up.set(0, 1, 0);
     if (Math.abs(direction.y) > 0.9) this.camera.up.set(0, 0, direction.y > 0 ? -1 : 1);
-    this.controls.target.copy(center); this.controls.update();
+    this.controls.target.copy(center); this.syncCamera();
   }
 
   exportUpdate(): SceneUpdate {
@@ -187,11 +195,13 @@ export class MeshViewer {
     const orthographicHeight = this.orthographic.userData.height ?? 2;
     this.orthographic.left = -orthographicHeight * aspect / 2; this.orthographic.right = orthographicHeight * aspect / 2;
     this.orthographic.top = orthographicHeight / 2; this.orthographic.bottom = -orthographicHeight / 2; this.orthographic.updateProjectionMatrix();
+    this.updateClipping();
     this.dirty = true;
   }
 
   private applyState(): void {
-    this.setBackground(this.state.background); this.grid.visible = this.state.grid; this.axes.visible = this.state.axes;
+    this.state.grid = false;
+    this.setBackground(this.state.background); this.axes.visible = this.state.axes;
     this.models.forEach((model) => { model.object.visible = model.info.visible; });
     if (this.state.projection === 'orthographic') { this.state.projection = 'perspective'; this.setProjection('orthographic'); }
     this.applyMaterials();
@@ -200,12 +210,13 @@ export class MeshViewer {
   private applyMaterials(): void {
     this.models.forEach((model, index) => model.object.traverse((child) => {
       if (!(child instanceof THREE.Mesh)) return;
-      const current = child.material as THREE.MeshStandardMaterial;
-      current.color.set(model.info.color); current.opacity = model.info.opacity;
-      current.transparent = model.info.opacity < 1; current.depthWrite = model.info.opacity > 0.96;
-      current.flatShading = this.state.shading === 'flat'; current.wireframe = this.state.shading === 'wire';
-      current.emissive.set(index === this.selected ? model.info.color : '#30333a'); current.emissiveIntensity = index === this.selected ? 0.055 : 0;
-      current.needsUpdate = true;
+      updateMatteMaterial(child.material as THREE.ShaderMaterial, {
+        color: model.info.color,
+        opacity: model.info.opacity,
+        flat: this.state.shading === 'flat',
+        wireframe: this.state.shading === 'wire',
+        layer: index,
+      });
     }));
     this.dirty = true;
   }
@@ -215,13 +226,13 @@ export class MeshViewer {
     this.camera.position.fromArray(saved.position); this.camera.up.fromArray(saved.up); this.controls.target.fromArray(saved.target);
     this.perspective.fov = saved.fov; this.perspective.updateProjectionMatrix();
     this.orthographic.zoom = saved.zoom; this.orthographic.userData.height = saved.orthographic_height;
-    this.resize(); this.controls.update();
+    this.resize(); this.syncCamera();
   }
 
   private exportState(): ViewState {
     return {
       selected: this.selected, shading: this.state.shading, projection: this.state.projection,
-      background: this.state.background, grid: this.grid.visible, axes: this.axes.visible,
+      background: this.state.background, grid: false, axes: this.axes.visible,
       frame: { width: Math.round(this.root.clientWidth), height: Math.round(this.root.clientHeight) },
       camera: {
         position: this.camera.position.toArray() as [number, number, number],
@@ -235,26 +246,53 @@ export class MeshViewer {
 
   private fitBox(box: THREE.Box3, animate: boolean): void {
     const center = box.getCenter(new THREE.Vector3()); const size = box.getSize(new THREE.Vector3()); const radius = size.length() * 0.5;
-    const fov = THREE.MathUtils.degToRad(this.perspective.fov); const distance = Math.max(radius / Math.sin(fov / 2), 0.001) * 1.15;
+    const verticalFov = THREE.MathUtils.degToRad(this.perspective.fov);
+    const aspect = Math.max(this.root.clientWidth / Math.max(this.root.clientHeight, 1), 0.1);
+    const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
+    const fitFov = Math.min(verticalFov, horizontalFov);
+    const distance = Math.max(radius / Math.sin(fitFov / 2), 0.001) * 1.15;
     const direction = this.camera.position.clone().sub(this.controls.target).normalize();
-    if (!Number.isFinite(direction.x)) direction.set(1, 0.7, 1);
+    if (!Number.isFinite(direction.x) || direction.lengthSq() < 1e-12) {
+      direction.set(1, 0.7, 1).normalize();
+    }
     const destination = center.clone().addScaledVector(direction, distance);
     if (animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
       const startPosition = this.camera.position.clone(); const startTarget = this.controls.target.clone(); const start = performance.now();
       const tick = (now: number) => {
         const t = Math.min((now - start) / 260, 1); const eased = 1 - Math.pow(1 - t, 4);
-        this.camera.position.lerpVectors(startPosition, destination, eased); this.controls.target.lerpVectors(startTarget, center, eased); this.controls.update();
+        this.camera.position.lerpVectors(startPosition, destination, eased); this.controls.target.lerpVectors(startTarget, center, eased); this.syncCamera();
         if (t < 1) requestAnimationFrame(tick);
       }; requestAnimationFrame(tick);
-    } else { this.camera.position.copy(destination); this.controls.target.copy(center); this.controls.update(); }
+    } else { this.camera.position.copy(destination); this.controls.target.copy(center); this.syncCamera(); }
     this.orthographic.userData.height = Math.max(size.y, size.x / Math.max(this.root.clientWidth / this.root.clientHeight, 0.2)) * 1.25;
     this.resize();
+  }
+
+  private updateClipping(): void {
+    const box = this.visibleBounds();
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 1e-6);
+    const distance = this.camera.position.distanceTo(center);
+    const near = Math.max(radius * 1e-4, distance - radius * 4);
+    const far = Math.max(near * 100, distance + radius * 4);
+    this.camera.near = near;
+    this.camera.far = far;
+    this.camera.updateProjectionMatrix();
+  }
+
+  private syncCamera(): void {
+    this.camera.lookAt(this.controls.target);
+    this.camera.updateMatrixWorld();
+    this.updateClipping();
+    this.controls.setCamera(this.camera);
+    this.controls.setGizmosVisible(false);
+    this.dirty = true;
   }
 
   private visibleBounds(): THREE.Box3 { const box = new THREE.Box3(); for (const model of this.models) if (model.info.visible) box.expandByObject(model.object); return box; }
   private resizeHelpers(): void {
     const box = this.visibleBounds(); if (box.isEmpty()) return; const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.001);
-    this.grid.scale.setScalar(size / 10); this.grid.position.y = box.min.y - size * 0.025;
     this.axes.scale.setScalar(size * 0.09); this.axes.position.copy(box.min);
     this.dirty = true;
   }
@@ -272,8 +310,7 @@ export class MeshViewer {
   private disposeModels(): void { for (const model of this.models) { this.scene.remove(model.object); model.object.traverse((child) => { if (child instanceof THREE.Mesh) { child.geometry.dispose(); (child.material as THREE.Material).dispose(); } }); } this.models = []; }
   private animate = (): void => {
     requestAnimationFrame(this.animate);
-    const moving = this.controls.update();
-    if (moving || this.dirty) {
+    if (this.dirty) {
       this.renderer.render(this.scene, this.camera);
       this.dirty = false;
     }
@@ -288,11 +325,29 @@ async function loadObject(info: PublicMesh): Promise<THREE.Object3D> {
   return new OBJLoader().parse(new TextDecoder().decode(buffer));
 }
 
+function settledLayout(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+}
+
+function normalizeGeometry(geometry: THREE.BufferGeometry): void {
+  for (const [name, attribute] of Object.entries(geometry.attributes)) {
+    if (!(attribute instanceof THREE.BufferAttribute)) continue;
+    if (attribute.array instanceof Float64Array) {
+      geometry.setAttribute(
+        name,
+        new THREE.BufferAttribute(
+          new Float32Array(attribute.array),
+          attribute.itemSize,
+          attribute.normalized,
+        ),
+      );
+    }
+  }
+}
+
 function setHelperOpacity(helper: THREE.LineSegments, opacity: number): void {
   const materials = Array.isArray(helper.material) ? helper.material : [helper.material];
   materials.forEach((material) => { material.transparent = true; material.opacity = opacity; });
-}
-
-function material(color: string, opacity: number): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({ color, opacity, transparent: opacity < 1, depthWrite: opacity > 0.96, roughness: 0.56, metalness: 0.02, side: THREE.DoubleSide });
 }

@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rerun-if-changed=web/src");
     println!("cargo:rerun-if-changed=web/package.json");
     println!("cargo:rerun-if-changed=web/package-lock.json");
+    println!("cargo:rerun-if-changed=shaders");
 
     assert!(
         Path::new("web/dist/index.html").is_file(),
