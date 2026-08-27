@@ -1,0 +1,73 @@
+[package]
+name = "blind"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Instant local mesh review from any device"
+license = "MIT"
+repository = "https://github.com/hx-w/blind"
+homepage = "https://github.com/hx-w/blind"
+readme = "README.md"
+keywords = ["mesh", "viewer", "ply", "stl", "obj"]
+categories = ["command-line-utilities", "visualization"]
+include = [
+    "/src/**",
+    "/web/dist/**",
+    "/tests/fixtures/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/build.rs",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/docs/**",
+]
+build = "build.rs"
+
+[[bin]]
+name = "blind"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["http1", "json", "tokio"] }
+base64 = "0.22"
+bytemuck = { version = "1.21", features = ["derive"] }
+chacha20poly1305 = "0.10"
+clap = { version = "4.5", features = ["derive"] }
+directories = "6.0"
+glam = { version = "0.29", features = ["bytemuck"] }
+hex = "0.4"
+if-addrs = "0.13"
+image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2"
+mime_guess = "2.0"
+ply-rs = "0.1"
+rand = "0.8"
+rust-embed = "8.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+stl_io = "0.8"
+subtle = "2.6"
+thiserror = "2.0"
+tobj = "4.0"
+tokio = { version = "1.43", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+tower-http = { version = "0.6", features = ["compression-full", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2.5"
+uuid = { version = "1.12", features = ["v4"] }
+wgpu = "0.20.1"
+zstd = "0.13"
+
+[build-dependencies]
+anyhow = "1.0"
+
+[dev-dependencies]
+tempfile = "3.15"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#292c32" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Blind</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#viewer">跳到 3D 视图</a>
+    <div class="app-shell" id="app-shell">
+      <header class="topbar" aria-label="场景信息">
+        <div class="scene-copy">
+          <h1 id="scene-title">Blind</h1>
+          <p id="scene-meta">正在读取场景</p>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button share-button" id="share-view" type="button" aria-label="分享当前场景">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 8l4-4 4 4"/><path d="M5 12v7h14v-7"/></svg>
+          </button>
+          <button class="icon-button" id="fullscreen" type="button" aria-label="进入全屏">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <main id="viewer" class="viewer" tabindex="-1">
+        <div id="canvas-root" class="canvas-root" aria-label="可交互 3D Mesh 视图"></div>
+        <div class="view-control">
+          <button class="axis-orb" id="axis-orb" type="button" aria-label="打开标准视角" aria-expanded="false">
+            <span class="axis-y">Y</span><span class="axis-x">X</span><span class="axis-z">Z</span><span class="axis-center"></span>
+          </button>
+          <div class="view-popover" id="view-popover" aria-hidden="true">
+            <button data-view="py" type="button">上</button><button data-view="pz" type="button">前</button><button data-view="px" type="button">右</button>
+            <button data-view="nx" type="button">左</button><button data-view="nz" type="button">后</button><button data-view="ny" type="button">下</button>
+          </div>
+        </div>
+        <div class="gesture-hint" id="gesture-hint" role="status"><span>单指旋转</span><i></i><span>双指移动</span><i></i><span>捏合缩放</span></div>
+        <div class="loading-state" id="loading-state"><span></span><p>正在读取 Mesh</p></div>
+        <div class="invalid-state" id="invalid-state" hidden>
+          <span class="invalid-code">410</span><h2>场景已失效</h2><p>一个或多个源 Mesh 已被删除、修改或无法读取。</p>
+        </div>
+        <div class="empty-state" id="empty-state" hidden>
+          <h2>没有可打开的场景</h2><p>在终端运行 <code>blind share model.ply</code> 获取查看链接。</p>
+        </div>
+        <div class="toast" id="toast" role="status" aria-live="polite"></div>
+      </main>
+
+      <nav class="review-dock" aria-label="查看工具">
+        <button class="dock-tool" id="fit-view" type="button" aria-label="适配全部可见 Mesh">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/><circle cx="12" cy="12" r="2.5"/></svg><span>Fit</span>
+        </button>
+        <button class="dock-tool panel-trigger" data-panel="meshes" type="button" aria-label="打开 Mesh 列表" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4-8 4-8-4 8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></svg><span>Mesh</span><span class="dock-count" id="mesh-count">0</span>
+        </button>
+        <button class="dock-tool panel-trigger" data-panel="style" type="button" aria-label="打开样式设置" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>样式</span>
+        </button>
+      </nav>
+
+      <aside class="control-panel" id="control-panel" aria-hidden="true">
+        <div class="panel-drag-zone" id="panel-drag-zone" role="button" tabindex="0" aria-label="调整面板高度"><div class="panel-handle" aria-hidden="true"></div></div>
+        <div class="panel-heading"><h2 id="panel-title">Mesh</h2><span id="panel-context"></span>
+          <button class="close-panel" id="close-panel" type="button" aria-label="关闭面板"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+        </div>
+        <div class="panel-scroll" id="panel-scroll">
+          <section data-panel-content="meshes"><div class="mesh-list" id="mesh-list"></div></section>
+          <section data-panel-content="style" hidden>
+            <div class="style-section color-section"><span class="setting-label">颜色</span><div class="color-swatches" id="color-swatches" aria-label="Mesh 颜色"></div></div>
+            <label class="range-row" for="opacity-range"><span>透明度</span><input id="opacity-range" type="range" min="5" max="100" value="100"/><output id="opacity-value">100%</output></label>
+            <div class="style-section"><span class="setting-label">表面</span><div class="segmented segmented-three" aria-label="着色方式">
+              <button class="active" data-shading="smooth" type="button">平滑</button><button data-shading="flat" type="button">平面</button><button data-shading="wire" type="button">线框</button>
+            </div></div>
+            <div class="style-section"><span class="setting-label">投影</span><div class="segmented" aria-label="投影方式">
+              <button class="active" data-projection="perspective" type="button">透视</button><button data-projection="orthographic" type="button">正交</button>
+            </div></div>
+            <div class="style-section scene-settings"><span class="setting-label">场景</span><div class="toggle-grid">
+              <label><span>网格</span><input id="grid-toggle" type="checkbox" checked/><i></i></label>
+              <label><span>坐标轴</span><input id="axes-toggle" type="checkbox" checked/><i></i></label>
+              <label><span>浅色背景</span><input id="light-toggle" type="checkbox"/><i></i></label>
+            </div></div>
+          </section>
+        </div>
+      </aside>
+    </div>
+
+    <dialog class="share-sheet" id="share-sheet">
+      <div class="share-grabber"></div>
+      <div class="share-heading"><h2>分享</h2><button id="close-share" type="button" aria-label="关闭分享"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div>
+      <div class="share-options">
+        <button data-copy="view" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/></svg></span><span><strong>视角链接</strong><small>交互场景与当前视角</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+        <button data-copy="image" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m6 17 4-4 3 3 2-2 3 3"/></svg></span><span><strong>图片链接</strong><small>即时渲染 PNG</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+        <button data-copy="full" id="copy-full" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M8 4h8l3 3v13H8z"/><path d="M16 4v4h4M11 12h5M11 16h5"/></svg></span><span><strong>完整信息</strong><small>Mesh 路径与两个链接</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+      </div>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,33 @@
+name: Bug report
+description: Report a reproducible Blind defect
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include PATs, private scene links, or private Mesh paths.
+  - type: input
+    id: version
+    attributes:
+      label: Blind version
+      placeholder: blind 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: macOS, browser, and Mesh format
+    validations:
+      required: true
