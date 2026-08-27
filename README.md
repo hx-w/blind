@@ -52,7 +52,7 @@ Optional controls:
 
 ```sh
 # Install a specific release.
-curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | BLIND_VERSION=0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | BLIND_VERSION=0.2.0 sh
 
 # Select an installation directory already on PATH.
 curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | BLIND_INSTALL_DIR="$HOME/.local/bin" sh
