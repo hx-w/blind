@@ -272,6 +272,12 @@ pub async fn hash_file(path: &Path) -> Result<String> {
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
 fn is_hex_color(value: &str) -> bool {
     value.len() == 7
         && value.starts_with('#')

@@ -10,13 +10,14 @@ use axum::{
 };
 use rust_embed::RustEmbed;
 use serde::{Deserialize, Serialize};
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use crate::{
     config::{Config, normalize_origin},
     network::{HostCandidate, discover},
     render::Renderer,
-    scene::{SceneDescriptor, SceneGone, SceneUpdate},
+    scene::{SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
     token::{Scope, TokenCodec},
 };
 
@@ -29,6 +30,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub codec: TokenCodec,
     pub renderer: Option<Arc<Renderer>>,
+    pub image_slots: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +99,7 @@ pub async fn serve(config: Config, listen_override: Option<String>) -> anyhow::R
         config: Arc::new(config),
         codec,
         renderer,
+        image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
     };
     let app = Router::new()
         .route("/api/v1/health", get(health))
@@ -109,6 +112,20 @@ pub async fn serve(config: Config, listen_override: Option<String>) -> anyhow::R
         .route("/v/{token}", get(view_scene))
         .route("/", get(index))
         .fallback(asset)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+            ),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -243,6 +260,9 @@ async fn get_mesh(
         .get(index)
         .ok_or_else(|| AppError::not_found("Mesh not found"))?;
     let bytes = tokio::fs::read(&mesh.path).await.map_err(|_| SceneGone)?;
+    if hash_bytes(&bytes) != mesh.revision {
+        return Err(SceneGone.into());
+    }
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mesh.format.mime())
@@ -277,6 +297,10 @@ async fn render_image(
     State(state): State<AppState>,
     AxumPath(token): AxumPath<String>,
 ) -> Result<Response<Body>, AppError> {
+    let _permit = state
+        .image_slots
+        .try_acquire()
+        .map_err(|_| AppError::too_many_requests("Image renderer is busy"))?;
     let token = token.strip_suffix(".png").unwrap_or(&token);
     let envelope = state
         .codec
@@ -291,6 +315,7 @@ async fn render_image(
         tracing::warn!(%error, "image render failed");
         AppError::unprocessable("Image render failed")
     })?;
+    envelope.scene.validate().await?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
@@ -454,6 +479,12 @@ impl AppError {
     fn unavailable(message: &str) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
+            message: message.into(),
+        }
+    }
+    fn too_many_requests(message: &str) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
             message: message.into(),
         }
     }
