@@ -103,6 +103,8 @@ struct HealthResponse {
 pub struct ControlHealth {
     service: String,
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,6 +209,36 @@ pub async fn probe(config: &Config) -> anyhow::Result<Option<ControlHealth>> {
         status => return Err(control_rejection(status)),
     };
     Ok(Some(health))
+}
+
+pub async fn wait_until_ready(
+    config: &Config,
+    expected_version: Option<&str>,
+    timeout: Duration,
+) -> anyhow::Result<ControlHealth> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let last_observation = match probe(config).await {
+            Ok(Some(health)) => {
+                let version_matches = expected_version
+                    .map(|expected| health.version.as_deref() == Some(expected))
+                    .unwrap_or(true);
+                if version_matches {
+                    return Ok(health);
+                }
+                format!(
+                    "the server reported version {}",
+                    health.version.as_deref().unwrap_or("unknown")
+                )
+            }
+            Ok(None) => "the server did not accept a connection".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        if Instant::now() >= deadline {
+            anyhow::bail!("Blind did not become ready: {last_observation}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub async fn stop(config: &Config) -> anyhow::Result<String> {
@@ -348,6 +380,7 @@ async fn control_health(_pat: PatAuth) -> Result<impl IntoResponse, AppError> {
         Json(ControlHealth {
             service: "blind".into(),
             pid: std::process::id(),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
         }),
     ))
 }

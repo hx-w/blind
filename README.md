@@ -48,6 +48,18 @@ less install.sh
 sh install.sh
 ```
 
+After Blind is installed, update it in place with the same checksum and archive
+validation:
+
+```sh
+blind update
+```
+
+If the current Blind executable is running as the managed background service,
+Blind restarts it and verifies the new version after a successful update. A
+service using another Blind installation is left unchanged. Otherwise the
+update does not enable automatic startup.
+
 Optional controls:
 
 ```sh
@@ -86,6 +98,10 @@ To keep Blind running after login:
 blind service install
 blind service status
 ```
+
+Install the service as the logged-in user. Do not use `sudo`: Blind installs a
+per-user LaunchAgent and will reject root rather than target the wrong GUI
+login domain.
 
 Remove the background service with `blind service uninstall`.
 

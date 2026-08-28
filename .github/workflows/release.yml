@@ -22,6 +22,14 @@ jobs:
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate stable release tag
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -q "^version = \"${GITHUB_REF_NAME#v}\"$" Cargo.toml
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -34,11 +42,18 @@ jobs:
           npm run build --prefix web
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update
+      - name: Verify source
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
       - name: Build binary
         run: cargo build --locked --release
       - name: Package
         run: |
           test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+          ./target/release/blind --version
+          ./target/release/blind update --help
           mkdir package
           cp target/release/blind package/blind
           chmod 0755 package/blind

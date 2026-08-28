@@ -5,6 +5,23 @@ All notable changes to Blind are documented here. This project follows
 
 ## Unreleased
 
+## [0.3.1] - 2026-08-28
+
+### Added
+
+- `blind update` downloads the latest architecture-specific GitHub release,
+  verifies its checksum and archive contents, and atomically replaces the
+  current executable without sudo. Managed services are restarted and health
+  checked, with automatic rollback if the new version does not become ready.
+
+### Fixed
+
+- Background-service installation waits for launchd's asynchronous unload and
+  retries its transient bootstrap state, avoiding repeated-install
+  `Input/output error` and `No such process` failures.
+- Per-user service commands reject sudo instead of writing a root-owned plist
+  and targeting the nonexistent `gui/0` domain.
+
 ## [0.3.0] - 2026-08-27
 
 ### Added
@@ -61,6 +78,7 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.3.1]: https://github.com/hx-w/blind/releases/tag/v0.3.1
 [0.3.0]: https://github.com/hx-w/blind/releases/tag/v0.3.0
 [0.2.0]: https://github.com/hx-w/blind/releases/tag/v0.2.0
 [0.1.0]: https://github.com/hx-w/blind/releases/tag/v0.1.0

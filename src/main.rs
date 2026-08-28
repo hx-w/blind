@@ -7,8 +7,9 @@ mod scene;
 mod server;
 mod service;
 mod token;
+mod update;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -103,6 +104,11 @@ enum Command {
     },
     #[command(about = "Check configuration, Host discovery, and image rendering")]
     Doctor,
+    #[command(
+        about = "Update Blind to the latest verified GitHub release",
+        long_about = "Download the latest Blind release for this Mac, verify its SHA-256 checksum and archive contents, and atomically replace the current executable. Blind never uses sudo. If a managed background service is installed, it is reconciled with the new binary."
+    )]
+    Update,
     #[command(about = "Manage the encryption key used by all scene links")]
     Key {
         #[command(subcommand)]
@@ -207,6 +213,7 @@ async fn main() -> Result<()> {
         Command::Hosts { json } => hosts(json)?,
         Command::Status { json } => status(json).await?,
         Command::Doctor => doctor().await?,
+        Command::Update => update_blind().await?,
         Command::Key {
             command: KeyCommand::Rotate,
         } => {
@@ -222,9 +229,44 @@ async fn main() -> Result<()> {
         }
         Command::Service { command } => match command {
             ServiceCommand::Install => {
+                service::validate_user()?;
                 let (config, _) = Config::load_or_create()?;
-                let _ = server::stop(&config).await?;
-                println!("Installed {}", service::install()?.display());
+                let was_loaded = service::is_loaded()?;
+                // Prepare and lint before unloading. KeepAlive must be unloaded
+                // before requesting shutdown or launchd can race the reinstall.
+                let prepared = service::prepare_install()?;
+                service::unload()?;
+                if let Err(stop_error) = server::stop(&config).await {
+                    let restore_error = if was_loaded {
+                        service::load_existing().err()
+                    } else {
+                        None
+                    };
+                    if let Some(restore_error) = restore_error {
+                        anyhow::bail!(
+                            "could not stop Blind: {stop_error:#}; restoring the previous service also failed: {restore_error:#}"
+                        );
+                    }
+                    return Err(stop_error);
+                }
+                let committed = prepared.commit()?;
+                if let Err(health_error) = server::wait_until_ready(
+                    &config,
+                    Some(env!("CARGO_PKG_VERSION")),
+                    Duration::from_secs(30),
+                )
+                .await
+                {
+                    if let Some(rollback_error) = committed.rollback().err() {
+                        anyhow::bail!(
+                            "Blind service did not become healthy: {health_error:#}; restoring the previous service also failed: {rollback_error:#}"
+                        );
+                    }
+                    return Err(health_error)
+                        .context("Blind service did not become healthy and was rolled back");
+                }
+                let plist = committed.finish();
+                println!("Installed {}", plist.display());
             }
             ServiceCommand::Uninstall => println!("Removed {}", service::uninstall()?.display()),
             ServiceCommand::Status => println!(
@@ -238,6 +280,104 @@ async fn main() -> Result<()> {
         },
     }
     Ok(())
+}
+
+async fn update_blind() -> Result<()> {
+    update::validate_user()?;
+    let installation = service::installation()?;
+    let service_is_loaded =
+        !matches!(installation, service::Installation::None) && service::is_loaded()?;
+    let service_was_loaded =
+        matches!(installation, service::Installation::CurrentExecutable) && service_is_loaded;
+    let (config, _) = Config::load_or_create()?;
+    let running = server::probe(&config).await?;
+    if running.is_some()
+        && !service_was_loaded
+        && !(matches!(installation, service::Installation::OtherExecutable(_)) && service_is_loaded)
+    {
+        anyhow::bail!(
+            "Blind is running outside the managed background service; run `blind stop` before `blind update`"
+        );
+    }
+
+    eprintln!("Checking for Blind updates...");
+    let prepared = match update::prepare()? {
+        update::PrepareOutcome::Unchanged { current, latest } => {
+            report_no_update(&current, &latest);
+            report_other_service(&installation);
+            return Ok(());
+        }
+        update::PrepareOutcome::Ready(prepared) => prepared,
+    };
+
+    let committed = match prepared.commit() {
+        Ok(update::CommitOutcome::Unchanged { current, latest }) => {
+            report_no_update(&current, &latest);
+            report_other_service(&installation);
+            return Ok(());
+        }
+        Ok(update::CommitOutcome::Updated(committed)) => committed,
+        Err(update_error) => {
+            return Err(update_error).context("could not install the Blind update");
+        }
+    };
+
+    let from = committed.previous_version().to_owned();
+    let to = committed.to_version().to_owned();
+    if service_was_loaded
+        && let Err(start_error) = restart_existing_service(&config, Some(&to)).await
+    {
+        let rollback_error = committed.rollback().err();
+        let restore_error = if rollback_error.is_none() {
+            restart_existing_service(&config, None).await.err()
+        } else {
+            None
+        };
+        match (rollback_error, restore_error) {
+            (Some(rollback_error), _) => anyhow::bail!(
+                "Blind {to} did not become healthy: {start_error:#}; restoring {from} also failed: {rollback_error:#}"
+            ),
+            (None, Some(restore_error)) => anyhow::bail!(
+                "Blind {to} did not become healthy and was rolled back to {from}, but the previous service did not restart: {restore_error:#}"
+            ),
+            (None, None) => anyhow::bail!(
+                "Blind {to} did not become healthy and was rolled back to {from}: {start_error:#}"
+            ),
+        }
+    }
+
+    let (from, to, path) = committed.finish()?;
+    println!("Updated Blind from {from} to {to} at {}.", path.display());
+    if service_was_loaded {
+        println!("Restarted and verified the Blind background service.");
+    }
+    report_other_service(&installation);
+    Ok(())
+}
+
+async fn restart_existing_service(config: &Config, expected_version: Option<&str>) -> Result<()> {
+    service::restart()?;
+    server::wait_until_ready(config, expected_version, Duration::from_secs(30)).await?;
+    Ok(())
+}
+
+fn report_no_update(current: &str, latest: &str) {
+    if current == latest {
+        println!("Blind is already up to date ({current}).");
+    } else {
+        println!(
+            "This Blind build ({current}) is newer than the latest release ({latest}); no update was performed."
+        );
+    }
+}
+
+fn report_other_service(installation: &service::Installation) {
+    if let service::Installation::OtherExecutable(path) = installation {
+        eprintln!(
+            "The background service uses {} and was left unchanged.",
+            path.display()
+        );
+    }
 }
 
 fn report_running(health: &ControlHealth) {

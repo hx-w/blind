@@ -39,3 +39,4 @@ jobs:
           ./target/release/blind --version
           ./target/release/blind --help
           ./target/release/blind share --help
+          ./target/release/blind update --help
