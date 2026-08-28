@@ -5,6 +5,24 @@ All notable changes to Blind are documented here. This project follows
 
 ## Unreleased
 
+## [0.3.2] - 2026-08-28
+
+### Added
+
+- `blind doctor` now repairs safe config and SQLite invariants, verifies every
+  stored short link against its encrypted payload and source revisions, and
+  reports valid, expired, source-gone, tombstoned, and corrupt rows.
+- `blind doctor --clean-invalid` removes invalid short links and
+  `blind doctor --clear-all` clears the registry while the server keeps running.
+- Registry key identity prevents a stale valid-looking config from turning live
+  links into corrupt rows; a running server restores its authoritative key
+  during doctor maintenance.
+
+### Removed
+
+- The public `blind key rotate` command. Blind keeps its internal scene key
+  stable instead of exposing routine key maintenance that destroys all links.
+
 ## [0.3.1] - 2026-08-28
 
 ### Added
@@ -78,6 +96,7 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.3.2]: https://github.com/hx-w/blind/releases/tag/v0.3.2
 [0.3.1]: https://github.com/hx-w/blind/releases/tag/v0.3.1
 [0.3.0]: https://github.com/hx-w/blind/releases/tag/v0.3.0
 [0.2.0]: https://github.com/hx-w/blind/releases/tag/v0.2.0

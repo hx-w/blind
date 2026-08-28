@@ -13,12 +13,14 @@ use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use config::{Config, config_path, normalize_origin};
+use config::{Config, config_path, normalize_origin, repair_config_permissions};
 use network::discover;
 use registry::Registry;
 use scene::SceneDescriptor;
 use serde::Serialize;
-use server::{ControlHealth, ShareLinks, links_for, stateless_links_for};
+use server::{
+    ControlHealth, DoctorAction, DoctorRegistryReport, ShareLinks, links_for, stateless_links_for,
+};
 use token::TokenCodec;
 
 #[derive(Parser)]
@@ -102,29 +104,34 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    #[command(about = "Check configuration, Host discovery, and image rendering")]
-    Doctor,
+    #[command(
+        about = "Audit and repair configuration, storage, links, and image rendering",
+        long_about = "Check Blind's configuration, Host discovery, SQLite integrity, every stored short link, and image rendering. Safe configuration and SQLite maintenance is applied automatically without stopping a running server. Link validity includes expiry, payload decryption, and current source revisions."
+    )]
+    Doctor {
+        #[arg(
+            long,
+            conflicts_with = "clear_all",
+            help = "Delete expired, tombstoned, corrupt, and source-invalid short links"
+        )]
+        clean_invalid: bool,
+        #[arg(
+            long,
+            conflicts_with = "clean_invalid",
+            help = "Delete every stored short link"
+        )]
+        clear_all: bool,
+    },
     #[command(
         about = "Update Blind to the latest verified GitHub release",
         long_about = "Download the latest Blind release for this Mac, verify its SHA-256 checksum and archive contents, and atomically replace the current executable. Blind never uses sudo. If a managed background service is installed, it is reconciled with the new binary."
     )]
     Update,
-    #[command(about = "Manage the encryption key used by all scene links")]
-    Key {
-        #[command(subcommand)]
-        command: KeyCommand,
-    },
     #[command(about = "Install or remove the macOS background service")]
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
     },
-}
-
-#[derive(Subcommand)]
-enum KeyCommand {
-    #[command(about = "Rotate the scene key and invalidate every existing link")]
-    Rotate,
 }
 
 #[derive(Subcommand)]
@@ -212,21 +219,11 @@ async fn main() -> Result<()> {
         } => share(meshes, title, host, stateless, format).await?,
         Command::Hosts { json } => hosts(json)?,
         Command::Status { json } => status(json).await?,
-        Command::Doctor => doctor().await?,
+        Command::Doctor {
+            clean_invalid,
+            clear_all,
+        } => doctor(clean_invalid, clear_all).await?,
         Command::Update => update_blind().await?,
-        Command::Key {
-            command: KeyCommand::Rotate,
-        } => {
-            let (mut config, _) = Config::load_or_create()?;
-            if server::probe(&config).await?.is_some() {
-                anyhow::bail!(
-                    "Blind server is running; stop it before `blind key rotate` so the server and registry cannot use different keys"
-                );
-            }
-            Registry::open(&config)?.clear()?;
-            config.rotate_key()?;
-            println!("Rotated the scene key. Existing links are now invalid.");
-        }
         Command::Service { command } => match command {
             ServiceCommand::Install => {
                 service::validate_user()?;
@@ -496,18 +493,121 @@ async fn status(json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn doctor() -> Result<()> {
-    let (config, _) = Config::load_or_create()?;
-    println!("ok  config  {}", config_path()?.display());
+async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
+    let (mut config, _) = Config::load_or_create()?;
+    let permissions_repaired = repair_config_permissions()?;
+    println!(
+        "ok  config  {}{}",
+        config_path()?.display(),
+        if permissions_repaired {
+            " (permissions repaired)"
+        } else {
+            ""
+        }
+    );
     println!("ok  listen  {}", config.listen);
     let hosts = discover(config.port()?, config.preferred_origin.as_deref())?;
     println!("ok  hosts   {} detected", hosts.len());
-    let registry = Registry::open(&config)?;
-    let (active, total) = registry.stats()?;
+    let action = if clean_invalid {
+        DoctorAction::CleanInvalid
+    } else if clear_all {
+        DoctorAction::ClearAll
+    } else {
+        DoctorAction::Audit
+    };
+    let (report, through_server, repaired_secret) =
+        match server::doctor_registry(&config, action).await? {
+            Some(report) => (report, true, false),
+            None => {
+                let _lease = server::acquire_offline_maintenance_lease()?;
+                match Registry::open(&config) {
+                    Err(error) if clear_all && config.secret_bytes().is_err() => {
+                        let removed = Registry::clear_without_key().with_context(|| {
+                            format!("could not clear registry after invalid scene key: {error:#}")
+                        })?;
+                        config.repair_invalid_secret()?;
+                        let registry = Registry::open(&config)?;
+                        registry.repair()?;
+                        (
+                            DoctorRegistryReport {
+                                valid: 0,
+                                expired: 0,
+                                source_gone: 0,
+                                tombstoned: 0,
+                                corrupt: removed,
+                                removed,
+                                preserved: 0,
+                                key_repaired: false,
+                            },
+                            false,
+                            true,
+                        )
+                    }
+                    Err(error) if clear_all && registry::is_key_mismatch(&error) => {
+                        let removed = Registry::clear_without_key()?;
+                        let registry = Registry::open(&config)?;
+                        registry.repair()?;
+                        (
+                            DoctorRegistryReport {
+                                valid: 0,
+                                expired: 0,
+                                source_gone: 0,
+                                tombstoned: 0,
+                                corrupt: removed,
+                                removed,
+                                preserved: 0,
+                                key_repaired: false,
+                            },
+                            false,
+                            false,
+                        )
+                    }
+                    Err(error) => return Err(error),
+                    Ok(registry) => {
+                        registry.repair()?;
+                        let audit = registry.audit().await?;
+                        let removed = match action {
+                            DoctorAction::Audit => 0,
+                            DoctorAction::CleanInvalid => registry.clean_invalid(&audit).await?,
+                            DoctorAction::ClearAll => registry.clear()?,
+                        };
+                        (DoctorRegistryReport::new(&audit, removed), false, false)
+                    }
+                }
+            }
+        };
     println!(
-        "ok  scenes  {active} active, {total} rows at {}",
-        registry.path().display()
+        "ok  sqlite  integrity, schema, index, WAL, and permissions ready at {}{}",
+        config::registry_path()?.display(),
+        if through_server { " (live server)" } else { "" }
     );
+    println!(
+        "ok  links   {} valid, {} invalid, {} total",
+        report.valid,
+        report.invalid(),
+        report.total()
+    );
+    println!("    valid         {}", report.valid);
+    println!("    expired       {}", report.expired);
+    println!("    source gone   {}", report.source_gone);
+    println!("    tombstoned    {}", report.tombstoned);
+    println!("    corrupt       {}", report.corrupt);
+    if report.key_repaired {
+        println!("ok  config  restored the running server's internal scene key");
+    } else if repaired_secret {
+        println!("ok  config  regenerated an invalid internal scene key");
+    }
+    if clean_invalid {
+        println!("ok  clean   removed {} invalid links", report.removed);
+        if report.preserved > 0 {
+            println!(
+                "ok  clean   preserved {} links that changed during the audit",
+                report.preserved
+            );
+        }
+    } else if clear_all {
+        println!("ok  clear   removed {} links", report.removed);
+    }
     render::Renderer::new()
         .await
         .context("image renderer is unavailable")?;

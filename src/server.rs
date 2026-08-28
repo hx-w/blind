@@ -1,10 +1,14 @@
 use std::{
     collections::HashMap,
+    fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
+    process::Command,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
+use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
@@ -25,10 +29,10 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use crate::{
-    config::{Config, normalize_origin},
+    config::{Config, config_path, normalize_origin},
     mesh,
     network::{HostCandidate, discover},
-    registry::{RegisteredScene, Registry, RegistryLookupError, is_short_secret},
+    registry::{RegisteredScene, Registry, RegistryAudit, RegistryLookupError, is_short_secret},
     render::Renderer,
     scene::{SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
     token::{Scope, TokenCodec},
@@ -46,6 +50,7 @@ pub struct AppState {
     pub renderer: Option<Arc<Renderer>>,
     pub image_slots: Arc<tokio::sync::Semaphore>,
     pub shutdown: tokio::sync::mpsc::Sender<()>,
+    doctor_lock: Arc<tokio::sync::Mutex<()>>,
     short_misses: Arc<Mutex<MissLimiter>>,
 }
 
@@ -57,6 +62,11 @@ struct MissLimiter {
 struct MissWindow {
     started: Instant,
     misses: u16,
+}
+
+pub struct ServerLease {
+    path: PathBuf,
+    pid: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -107,6 +117,48 @@ pub struct ControlHealth {
     pub version: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum DoctorAction {
+    Audit,
+    CleanInvalid,
+    ClearAll,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorRegistryReport {
+    pub valid: usize,
+    pub expired: usize,
+    pub source_gone: usize,
+    pub tombstoned: usize,
+    pub corrupt: usize,
+    pub removed: usize,
+    pub preserved: usize,
+    pub key_repaired: bool,
+}
+
+impl DoctorRegistryReport {
+    pub fn new(audit: &RegistryAudit, removed: usize) -> Self {
+        Self {
+            valid: audit.valid,
+            expired: audit.expired,
+            source_gone: audit.source_gone,
+            tombstoned: audit.tombstoned,
+            corrupt: audit.corrupt,
+            removed,
+            preserved: audit.invalid().saturating_sub(removed),
+            key_repaired: false,
+        }
+    }
+
+    pub fn invalid(&self) -> usize {
+        self.expired + self.source_gone + self.tombstoned + self.corrupt
+    }
+
+    pub fn total(&self) -> usize {
+        self.valid + self.invalid()
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct PublicScene {
     title: String,
@@ -128,6 +180,7 @@ struct PublicMesh {
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
+    let _lease = ServerLease::acquire()?;
     let address: SocketAddr = config.listen.parse()?;
     let listener = tokio::net::TcpListener::bind(address).await?;
     let codec = TokenCodec::new(config.secret_bytes()?);
@@ -147,12 +200,22 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         renderer,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         shutdown: shutdown_tx,
+        doctor_lock: Arc::new(tokio::sync::Mutex::new(())),
         short_misses: Arc::new(Mutex::new(MissLimiter::default())),
     };
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/control/health", get(control_health))
         .route("/api/v1/control/stop", post(control_stop))
+        .route("/api/v1/control/doctor", get(control_doctor))
+        .route(
+            "/api/v1/control/doctor/clean-invalid",
+            post(control_doctor_clean_invalid),
+        )
+        .route(
+            "/api/v1/control/doctor/clear-all",
+            post(control_doctor_clear_all),
+        )
         .route("/api/v1/hosts", get(hosts))
         .route("/api/v1/scenes", post(create_scene))
         .route("/api/v1/scenes/{token}", get(get_scene))
@@ -188,6 +251,44 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     .with_graceful_shutdown(shutdown(shutdown_rx))
     .await?;
     Ok(())
+}
+
+pub fn acquire_offline_maintenance_lease() -> anyhow::Result<ServerLease> {
+    ServerLease::acquire().context(
+        "a Blind server is still running; restore its configured listen address before offline maintenance",
+    )
+}
+
+impl ServerLease {
+    fn acquire() -> anyhow::Result<Self> {
+        let path = config_path()?
+            .parent()
+            .context("config path has no parent")?
+            .join("server.lock");
+        let pid = std::process::id();
+        let output = Command::new("/usr/bin/shlock")
+            .args(["-f"])
+            .arg(&path)
+            .args(["-p", &pid.to_string()])
+            .output()
+            .context("could not run the macOS server lock helper")?;
+        if !output.status.success() {
+            anyhow::bail!("another Blind server or offline maintenance operation is active");
+        }
+        Ok(Self { path, pid })
+    }
+}
+
+impl Drop for ServerLease {
+    fn drop(&mut self) {
+        let owned = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            == Some(self.pid);
+        if owned {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 pub async fn probe(config: &Config) -> anyhow::Result<Option<ControlHealth>> {
@@ -252,6 +353,28 @@ pub async fn stop(config: &Config) -> anyhow::Result<String> {
     }
 }
 
+pub async fn doctor_registry(
+    config: &Config,
+    action: DoctorAction,
+) -> anyhow::Result<Option<DoctorRegistryReport>> {
+    let (method, path) = match action {
+        DoctorAction::Audit => (Method::GET, "/api/v1/control/doctor"),
+        DoctorAction::CleanInvalid => (Method::POST, "/api/v1/control/doctor/clean-invalid"),
+        DoctorAction::ClearAll => (Method::POST, "/api/v1/control/doctor/clear-all"),
+    };
+    let Some((status, body)) =
+        control_request_with_timeout(config, method, path, Duration::from_secs(30 * 60)).await?
+    else {
+        return Ok(None);
+    };
+    match status {
+        StatusCode::OK => serde_json::from_slice(&body)
+            .context("invalid Blind doctor response")
+            .map(Some),
+        status => Err(control_rejection(status)),
+    }
+}
+
 fn control_rejection(status: StatusCode) -> anyhow::Error {
     match status {
         StatusCode::UNAUTHORIZED => {
@@ -269,6 +392,15 @@ async fn control_request(
     method: Method,
     path: &str,
 ) -> anyhow::Result<Option<(StatusCode, Bytes)>> {
+    control_request_with_timeout(config, method, path, Duration::from_secs(2)).await
+}
+
+async fn control_request_with_timeout(
+    config: &Config,
+    method: Method,
+    path: &str,
+    timeout: Duration,
+) -> anyhow::Result<Option<(StatusCode, Bytes)>> {
     let address = control_address(config)?;
     let uri = format!("http://{address}{path}");
     let request = Request::builder()
@@ -279,8 +411,7 @@ async fn control_request(
         .body(Empty::<Bytes>::new())?;
     let client: Client<HttpConnector, Empty<Bytes>> =
         Client::builder(TokioExecutor::new()).build_http();
-    let response = match tokio::time::timeout(Duration::from_secs(2), client.request(request)).await
-    {
+    let response = match tokio::time::timeout(timeout, client.request(request)).await {
         Err(_) => {
             anyhow::bail!("the configured port accepted a connection but did not answer as Blind")
         }
@@ -289,7 +420,7 @@ async fn control_request(
         Ok(Ok(response)) => response,
     };
     let status = response.status();
-    let body = tokio::time::timeout(Duration::from_secs(2), response.into_body().collect())
+    let body = tokio::time::timeout(timeout, response.into_body().collect())
         .await
         .map_err(|_| anyhow::anyhow!("Blind control response timed out"))??
         .to_bytes();
@@ -394,6 +525,54 @@ async fn control_stop(
         .try_send(())
         .map_err(|_| AppError::unavailable("Blind shutdown is already in progress"))?;
     Ok((StatusCode::ACCEPTED, no_store()))
+}
+
+async fn control_doctor(
+    State(state): State<AppState>,
+    _pat: PatAuth,
+) -> Result<impl IntoResponse, AppError> {
+    doctor_registry_response(&state, DoctorAction::Audit).await
+}
+
+async fn control_doctor_clean_invalid(
+    State(state): State<AppState>,
+    _pat: PatAuth,
+) -> Result<impl IntoResponse, AppError> {
+    doctor_registry_response(&state, DoctorAction::CleanInvalid).await
+}
+
+async fn control_doctor_clear_all(
+    State(state): State<AppState>,
+    _pat: PatAuth,
+) -> Result<impl IntoResponse, AppError> {
+    doctor_registry_response(&state, DoctorAction::ClearAll).await
+}
+
+async fn doctor_registry_response(
+    state: &AppState,
+    action: DoctorAction,
+) -> Result<
+    (
+        [(header::HeaderName, HeaderValue); 1],
+        Json<DoctorRegistryReport>,
+    ),
+    AppError,
+> {
+    let _guard = state
+        .doctor_lock
+        .try_lock()
+        .map_err(|_| AppError::unavailable("Blind doctor is already running"))?;
+    let key_repaired = state.config.restore_saved_secret()?;
+    state.registry.repair()?;
+    let audit = state.registry.audit().await?;
+    let removed = match action {
+        DoctorAction::Audit => 0,
+        DoctorAction::CleanInvalid => state.registry.clean_invalid(&audit).await?,
+        DoctorAction::ClearAll => state.registry.clear()?,
+    };
+    let mut report = DoctorRegistryReport::new(&audit, removed);
+    report.key_repaired = key_repaired;
+    Ok((no_store(), Json(report)))
 }
 
 async fn hosts(

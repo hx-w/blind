@@ -53,6 +53,7 @@ jobs:
         run: |
           test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
           ./target/release/blind --version
+          ./target/release/blind doctor --help
           ./target/release/blind update --help
           mkdir package
           cp target/release/blind package/blind

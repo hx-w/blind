@@ -165,6 +165,33 @@ this contract instead of reimplementing scene or lifecycle logic.
 The global toolbar never assigns one Mesh name to a multi-Mesh scene and does
 not duplicate visibility with a Solo mode.
 
+## Doctor and link maintenance
+
+`blind doctor` repairs safe local invariants and audits every SQLite-backed
+short link without stopping a running server. It restores private config and
+registry permissions, verifies the schema, index, WAL, and SQLite integrity,
+checks that the configured internal scene key matches the registry, then reports
+this distribution:
+
+- valid: the payload decrypts, has not expired, and every source revision still
+  matches;
+- expired: the absolute seven-day lifetime has ended;
+- source gone: a source was deleted, moved, replaced, changed, or became
+  unreadable;
+- tombstoned: Blind previously detected an invalid source;
+- corrupt: required fields or the encrypted payload cannot be read.
+
+Invalid or all SQLite-backed short links can be deleted while Blind continues
+serving other requests:
+
+```sh
+blind doctor --clean-invalid
+blind doctor --clear-all
+```
+
+These actions affect `/s/` short links. Stateless `/v/` links have no SQLite
+row to list or delete.
+
 ## Sharing
 
 The share action captures the current camera, presentation state, and visible
@@ -182,8 +209,10 @@ has an absolute seven-day lifetime. Blind reuses the code for an identical
 active scene, permits at most 10,000 active scenes, and caps retained rows at
 12,000 so SQLite cannot grow without bound. It contains no PAT and no Mesh
 bytes. Every route verifies the SHA-256 revision of every source before
-responding. Restarting the server keeps links valid; `blind key rotate`
-intentionally invalidates all existing links.
+responding. Restarting the server keeps links valid. The internal scene key
+encrypts link payloads; it is not a login credential and has no routine
+user-facing maintenance command. The PAT remains the credential for control
+API operations.
 
 `blind share --stateless` is the explicit exception: it emits a long encrypted
 `/v/` URL and writes no registry row.
@@ -278,6 +307,9 @@ cargo test --locked
 | `GET /api/v1/health` | Public | Version and renderer readiness |
 | `GET /api/v1/control/health` | PAT | Verify this configured Blind instance |
 | `POST /api/v1/control/stop` | PAT | Gracefully stop the server |
+| `GET /api/v1/control/doctor` | PAT | Audit and repair the live short-link registry |
+| `POST /api/v1/control/doctor/clean-invalid` | PAT | Remove invalid short links from the live registry |
+| `POST /api/v1/control/doctor/clear-all` | PAT | Remove every short link from the live registry |
 | `GET /api/v1/hosts` | PAT | Detected Host candidates |
 | `POST /api/v1/scenes` | PAT | Create a scene from local paths |
 | `GET /api/v1/scenes/:token` | Scene capability | Read validated public state |

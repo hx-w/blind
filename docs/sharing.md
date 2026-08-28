@@ -51,7 +51,9 @@ that browser session; reloading the immutable link restores the snapshot.
 5. A link expires absolutely seven days after its first registration. Registering an identical active scene reuses its code and does not extend that lifetime.
 6. The registry permits 10,000 active scenes and at most 12,000 total rows. Expired and invalid tombstones are pruned and SQLite reuses released pages.
 7. Restarting the server does not invalidate active links because the registry and scene key persist in the user configuration.
-8. `blind key rotate` clears the registry and invalidates every existing link.
+8. `blind doctor` audits the registry, `--clean-invalid` removes invalid short
+   links, and `--clear-all` removes every short link without stopping the
+   server.
 
 Blind never partially restores a scene because a surviving subset could misrepresent the review state. Unknown short-code requests are rate limited per client. `blind share --stateless` remains available for a long, self-contained `/v/` link that writes no registry row.
 

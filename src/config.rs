@@ -89,9 +89,23 @@ impl Config {
             .ok_or_else(|| anyhow::anyhow!("listen address must end with a port"))
     }
 
-    pub fn rotate_key(&mut self) -> Result<()> {
+    pub fn repair_invalid_secret(&mut self) -> Result<bool> {
+        if self.secret_bytes().is_ok() {
+            return Ok(false);
+        }
         self.secret = random_b64(32);
-        self.save()
+        self.save()?;
+        Ok(true)
+    }
+
+    pub fn restore_saved_secret(&self) -> Result<bool> {
+        let (mut saved, _) = Self::load_or_create()?;
+        if saved.secret == self.secret {
+            return Ok(false);
+        }
+        saved.secret.clone_from(&self.secret);
+        saved.save()?;
+        Ok(true)
     }
 }
 
@@ -109,6 +123,21 @@ pub fn config_path() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("dev", "Blind", "Blind")
         .ok_or_else(|| anyhow::anyhow!("could not locate the user config directory"))?;
     Ok(dirs.config_dir().join("config.json"))
+}
+
+pub fn repair_config_permissions() -> Result<bool> {
+    let path = config_path()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let metadata = fs::metadata(&path)?;
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub fn registry_path() -> Result<PathBuf> {
