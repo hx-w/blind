@@ -30,11 +30,12 @@ use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use crate::{
     config::{Config, config_path, normalize_origin},
+    lod::{self, LodAsset, LodCache},
     mesh,
     network::{HostCandidate, discover},
     registry::{RegisteredScene, Registry, RegistryAudit, RegistryLookupError, is_short_secret},
     render::Renderer,
-    scene::{SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
+    scene::{MeshFormat, MeshQuality, SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
     token::{Scope, TokenCodec},
 };
 
@@ -49,6 +50,8 @@ pub struct AppState {
     pub registry: Arc<Registry>,
     pub renderer: Option<Arc<Renderer>>,
     pub image_slots: Arc<tokio::sync::Semaphore>,
+    pub lod_slots: Arc<tokio::sync::Semaphore>,
+    pub lod_cache: LodCache,
     pub shutdown: tokio::sync::mpsc::Sender<()>,
     doctor_lock: Arc<tokio::sync::Mutex<()>>,
     short_misses: Arc<Mutex<MissLimiter>>,
@@ -176,7 +179,9 @@ struct PublicMesh {
     color: String,
     opacity: f32,
     visible: bool,
+    quality: MeshQuality,
     source_url: String,
+    lod_url: String,
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
@@ -199,6 +204,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         registry,
         renderer,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        lod_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        lod_cache: LodCache::default(),
         shutdown: shutdown_tx,
         doctor_lock: Arc::new(tokio::sync::Mutex::new(())),
         short_misses: Arc::new(Mutex::new(MissLimiter::default())),
@@ -220,6 +227,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/v1/scenes", post(create_scene))
         .route("/api/v1/scenes/{token}", get(get_scene))
         .route("/api/v1/scenes/{token}/meshes/{index}", get(get_mesh))
+        .route(
+            "/api/v1/scenes/{token}/meshes/{index}/lod",
+            get(get_mesh_lod),
+        )
         .route("/api/v1/scenes/{token}/share", post(reshare))
         .route("/i/{*token}", get(render_image))
         .route("/s/{token}", get(view_scene))
@@ -640,7 +651,9 @@ async fn get_scene(
             color: mesh.color.clone(),
             opacity: mesh.opacity,
             visible: mesh.visible,
+            quality: mesh.quality,
             source_url: format!("/api/v1/scenes/{token}/meshes/{index}"),
+            lod_url: format!("/api/v1/scenes/{token}/meshes/{index}/lod"),
         })
         .collect();
     Ok((
@@ -688,8 +701,86 @@ async fn get_mesh(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, NO_STORE)
+        .header("x-blind-raw-bytes", bytes.len())
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))?)
+}
+
+async fn get_mesh_lod(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    AxumPath((token, index)): AxumPath<(String, usize)>,
+) -> Result<Response<Body>, AppError> {
+    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let scene = opened.scene;
+    let mesh = scene
+        .meshes
+        .get(index)
+        .ok_or_else(|| AppError::not_found("Mesh not found"))?;
+    let target_triangles = lod::target_triangles(scene.meshes.len());
+    let key = lod::cache_key(&mesh.revision, mesh.format, target_triangles);
+    if let Some(asset) = state.lod_cache.get(&key) {
+        return lod_response(asset);
+    }
+
+    let _permit = state
+        .lod_slots
+        .acquire()
+        .await
+        .map_err(|error| AppError::unavailable(&error.to_string()))?;
+    if let Some(asset) = state.lod_cache.get(&key) {
+        return lod_response(asset);
+    }
+
+    // Do not retain a potentially large source buffer while this request waits
+    // for one of the bounded simplification slots.
+    let source = match tokio::fs::read(&mesh.path).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            mark_scene_gone(&state, &token);
+            return Err(SceneGone.into());
+        }
+    };
+    if hash_bytes(&source) != mesh.revision {
+        mark_scene_gone(&state, &token);
+        return Err(SceneGone.into());
+    }
+
+    let path = mesh.path.clone();
+    let format = mesh.format;
+    let asset = tokio::task::spawn_blocking(move || {
+        lod::build(
+            std::path::Path::new(&path),
+            source,
+            format,
+            target_triangles,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| AppError::internal(&error.to_string()))?
+    .map_err(|error| AppError::unprocessable(&error))?;
+    if scene.validate().await.is_err() {
+        mark_scene_gone(&state, &token);
+        return Err(SceneGone.into());
+    }
+    let asset = Arc::new(asset);
+    state.lod_cache.insert(key, asset.clone());
+    lod_response(asset)
+}
+
+fn lod_response(asset: Arc<LodAsset>) -> Result<Response<Body>, AppError> {
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, MeshFormat::Ply.mime())
+        .header(header::CACHE_CONTROL, NO_STORE)
+        .header("x-blind-raw-bytes", asset.raw_bytes)
+        .header("x-blind-lod-bytes", asset.bytes.len())
+        .header("x-blind-lod-triangles", asset.triangles)
+        .header("x-blind-source-triangles", asset.source_triangles)
+        .header("x-blind-lod-error", asset.error.to_string())
+        .header(header::CONTENT_LENGTH, asset.bytes.len())
+        .body(Body::from(asset.bytes.clone()))?)
 }
 
 async fn reshare(

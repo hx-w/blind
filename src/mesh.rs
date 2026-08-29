@@ -190,6 +190,26 @@ pub fn serve_bytes(bytes: Vec<u8>, format: MeshFormat) -> Result<(Vec<u8>, &'sta
 }
 
 pub fn pts_geometry(bytes: &[u8]) -> Result<Geometry> {
+    pts_geometry_with_detail(
+        bytes,
+        TUBE_RADIAL_SEGMENTS,
+        SPHERE_LONGITUDE_SEGMENTS,
+        SPHERE_LATITUDE_SEGMENTS,
+    )
+}
+
+/// A lightweight PTS preview keeps every ordered source point while reducing
+/// only the procedural tube and marker tessellation.
+pub fn pts_lod_geometry(bytes: &[u8]) -> Result<Geometry> {
+    pts_geometry_with_detail(bytes, 6, 6, 4)
+}
+
+fn pts_geometry_with_detail(
+    bytes: &[u8],
+    tube_radial_segments: usize,
+    sphere_longitude_segments: usize,
+    sphere_latitude_segments: usize,
+) -> Result<Geometry> {
     let mut points = Vec::new();
     for line in String::from_utf8_lossy(bytes).lines() {
         let line = line.trim();
@@ -237,14 +257,25 @@ pub fn pts_geometry(bytes: &[u8]) -> Result<Geometry> {
         positions: Vec::new(),
         indices: Vec::new(),
     };
-    append_closed_tube(&mut geometry, &points, tube_radius)?;
+    append_closed_tube(&mut geometry, &points, tube_radius, tube_radial_segments)?;
     for point in points {
-        append_sphere(&mut geometry, point, point_radius)?;
+        append_sphere(
+            &mut geometry,
+            point,
+            point_radius,
+            sphere_longitude_segments,
+            sphere_latitude_segments,
+        )?;
     }
     Ok(geometry)
 }
 
-fn append_closed_tube(geometry: &mut Geometry, points: &[Vec3], radius: f32) -> Result<()> {
+fn append_closed_tube(
+    geometry: &mut Geometry,
+    points: &[Vec3],
+    radius: f32,
+    radial_segments: usize,
+) -> Result<()> {
     let count = points.len();
     let tangents: Vec<_> = (0..count)
         .map(|index| {
@@ -284,8 +315,8 @@ fn append_closed_tube(geometry: &mut Geometry, points: &[Vec3], radius: f32) -> 
     for index in 0..count {
         let normal = normals[index];
         let binormal = tangents[index].cross(normal).normalize_or_zero();
-        for side in 0..TUBE_RADIAL_SEGMENTS {
-            let angle = std::f32::consts::TAU * side as f32 / TUBE_RADIAL_SEGMENTS as f32;
+        for side in 0..radial_segments {
+            let angle = std::f32::consts::TAU * side as f32 / radial_segments as f32;
             let radial = normal * angle.cos() + binormal * angle.sin();
             geometry
                 .positions
@@ -294,27 +325,33 @@ fn append_closed_tube(geometry: &mut Geometry, points: &[Vec3], radius: f32) -> 
     }
     for index in 0..count {
         let next = (index + 1) % count;
-        for side in 0..TUBE_RADIAL_SEGMENTS {
-            let next_side = (side + 1) % TUBE_RADIAL_SEGMENTS;
-            let a = base + (index * TUBE_RADIAL_SEGMENTS + side) as u32;
-            let b = base + (next * TUBE_RADIAL_SEGMENTS + side) as u32;
-            let c = base + (next * TUBE_RADIAL_SEGMENTS + next_side) as u32;
-            let d = base + (index * TUBE_RADIAL_SEGMENTS + next_side) as u32;
+        for side in 0..radial_segments {
+            let next_side = (side + 1) % radial_segments;
+            let a = base + (index * radial_segments + side) as u32;
+            let b = base + (next * radial_segments + side) as u32;
+            let c = base + (next * radial_segments + next_side) as u32;
+            let d = base + (index * radial_segments + next_side) as u32;
             geometry.indices.extend_from_slice(&[a, d, c, a, c, b]);
         }
     }
     Ok(())
 }
 
-fn append_sphere(geometry: &mut Geometry, center: Vec3, radius: f32) -> Result<()> {
+fn append_sphere(
+    geometry: &mut Geometry,
+    center: Vec3,
+    radius: f32,
+    longitude_segments: usize,
+    latitude_segments: usize,
+) -> Result<()> {
     let base = u32::try_from(geometry.positions.len()).context("PTS geometry is too large")?;
     geometry
         .positions
         .push((center + Vec3::Y * radius).to_array());
-    for latitude in 1..SPHERE_LATITUDE_SEGMENTS {
-        let phi = std::f32::consts::PI * latitude as f32 / SPHERE_LATITUDE_SEGMENTS as f32;
-        for longitude in 0..SPHERE_LONGITUDE_SEGMENTS {
-            let theta = std::f32::consts::TAU * longitude as f32 / SPHERE_LONGITUDE_SEGMENTS as f32;
+    for latitude in 1..latitude_segments {
+        let phi = std::f32::consts::PI * latitude as f32 / latitude_segments as f32;
+        for longitude in 0..longitude_segments {
+            let theta = std::f32::consts::TAU * longitude as f32 / longitude_segments as f32;
             let normal = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
             geometry
                 .positions
@@ -326,19 +363,17 @@ fn append_sphere(geometry: &mut Geometry, center: Vec3, radius: f32) -> Result<(
         .positions
         .push((center - Vec3::Y * radius).to_array());
     let ring = |latitude: usize, longitude: usize| {
-        base + 1
-            + ((latitude - 1) * SPHERE_LONGITUDE_SEGMENTS + longitude % SPHERE_LONGITUDE_SEGMENTS)
-                as u32
+        base + 1 + ((latitude - 1) * longitude_segments + longitude % longitude_segments) as u32
     };
-    for longitude in 0..SPHERE_LONGITUDE_SEGMENTS {
-        let next = (longitude + 1) % SPHERE_LONGITUDE_SEGMENTS;
+    for longitude in 0..longitude_segments {
+        let next = (longitude + 1) % longitude_segments;
         geometry
             .indices
             .extend_from_slice(&[base, ring(1, next), ring(1, longitude)]);
     }
-    for latitude in 1..SPHERE_LATITUDE_SEGMENTS - 1 {
-        for longitude in 0..SPHERE_LONGITUDE_SEGMENTS {
-            let next = (longitude + 1) % SPHERE_LONGITUDE_SEGMENTS;
+    for latitude in 1..latitude_segments - 1 {
+        for longitude in 0..longitude_segments {
+            let next = (longitude + 1) % longitude_segments;
             let a = ring(latitude, longitude);
             let b = ring(latitude + 1, longitude);
             let c = ring(latitude + 1, next);
@@ -346,9 +381,9 @@ fn append_sphere(geometry: &mut Geometry, center: Vec3, radius: f32) -> Result<(
             geometry.indices.extend_from_slice(&[a, c, b, a, d, c]);
         }
     }
-    let last_ring = SPHERE_LATITUDE_SEGMENTS - 1;
-    for longitude in 0..SPHERE_LONGITUDE_SEGMENTS {
-        let next = (longitude + 1) % SPHERE_LONGITUDE_SEGMENTS;
+    let last_ring = latitude_segments - 1;
+    for longitude in 0..longitude_segments {
+        let next = (longitude + 1) % longitude_segments;
         geometry.indices.extend_from_slice(&[
             ring(last_ring, next),
             bottom,
@@ -473,7 +508,7 @@ mod tests {
                 Vec3::new(angle.cos() * 4.0, angle.sin() * 4.0, 0.0)
             })
             .collect();
-        append_closed_tube(&mut tube, &points, 0.2).unwrap();
+        append_closed_tube(&mut tube, &points, 0.2, TUBE_RADIAL_SEGMENTS).unwrap();
         for triangle in tube.indices.chunks_exact(3) {
             let vertices = [
                 Vec3::from_array(tube.positions[triangle[0] as usize]),
@@ -491,7 +526,14 @@ mod tests {
             positions: Vec::new(),
             indices: Vec::new(),
         };
-        append_sphere(&mut sphere, Vec3::ZERO, 1.0).unwrap();
+        append_sphere(
+            &mut sphere,
+            Vec3::ZERO,
+            1.0,
+            SPHERE_LONGITUDE_SEGMENTS,
+            SPHERE_LATITUDE_SEGMENTS,
+        )
+        .unwrap();
         for triangle in sphere.indices.chunks_exact(3) {
             let vertices = [
                 Vec3::from_array(sphere.positions[triangle[0] as usize]),

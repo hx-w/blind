@@ -15,9 +15,35 @@ declare module 'three/addons/controls/ArcballControls.js' {
   }
 }
 
+export type MeshQuality = 'lod' | 'raw';
+
+export interface ViewerMesh extends PublicMesh {
+  quality: MeshQuality;
+  raw_bytes: number;
+  lod_bytes?: number;
+  source_triangles?: number;
+  lod_triangles?: number;
+  loading: boolean;
+  lod_error?: string;
+}
+
 interface Model {
-  info: PublicMesh;
+  info: ViewerMesh;
   object: THREE.Object3D;
+}
+
+interface LoadedObject {
+  object: THREE.Object3D;
+  payloadBytes: number;
+  rawBytes?: number;
+  sourceTriangles?: number;
+  lodTriangles?: number;
+}
+
+export interface MeshLoadProgress {
+  completed: number;
+  total: number;
+  rawFallbacks: number;
 }
 
 export class MeshViewer {
@@ -39,6 +65,8 @@ export class MeshViewer {
   private pointerStart: { x: number; y: number } | null = null;
   private lastTap = { index: -1, time: 0 };
   onSelectionChange?: (index: number) => void;
+  onModelChange?: () => void;
+  onLoadProgress?: (progress: MeshLoadProgress) => void;
   onViewChangeStart?: () => void;
 
   constructor(private readonly root: HTMLElement) {
@@ -73,29 +101,42 @@ export class MeshViewer {
     this.state = structuredClone(scene.state);
     this.state.strokes ??= [];
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
-    const objects = await Promise.all(scene.meshes.map(loadObject));
-    objects.forEach((object, index) => {
-      const info = scene.meshes[index];
-      object.userData.modelIndex = index;
-      object.traverse((child) => {
-        if (!(child instanceof THREE.Mesh)) return;
-        child.userData.modelIndex = index;
-        const geometry = child.geometry as THREE.BufferGeometry;
-        normalizeGeometry(geometry);
-        // Review the geometry itself rather than trusting optional exporter normals,
-        // which are frequently quantized or face-split in scan files.
-        geometry.deleteAttribute('normal');
-        geometry.computeVertexNormals();
-        child.material = createMatteMaterial({
-          color: info.color,
-          opacity: info.opacity,
-          flat: scene.state.shading === 'flat',
-          wireframe: scene.state.shading === 'wire',
-          layer: index,
-        });
-      });
-      this.models.push({ info: { ...info }, object });
-      this.scene.add(object);
+    let completed = 0;
+    let rawFallbacks = 0;
+    this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks });
+    const loaded = await Promise.all(scene.meshes.map(async (info) => {
+      let result;
+      const requestedQuality = info.quality ?? 'lod';
+      try {
+        result = { quality: requestedQuality, asset: await loadObject(info, requestedQuality) };
+      } catch (error) {
+        if (requestedQuality === 'raw') throw error;
+        rawFallbacks += 1;
+        result = {
+          quality: 'raw' as const,
+          asset: await loadObject(info, 'raw'),
+          lodError: error instanceof Error ? error.message : 'LOD 不可用',
+        };
+      }
+      completed += 1;
+      this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks });
+      return result;
+    }));
+    loaded.forEach(({ quality, asset, lodError }, index) => {
+      const source = scene.meshes[index];
+      const info: ViewerMesh = {
+        ...source,
+        quality,
+        raw_bytes: asset.rawBytes ?? source.byte_size,
+        lod_bytes: quality === 'lod' ? asset.payloadBytes : undefined,
+        source_triangles: asset.sourceTriangles,
+        lod_triangles: asset.lodTriangles,
+        loading: false,
+        lod_error: lodError,
+      };
+      this.prepareObject(asset.object, index, info);
+      this.models.push({ info, object: asset.object });
+      this.scene.add(asset.object);
     });
     this.applyState();
     this.refreshVisibleBounds();
@@ -108,8 +149,8 @@ export class MeshViewer {
 
   get modelCount(): number { return this.models.length; }
   get selectedIndex(): number { return this.selected; }
-  get selectedModel(): PublicMesh | undefined { return this.models[this.selected]?.info; }
-  get modelInfos(): PublicMesh[] { return this.models.map((model) => model.info); }
+  get selectedModel(): ViewerMesh | undefined { return this.models[this.selected]?.info; }
+  get modelInfos(): ViewerMesh[] { return this.models.map((model) => model.info); }
   get currentState(): ViewState { return this.exportState(); }
 
   setInteractionEnabled(enabled: boolean): void { this.controls.enabled = enabled; }
@@ -132,6 +173,45 @@ export class MeshViewer {
     this.resizeHelpers();
     this.updateClipping();
     this.dirty = true;
+    this.onModelChange?.();
+  }
+
+  async setQuality(index: number, quality: MeshQuality): Promise<void> {
+    const model = this.models[index];
+    if (!model || model.info.quality === quality || model.info.loading) return;
+    model.info.loading = true;
+    model.info.lod_error = undefined;
+    this.onModelChange?.();
+    try {
+      const loaded = await loadObject(model.info, quality);
+      this.prepareObject(loaded.object, index, model.info);
+      loaded.object.visible = model.info.visible;
+      this.scene.add(loaded.object);
+      this.scene.remove(model.object);
+      disposeObject(model.object);
+      model.object = loaded.object;
+      model.info.quality = quality;
+      if (quality === 'lod') {
+        model.info.lod_bytes = loaded.payloadBytes;
+        model.info.raw_bytes = loaded.rawBytes ?? model.info.raw_bytes;
+        model.info.source_triangles = loaded.sourceTriangles;
+        model.info.lod_triangles = loaded.lodTriangles;
+      } else {
+        model.info.raw_bytes = loaded.rawBytes ?? loaded.payloadBytes;
+      }
+      this.refreshVisibleBounds();
+      this.resizeHelpers();
+      this.updateClipping();
+      this.dirty = true;
+    } catch (error) {
+      if (quality === 'lod') {
+        model.info.lod_error = error instanceof Error ? error.message : 'LOD 不可用';
+      }
+      throw error;
+    } finally {
+      model.info.loading = false;
+      this.onModelChange?.();
+    }
   }
 
   setColor(color: string): void { const model = this.models[this.selected]; if (model) { model.info.color = color; this.applyMaterials(); } }
@@ -196,7 +276,7 @@ export class MeshViewer {
 
   exportUpdate(): SceneUpdate {
     return {
-      meshes: this.models.map(({ info }) => ({ color: info.color, opacity: info.opacity, visible: info.visible })),
+      meshes: this.models.map(({ info }) => ({ color: info.color, opacity: info.opacity, visible: info.visible, quality: info.quality })),
       state: this.exportState(),
     };
   }
@@ -217,6 +297,27 @@ export class MeshViewer {
     this.models.forEach((model) => { model.object.visible = model.info.visible; });
     if (this.state.projection === 'orthographic') { this.state.projection = 'perspective'; this.setProjection('orthographic'); }
     this.applyMaterials();
+  }
+
+  private prepareObject(object: THREE.Object3D, index: number, info: ViewerMesh): void {
+    object.userData.modelIndex = index;
+    object.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      child.userData.modelIndex = index;
+      const geometry = child.geometry as THREE.BufferGeometry;
+      normalizeGeometry(geometry);
+      // Review the geometry itself rather than trusting optional exporter normals,
+      // which are frequently quantized or face-split in scan files.
+      geometry.deleteAttribute('normal');
+      geometry.computeVertexNormals();
+      child.material = createMatteMaterial({
+        color: info.color,
+        opacity: info.opacity,
+        flat: this.state.shading === 'flat',
+        wireframe: this.state.shading === 'wire',
+        layer: index,
+      });
+    });
   }
 
   private applyMaterials(): void {
@@ -338,7 +439,7 @@ export class MeshViewer {
     const now = performance.now(); if (this.lastTap.index === index && now - this.lastTap.time < 320) this.focusSelected();
     this.lastTap = { index, time: now }; this.select(index);
   };
-  private disposeModels(): void { for (const model of this.models) { this.scene.remove(model.object); model.object.traverse((child) => { if (child instanceof THREE.Mesh) { child.geometry.dispose(); (child.material as THREE.Material).dispose(); } }); } this.models = []; }
+  private disposeModels(): void { for (const model of this.models) { this.scene.remove(model.object); disposeObject(model.object); } this.models = []; }
   private animate = (): void => {
     requestAnimationFrame(this.animate);
     if (this.dirty) {
@@ -348,14 +449,37 @@ export class MeshViewer {
   };
 }
 
-async function loadObject(info: PublicMesh): Promise<THREE.Object3D> {
-  const response = await fetch(info.source_url, { cache: 'no-store' }); if (!response.ok) throw await apiError(response);
+async function loadObject(info: PublicMesh, quality: MeshQuality): Promise<LoadedObject> {
+  const response = await fetch(quality === 'lod' ? info.lod_url : info.source_url, { cache: 'no-store' }); if (!response.ok) throw await apiError(response);
   const buffer = await response.arrayBuffer();
-  if (info.format === 'ply' || info.format === 'pts') {
-    return new THREE.Mesh(new PLYLoader().parse(buffer));
-  }
-  if (info.format === 'stl') return new THREE.Mesh(new STLLoader().parse(buffer));
-  return new OBJLoader().parse(new TextDecoder().decode(buffer));
+  const format = quality === 'lod' ? 'ply' : info.format;
+  let object: THREE.Object3D;
+  if (format === 'ply' || format === 'pts') object = new THREE.Mesh(new PLYLoader().parse(buffer));
+  else if (format === 'stl') object = new THREE.Mesh(new STLLoader().parse(buffer));
+  else object = new OBJLoader().parse(new TextDecoder().decode(buffer));
+  return {
+    object,
+    payloadBytes: buffer.byteLength,
+    rawBytes: numberHeader(response, 'x-blind-raw-bytes'),
+    sourceTriangles: numberHeader(response, 'x-blind-source-triangles'),
+    lodTriangles: numberHeader(response, 'x-blind-lod-triangles'),
+  };
+}
+
+function numberHeader(response: Response, name: string): number | undefined {
+  const value = response.headers.get(name);
+  if (value === null) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function disposeObject(object: THREE.Object3D): void {
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.geometry.dispose();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach((material) => material.dispose());
+  });
 }
 
 function settledLayout(): Promise<void> {

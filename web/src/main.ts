@@ -1,7 +1,7 @@
 import './styles.css';
 import { ApiError, loadScene, shareScene, type HostCandidate, type PublicScene, type ShareResponse } from './api';
 import { MarkupCanvas } from './markup';
-import { MeshViewer } from './viewer';
+import { MeshViewer, type MeshQuality } from './viewer';
 
 const $ = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -10,7 +10,6 @@ const $ = <T extends HTMLElement>(selector: string): T => {
 };
 
 const isMobileViewport = (): boolean => matchMedia('(max-width: 759px)').matches;
-const meshSheetHeight = (): number => Math.min(innerHeight * 0.52, 62 + meshViewer.modelCount * 58);
 
 const shell = $('#app-shell');
 const root = $('#canvas-root');
@@ -18,14 +17,22 @@ const viewerElement = $('#viewer');
 const title = $('#scene-title');
 const meta = $('#scene-meta');
 const loading = $('#loading-state');
+const loadingTitle = $('#loading-title');
+const loadingMeter = $('#loading-meter');
+const loadingBar = $('#loading-bar');
+const loadingProgress = $('#loading-progress');
 const invalid = $('#invalid-state');
 const empty = $('#empty-state');
 const panel = $('#control-panel');
 const panelTitle = $('#panel-title');
 const panelContext = $('#panel-context');
 const dragZone = $('#panel-drag-zone');
-const meshList = $('#mesh-list');
-const meshCount = $('#mesh-count');
+const detailMeshSelect = $('#detail-mesh-select') as HTMLSelectElement;
+const meshVisibleToggle = $('#mesh-visible-toggle') as HTMLInputElement;
+const meshSummaryDot = $('#mesh-summary-dot');
+const meshSummaryName = $('#mesh-summary-name');
+const meshSummaryMeta = $('#mesh-summary-meta');
+const lodSaving = $('#lod-saving');
 const opacity = $('#opacity-range') as HTMLInputElement;
 const opacityValue = $('#opacity-value') as HTMLOutputElement;
 const axesToggle = $('#axes-toggle') as HTMLInputElement;
@@ -52,18 +59,25 @@ const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa
 const token = location.pathname.match(/^\/(?:s|v)\/([^/]+)$/)?.[1];
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
-let activePanel: 'meshes' | 'style' | null = null;
+let activePanel: 'details' | null = null;
 let shareLinks: ShareResponse | undefined;
 let toastTimer = 0;
 let panelHeight = 0;
 let dragStart: { y: number; height: number } | null = null;
 let suppressHandleClick = false;
 let expanded = false;
+let loadProgress = { completed: 0, total: 0, rawFallbacks: 0 };
+let longLoadTimer = 0;
 const meshViewer = new MeshViewer(root);
 const markup = new MarkupCanvas($('#markup-canvas') as HTMLCanvasElement);
 
 meshViewer.onSelectionChange = () => {
-  renderMeshList(); syncStyleControls();
+  syncDetailControls();
+};
+meshViewer.onModelChange = () => { syncDetailControls(); syncSceneMeta(); };
+meshViewer.onLoadProgress = (progress) => {
+  loadProgress = progress;
+  renderLoadProgress();
 };
 meshViewer.onViewChangeStart = invalidateMarkupForViewChange;
 markup.onChange = () => {
@@ -80,22 +94,50 @@ async function start(): Promise<void> {
     hideViewerControls(); return;
   }
   try {
+    startLongLoadHint();
     scene = await loadScene(token, owner);
+    startLongLoadHint();
     await meshViewer.load(scene);
     markup.load(scene.state.strokes ?? []);
     title.textContent = scene.title;
-    meta.textContent = `${scene.meshes.length} ${scene.meshes.length === 1 ? 'mesh' : 'meshes'} · ${formatBytes(scene.meshes.reduce((sum, mesh) => sum + mesh.byte_size, 0))}`;
-    meshCount.textContent = String(scene.meshes.length);
     owner = scene.owner ? owner : undefined;
-    renderMeshList(); renderSwatches(); syncStyleControls();
-    loading.hidden = true;
+    renderMeshOptions(); renderSwatches(); syncDetailControls(); syncSceneMeta();
+    finishLoading();
   } catch (error) {
-    loading.hidden = true; hideViewerControls();
+    finishLoading(); hideViewerControls();
     invalid.hidden = false;
     if (!(error instanceof ApiError && error.status === 410)) {
       invalid.querySelector('span')!.textContent = error instanceof ApiError ? String(error.status) : 'ERR';
     }
   }
+}
+
+function renderLoadProgress(): void {
+  const { completed, total, rawFallbacks } = loadProgress;
+  const percent = total > 0 ? Math.round(completed / total * 100) : 0;
+  loadingMeter.hidden = total === 0;
+  loadingMeter.setAttribute('aria-valuenow', String(percent));
+  loadingBar.style.setProperty('--loading-progress', `${percent}%`);
+  loadingTitle.textContent = completed >= total && total > 0 ? '正在打开场景' : '正在生成 LOD';
+  loadingProgress.textContent = total > 0
+    ? `${completed} / ${total} Mesh${rawFallbacks > 0 ? ` · ${rawFallbacks} 个回退 Raw` : ''}`
+    : '正在验证源 Mesh';
+}
+
+function startLongLoadHint(): void {
+  window.clearTimeout(longLoadTimer);
+  longLoadTimer = window.setTimeout(() => {
+    if (!loading.hidden && (loadProgress.total === 0 || loadProgress.completed < loadProgress.total)) {
+      loadingTitle.textContent = loadProgress.total === 0
+        ? '源 Mesh 较大，正在验证'
+        : '首次生成 LOD，可能需要片刻';
+    }
+  }, 1800);
+}
+
+function finishLoading(): void {
+  window.clearTimeout(longLoadTimer);
+  loading.hidden = true;
 }
 
 function restoreOwner(sceneToken: string): string | undefined {
@@ -113,20 +155,13 @@ function hideViewerControls(): void {
   document.querySelectorAll<HTMLElement>('[data-viewer-chrome]').forEach((element) => { element.hidden = true; });
 }
 
-function renderMeshList(): void {
-  meshList.replaceChildren();
-  meshViewer.modelInfos.forEach((mesh, index) => {
-    const row = document.createElement('div'); row.className = `mesh-row${index === meshViewer.selectedIndex ? ' selected' : ''}`;
-    const select = document.createElement('button'); select.type = 'button'; select.className = 'mesh-select';
-    select.setAttribute('aria-label', `选择 ${mesh.name}`);
-    select.innerHTML = `<span class="mesh-dot" style="--mesh-color:${escapeAttribute(mesh.color)}"></span><span class="mesh-copy"><strong>${escapeHtml(mesh.name)}</strong><small>${mesh.format.toUpperCase()} · ${formatBytes(mesh.byte_size)}</small></span>`;
-    select.addEventListener('click', () => { meshViewer.select(index); if (isMobileViewport()) closePanel(); });
-    const eye = document.createElement('button'); eye.type = 'button'; eye.className = 'mesh-eye';
-    eye.setAttribute('aria-label', mesh.visible ? `隐藏 ${mesh.name}` : `显示 ${mesh.name}`);
-    eye.setAttribute('aria-pressed', String(mesh.visible)); eye.innerHTML = eyeIcon(mesh.visible);
-    eye.addEventListener('click', () => { meshViewer.setVisible(index, !mesh.visible); renderMeshList(); });
-    row.append(select, eye); meshList.append(row);
-  });
+function renderMeshOptions(): void {
+  detailMeshSelect.replaceChildren(...meshViewer.modelInfos.map((mesh, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = mesh.name;
+    return option;
+  }));
 }
 
 function renderSwatches(): void {
@@ -134,15 +169,35 @@ function renderSwatches(): void {
   palette.forEach((color) => {
     const button = document.createElement('button'); button.type = 'button'; button.className = 'swatch';
     button.style.setProperty('--swatch', color); button.setAttribute('aria-label', `使用颜色 ${color}`);
-    button.addEventListener('click', () => { meshViewer.setColor(color); syncStyleControls(); renderMeshList(); });
+    button.addEventListener('click', () => { meshViewer.setColor(color); syncDetailControls(); });
     host.append(button);
   });
 }
 
-function syncStyleControls(): void {
+function syncDetailControls(): void {
   const selected = meshViewer.selectedModel; if (!selected) return;
-  panelContext.textContent = activePanel === 'style' ? selected.name : '';
+  panelContext.textContent = activePanel === 'details' ? selected.name : '';
+  detailMeshSelect.value = String(meshViewer.selectedIndex);
+  meshSummaryName.textContent = selected.name;
+  meshSummaryMeta.textContent = `${selected.format.toUpperCase()} · Raw ${formatBytes(selected.raw_bytes)}`;
+  meshSummaryDot.style.setProperty('--mesh-color', selected.color);
+  meshVisibleToggle.checked = selected.visible;
   opacity.value = String(Math.round(selected.opacity * 100)); opacityValue.value = `${opacity.value}%`;
+  document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach((button) => {
+    const quality = button.dataset.quality as MeshQuality;
+    button.classList.toggle('active', quality === selected.quality);
+    button.setAttribute('aria-pressed', String(quality === selected.quality));
+    button.disabled = selected.loading;
+  });
+  if (selected.loading) lodSaving.textContent = `正在加载 ${selected.quality === 'lod' ? 'Raw' : 'LOD'} Mesh`;
+  else if (selected.lod_bytes !== undefined) {
+    const delta = selected.raw_bytes - selected.lod_bytes;
+    const percent = selected.raw_bytes > 0 ? Math.round(Math.max(0, delta) / selected.raw_bytes * 100) : 0;
+    lodSaving.textContent = delta >= 0
+      ? `Raw ${formatBytes(selected.raw_bytes)} · LOD ${formatBytes(selected.lod_bytes)} · 节省 ${formatBytes(delta)} (${percent}%)`
+      : `Raw ${formatBytes(selected.raw_bytes)} · LOD ${formatBytes(selected.lod_bytes)} · 小型 Mesh 增加 ${formatBytes(-delta)}`;
+  } else if (selected.lod_error) lodSaving.textContent = 'LOD 暂不可用，当前已回退到 Raw';
+  else lodSaving.textContent = '首次切换到 LOD 后显示节省量';
   document.querySelectorAll<HTMLButtonElement>('.swatch').forEach((button) => button.classList.toggle('active', button.style.getPropertyValue('--swatch').trim().toLowerCase() === selected.color.toLowerCase()));
   const state = meshViewer.currentState;
   document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.classList.toggle('active', button.dataset.shading === state.shading));
@@ -151,25 +206,25 @@ function syncStyleControls(): void {
 }
 
 document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => button.addEventListener('click', () => {
-  const target = button.dataset.panel as 'meshes' | 'style';
+  const target = button.dataset.panel as 'details';
   if (activePanel === target) closePanel(); else openPanel(target);
 }));
 
-function openPanel(kind: 'meshes' | 'style'): void {
+function openPanel(kind: 'details'): void {
   activePanel = kind; expanded = false;
-  panelTitle.textContent = kind === 'meshes' ? 'Mesh' : '样式';
-  panelContext.textContent = kind === 'style' ? meshViewer.selectedModel?.name ?? '' : '';
+  panelTitle.textContent = '详情';
+  panelContext.textContent = meshViewer.selectedModel?.name ?? '';
   document.querySelectorAll<HTMLElement>('[data-panel-content]').forEach((section) => { section.hidden = section.dataset.panelContent !== kind; });
   document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => {
     const active = button.dataset.panel === kind; button.classList.toggle('active', active); button.setAttribute('aria-expanded', String(active));
   });
   if (isMobileViewport()) {
-    panelHeight = kind === 'meshes' ? meshSheetHeight() : innerHeight * 0.44;
+    panelHeight = innerHeight * 0.58;
     setPanelHeight(panelHeight);
   }
-  dragZone.setAttribute('aria-label', kind === 'style' ? '展开样式面板' : '关闭 Mesh 面板');
+  dragZone.setAttribute('aria-label', '展开详情面板');
   shell.classList.add('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'false');
-  syncStyleControls();
+  syncDetailControls();
 }
 
 function closePanel(): void {
@@ -193,39 +248,45 @@ dragZone.addEventListener('pointerup', (event) => {
   const delta = dragStart.y - event.clientY; dragStart = null;
   suppressHandleClick = Math.abs(delta) > 8;
   if (delta < -90) { closePanel(); return; }
-  if (activePanel === 'style') {
-    expanded = panelHeight > innerHeight * 0.62 || delta > 70;
-    applyStyleDetent();
-  } else setPanelHeight(meshSheetHeight());
+  expanded = panelHeight > innerHeight * 0.68 || delta > 70;
+  applyDetailDetent();
 });
 dragZone.addEventListener('click', () => {
   if (suppressHandleClick) { suppressHandleClick = false; return; }
-  if (activePanel === 'style' && isMobileViewport()) {
-    expanded = !expanded; applyStyleDetent();
-  } else if (activePanel === 'meshes' && isMobileViewport()) {
-    closePanel();
+  if (activePanel === 'details' && isMobileViewport()) {
+    expanded = !expanded; applyDetailDetent();
   }
 });
 dragZone.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' || event.key === ' ') {
-    if (activePanel === 'style') { event.preventDefault(); expanded = !expanded; applyStyleDetent(); }
-    else if (activePanel === 'meshes') { event.preventDefault(); closePanel(); }
+    if (activePanel === 'details') { event.preventDefault(); expanded = !expanded; applyDetailDetent(); }
   }
 });
 
-function applyStyleDetent(): void {
-  setPanelHeight(innerHeight * (expanded ? 0.82 : 0.44));
+function applyDetailDetent(): void {
+  setPanelHeight(innerHeight * (expanded ? 0.82 : 0.58));
   panel.classList.toggle('expanded', expanded);
-  dragZone.setAttribute('aria-label', expanded ? '收起样式面板' : '展开样式面板');
+  dragZone.setAttribute('aria-label', expanded ? '收起详情面板' : '展开详情面板');
 }
 
 $('#close-panel').addEventListener('click', closePanel);
 $('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast('已适配全部可见 Mesh'); });
+detailMeshSelect.addEventListener('change', () => meshViewer.select(Number(detailMeshSelect.value)));
+meshVisibleToggle.addEventListener('change', () => meshViewer.setVisible(meshViewer.selectedIndex, meshVisibleToggle.checked));
 opacity.addEventListener('input', () => { meshViewer.setOpacity(Number(opacity.value) / 100); opacityValue.value = `${opacity.value}%`; });
-document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.addEventListener('click', () => { meshViewer.setShading(button.dataset.shading as 'smooth' | 'flat' | 'wire'); syncStyleControls(); }));
+document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach((button) => button.addEventListener('click', async () => {
+  const quality = button.dataset.quality as MeshQuality;
+  try {
+    await meshViewer.setQuality(meshViewer.selectedIndex, quality);
+    syncDetailControls(); syncSceneMeta();
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : `无法加载 ${quality.toUpperCase()} Mesh`);
+  }
+}));
+document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.addEventListener('click', () => { meshViewer.setShading(button.dataset.shading as 'smooth' | 'flat' | 'wire'); syncDetailControls(); }));
 // Framing changes surface through meshViewer.onViewChangeStart from the viewer
 // itself, so programmatic actions clear marks the same way gestures do.
-document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.addEventListener('click', () => { meshViewer.setProjection(button.dataset.projection as 'perspective' | 'orthographic'); syncStyleControls(); }));
+document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.addEventListener('click', () => { meshViewer.setProjection(button.dataset.projection as 'perspective' | 'orthographic'); syncDetailControls(); }));
 axesToggle.addEventListener('change', () => meshViewer.setAxes(axesToggle.checked));
 lightToggle.addEventListener('change', () => meshViewer.setBackground(lightToggle.checked ? 'light' : 'dark'));
 
@@ -310,8 +371,7 @@ shareDialog.addEventListener('click', (event) => {
 
 window.addEventListener('resize', () => {
   if (!activePanel || !isMobileViewport()) return;
-  if (activePanel === 'meshes') setPanelHeight(meshSheetHeight());
-  else applyStyleDetent();
+  applyDetailDetent();
 });
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
 
@@ -433,11 +493,15 @@ function formatBytes(value: number): string {
   return `${value} B`;
 }
 
-function eyeIcon(visible: boolean): string {
-  return visible
-    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-5 9-5 9 5 9 5-3.2 5-9 5-9-5-9-5Z"/><circle cx="12" cy="12" r="2.5"/></svg>'
-    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 4 16 16M10.6 7.2A9.3 9.3 0 0 1 12 7c5.8 0 9 5 9 5a15 15 0 0 1-2.1 2.6M6.4 8.3A15.5 15.5 0 0 0 3 12s3.2 5 9 5c.9 0 1.8-.1 2.6-.4"/></svg>';
+function syncSceneMeta(): void {
+  if (!scene) return;
+  const models = meshViewer.modelInfos;
+  const rawBytes = models.reduce((sum, mesh) => sum + mesh.raw_bytes, 0);
+  const activeBytes = models.reduce((sum, mesh) => sum + (mesh.quality === 'lod' ? mesh.lod_bytes ?? mesh.raw_bytes : mesh.raw_bytes), 0);
+  const delta = rawBytes - activeBytes;
+  const percent = rawBytes > 0 ? Math.round(Math.max(0, delta) / rawBytes * 100) : 0;
+  const comparison = delta >= 0 ? `节省 ${percent}%` : `增加 ${formatBytes(-delta)}`;
+  meta.textContent = `${models.length} ${models.length === 1 ? 'mesh' : 'meshes'} · 当前 ${formatBytes(activeBytes)} · ${comparison}`;
 }
 
 function escapeHtml(value: string): string { const div = document.createElement('div'); div.textContent = value; return div.innerHTML; }
-function escapeAttribute(value: string): string { return value.replace(/["'<>]/g, ''); }

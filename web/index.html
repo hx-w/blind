@@ -39,7 +39,12 @@
         </div>
         <div class="gesture-hint" id="gesture-hint" role="status" data-viewer-chrome><span>单指旋转</span><i></i><span>双指移动</span><i></i><span>捏合缩放</span></div>
         <div class="draw-hint" id="draw-hint" role="status" hidden data-viewer-chrome><span></span>单指绘制，完成后可旋转</div>
-        <div class="loading-state" id="loading-state"><span></span><p>正在读取 Mesh</p></div>
+        <div class="loading-state" id="loading-state">
+          <span class="loading-spinner" aria-hidden="true"></span>
+          <p id="loading-title">正在读取场景</p>
+          <div class="loading-meter" id="loading-meter" role="progressbar" aria-label="LOD 加载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i id="loading-bar"></i></div>
+          <small id="loading-progress">正在验证源 Mesh</small>
+        </div>
         <div class="invalid-state" id="invalid-state" hidden>
           <span class="invalid-code">410</span><h2>场景已失效</h2><p>一个或多个源 Mesh 已被删除、修改或无法读取。</p>
         </div>
@@ -53,11 +58,8 @@
         <button class="dock-tool" id="fit-view" type="button" aria-label="适配全部可见 Mesh">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/><circle cx="12" cy="12" r="2.5"/></svg><span>Fit</span>
         </button>
-        <button class="dock-tool panel-trigger" data-panel="meshes" type="button" aria-label="打开 Mesh 列表" aria-expanded="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4-8 4-8-4 8-4Z"/><path d="m4 12 8 4 8-4M4 17l8 4 8-4"/></svg><span>Mesh</span><span class="dock-count" id="mesh-count">0</span>
-        </button>
-        <button class="dock-tool panel-trigger" data-panel="style" type="button" aria-label="打开样式设置" aria-expanded="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>样式</span>
+        <button class="dock-tool panel-trigger" data-panel="details" type="button" aria-label="打开 Mesh 详情" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>详情</span>
         </button>
         <button class="dock-tool" id="brush-tool" type="button" aria-label="进入画笔模式" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5 4 4L9 19l-5 1 1-5 9.5-9.5Z"/><path d="m12.5 7.5 4 4"/></svg><span>画笔</span>
@@ -81,12 +83,19 @@
 
       <aside class="control-panel" id="control-panel" aria-hidden="true">
         <div class="panel-drag-zone" id="panel-drag-zone" role="button" tabindex="0" aria-label="调整面板高度"><div class="panel-handle" aria-hidden="true"></div></div>
-        <div class="panel-heading"><h2 id="panel-title">Mesh</h2><span id="panel-context"></span>
+        <div class="panel-heading"><h2 id="panel-title">详情</h2><span id="panel-context"></span>
           <button class="close-panel" id="close-panel" type="button" aria-label="关闭面板"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
         </div>
         <div class="panel-scroll" id="panel-scroll">
-          <section data-panel-content="meshes"><div class="mesh-list" id="mesh-list"></div></section>
-          <section data-panel-content="style" hidden>
+          <section data-panel-content="details">
+            <label class="mesh-picker" for="detail-mesh-select"><span>当前 Mesh</span><select id="detail-mesh-select" aria-label="选择要编辑的 Mesh"></select></label>
+            <div class="mesh-summary"><span class="mesh-summary-dot" id="mesh-summary-dot"></span><span><strong id="mesh-summary-name"></strong><small id="mesh-summary-meta"></small></span></div>
+            <div class="style-section"><span class="setting-label">精度</span><div class="segmented quality-segmented" aria-label="Mesh 精度">
+              <button class="active" data-quality="lod" type="button">LOD</button><button data-quality="raw" type="button">Raw</button>
+            </div><p class="lod-saving" id="lod-saving" aria-live="polite"></p></div>
+            <div class="style-section visibility-section"><span class="setting-label">显示</span><div class="toggle-grid toggle-grid-single">
+              <label><span>显示 Mesh</span><input id="mesh-visible-toggle" type="checkbox" checked/><i></i></label>
+            </div></div>
             <div class="style-section color-section"><span class="setting-label">颜色</span><div class="color-swatches" id="color-swatches" aria-label="Mesh 颜色"></div></div>
             <label class="range-row" for="opacity-range"><span>透明度</span><input id="opacity-range" type="range" min="5" max="100" value="100"/><output id="opacity-value">100%</output></label>
             <div class="style-section"><span class="setting-label">表面</span><div class="segmented segmented-three" aria-label="着色方式">

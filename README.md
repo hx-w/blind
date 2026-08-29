@@ -10,8 +10,9 @@ Instant mobile 3D review for Meshes on your Mac.
 Blind is one CLI binary that serves local PLY, STL, OBJ, and Denta PTS files through a
 mobile-first 3D viewer. It discovers usable Host addresses, preserves camera
 and style state behind six-character links, and can render the same scene
-directly as a PNG. There is no Mesh copy or render cache; a bounded local
-SQLite registry stores only encrypted scene descriptors.
+directly as a PNG. There is no on-disk Mesh copy or persistent render cache; a
+bounded local SQLite registry stores only encrypted scene descriptors, while
+derived review LODs live only in a bounded process-memory cache.
 
 ## Why Blind
 
@@ -150,20 +151,37 @@ this contract instead of reimplementing scene or lifecycle logic.
 - Fit frames all visible Meshes.
 - The axis control selects canonical front, back, left, right, top, or bottom
   views.
-- Mesh opens the object list with selection and visibility controls.
+- Details selects the current Mesh and keeps visibility, opacity, color, and
+  presentation controls together.
+- Each Mesh loads as LOD by default. Details can switch it to Raw without
+  changing the camera and reports Raw size, LOD size, saved bytes, and the
+  saving percentage.
+- Shared view snapshots preserve the selected Raw or LOD quality for every
+  Mesh. Legacy links without this state still open as LOD.
+- The first cold load shows completed Mesh count while the server generates
+  LODs. A single large Mesh remains indeterminate until meshoptimizer returns.
 - PTS rings render as a continuous tube with a sphere at every original point.
-- Style changes color, opacity, surface mode, projection, axes, and the
-  gray background theme.
+- Details also changes surface mode, projection, axes, and the gray background
+  theme.
 - Brush enters a touch-locked screen-markup mode with four high-contrast
   colors, undo, and clear. Strokes can cross Meshes and empty canvas space.
 - Screen markup belongs to the captured view. Any later rotate, pan, zoom,
   Fit, canonical-view, or projection action hides it immediately.
-- On phones, Mesh uses a compact content-height sheet. Style starts at a short
-  detent and expands by tapping or dragging its handle. The 3D viewport shrinks
-  above the sheet so the model remains visible.
+- On phones, Details starts at a compact detent and expands by tapping or
+  dragging its handle. The sheet overlays a stable 3D viewport so the model
+  remains visible.
 
 The global toolbar never assigns one Mesh name to a multi-Mesh scene and does
 not duplicate visibility with a Solo mode.
+
+LOD generation uses meshoptimizer for PLY, STL, and OBJ triangle geometry. PTS
+previews preserve every ordered source point and reduce only the procedural
+tube and marker tessellation. Generated binary PLY bytes are cached in memory
+up to 256 MiB and disappear when the server exits; neither LODs nor Raw source
+copies are written to disk. Raw is fetched only after a client explicitly
+selects it. The fixed bandwidth-oriented profile targets 150,000 triangles per
+scene, clamps each Mesh to 2,000 through 50,000 triangles, and uses 0.002
+relative simplification error. It is intentionally not exposed as a setting.
 
 ## Doctor and link maintenance
 
@@ -314,6 +332,7 @@ cargo test --locked
 | `POST /api/v1/scenes` | PAT | Create a scene from local paths |
 | `GET /api/v1/scenes/:token` | Scene capability | Read validated public state |
 | `GET /api/v1/scenes/:token/meshes/:index` | Scene capability | Stream a validated Mesh |
+| `GET /api/v1/scenes/:token/meshes/:index/lod` | Scene capability | Generate or stream an in-memory review LOD |
 | `POST /api/v1/scenes/:token/share` | Scene capability | Capture camera and style state |
 | `GET /s/:code` | Short scene capability | Open the default viewer link |
 | `GET /v/:token` | Stateless scene capability | Open an explicit long link |

@@ -37,7 +37,9 @@ export interface PublicMesh {
   color: string;
   opacity: number;
   visible: boolean;
+  quality: 'lod' | 'raw';
   source_url: string;
+  lod_url: string;
 }
 
 export interface PublicScene {
@@ -69,7 +71,7 @@ export interface ShareResponse extends ShareLinks {
 }
 
 export interface SceneUpdate {
-  meshes: Array<{ color: string; opacity: number; visible: boolean }>;
+  meshes: Array<{ color: string; opacity: number; visible: boolean; quality: 'lod' | 'raw' }>;
   state: ViewState;
 }
 

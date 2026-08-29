@@ -3,7 +3,27 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.4.0] - 2026-08-29
+
+### Added
+
+- The interactive viewer loads a server-generated LOD by default and lets each
+  Mesh switch between LOD and Raw while reporting both payload sizes and the
+  saved bytes and percentage.
+- LOD geometry is generated on demand with meshoptimizer and retained only in
+  a bounded 256 MiB process-memory cache. No derived Mesh is written to disk.
+- Cold LOD loads report completed Mesh count and Raw fallbacks, with an explicit
+  first-generation wait message for slower scenes.
+
+### Changed
+
+- Mesh selection, visibility, opacity, color, and Raw/LOD precision now live in
+  one per-Mesh Details panel. The duplicate Mesh toolbar item was removed.
+- Shared view snapshots now restore each Mesh's selected Raw or LOD quality;
+  older links without the field continue to default to LOD.
+- The single non-configurable LOD profile now favors bandwidth with a 150,000
+  triangle scene budget, 2,000 to 50,000 triangles per Mesh, and 0.002 relative
+  simplification error.
 
 ## [0.3.2] - 2026-08-28
 
@@ -96,6 +116,7 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.4.0]: https://github.com/hx-w/blind/releases/tag/v0.4.0
 [0.3.2]: https://github.com/hx-w/blind/releases/tag/v0.3.2
 [0.3.1]: https://github.com/hx-w/blind/releases/tag/v0.3.1
 [0.3.0]: https://github.com/hx-w/blind/releases/tag/v0.3.0

@@ -34,6 +34,8 @@ pub struct MeshRef {
     pub color: String,
     pub opacity: f32,
     pub visible: bool,
+    #[serde(default)]
+    pub quality: MeshQuality,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +45,14 @@ pub enum MeshFormat {
     Stl,
     Obj,
     Pts,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MeshQuality {
+    #[default]
+    Lod,
+    Raw,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +124,8 @@ pub struct MeshStyleUpdate {
     pub color: String,
     pub opacity: f32,
     pub visible: bool,
+    #[serde(default)]
+    pub quality: MeshQuality,
 }
 
 impl Default for ViewState {
@@ -167,6 +179,7 @@ impl SceneDescriptor {
                 color: PALETTE[index % PALETTE.len()].to_string(),
                 opacity: 1.0,
                 visible: true,
+                quality: MeshQuality::Lod,
             });
         }
         let title = title.unwrap_or_else(|| {
@@ -224,6 +237,7 @@ impl SceneDescriptor {
             mesh.color = style.color;
             mesh.opacity = style.opacity.clamp(0.05, 1.0);
             mesh.visible = style.visible;
+            mesh.quality = style.quality;
         }
         let mut state = update.state;
         state.selected = state.selected.min(self.meshes.len().saturating_sub(1));
@@ -420,6 +434,7 @@ mod tests {
                         color: mesh.color.clone(),
                         opacity: mesh.opacity,
                         visible: mesh.visible,
+                        quality: MeshQuality::Raw,
                     })
                     .collect(),
                 state,
@@ -427,6 +442,7 @@ mod tests {
             .unwrap();
         assert_eq!(scene.schema, 2);
         assert_eq!(scene.state.strokes.len(), 1);
+        assert_eq!(scene.meshes[0].quality, MeshQuality::Raw);
 
         let mut invalid = scene.state.clone();
         invalid.strokes[0].points[0][0] = f32::NAN;
@@ -440,11 +456,28 @@ mod tests {
                             color: mesh.color.clone(),
                             opacity: mesh.opacity,
                             visible: mesh.visible,
+                            quality: mesh.quality,
                         })
                         .collect(),
                     state: invalid,
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn legacy_mesh_quality_defaults_to_lod() {
+        let mesh: MeshRef = serde_json::from_value(serde_json::json!({
+            "path": "/tmp/legacy.ply",
+            "name": "legacy.ply",
+            "format": "ply",
+            "revision": "sha256:legacy",
+            "byte_size": 42,
+            "color": "#8fa9c9",
+            "opacity": 1.0,
+            "visible": true
+        }))
+        .unwrap();
+        assert_eq!(mesh.quality, MeshQuality::Lod);
     }
 }

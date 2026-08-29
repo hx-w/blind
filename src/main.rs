@@ -1,4 +1,5 @@
 mod config;
+mod lod;
 mod mesh;
 mod network;
 mod registry;
