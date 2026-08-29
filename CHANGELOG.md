@@ -3,6 +3,16 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-29
+
+### Added
+
+- `blind doctor` now reports live LOD cache entries, resident memory against
+  capacity, Raw-to-LOD payload savings, and source-to-LOD triangle counts.
+- Offline doctor runs explicitly report that the process-memory LOD cache is
+  inactive, while older running servers are identified as not exposing cache
+  statistics.
+
 ## [0.4.0] - 2026-08-29
 
 ### Added
@@ -116,6 +126,7 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.4.1]: https://github.com/hx-w/blind/releases/tag/v0.4.1
 [0.4.0]: https://github.com/hx-w/blind/releases/tag/v0.4.0
 [0.3.2]: https://github.com/hx-w/blind/releases/tag/v0.3.2
 [0.3.1]: https://github.com/hx-w/blind/releases/tag/v0.3.1

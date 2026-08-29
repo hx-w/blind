@@ -15,6 +15,7 @@ use std::{path::PathBuf, time::Duration};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use config::{Config, config_path, normalize_origin, repair_config_permissions};
+use lod::LodCacheStats;
 use network::discover;
 use registry::Registry;
 use scene::SceneDescriptor;
@@ -539,6 +540,7 @@ async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
                                 removed,
                                 preserved: 0,
                                 key_repaired: false,
+                                lod_cache: None,
                             },
                             false,
                             true,
@@ -558,6 +560,7 @@ async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
                                 removed,
                                 preserved: 0,
                                 key_repaired: false,
+                                lod_cache: None,
                             },
                             false,
                             false,
@@ -593,6 +596,9 @@ async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
     println!("    source gone   {}", report.source_gone);
     println!("    tombstoned    {}", report.tombstoned);
     println!("    corrupt       {}", report.corrupt);
+    for line in lod_cache_lines(report.lod_cache.as_ref(), through_server) {
+        println!("{line}");
+    }
     if report.key_repaired {
         println!("ok  config  restored the running server's internal scene key");
     } else if repaired_secret {
@@ -614,4 +620,100 @@ async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
         .context("image renderer is unavailable")?;
     println!("ok  render  graphics adapter ready");
     Ok(())
+}
+
+fn lod_cache_lines(stats: Option<&LodCacheStats>, through_server: bool) -> Vec<String> {
+    let Some(stats) = stats else {
+        return vec![if through_server {
+            "--  lod     cache statistics unavailable from running server".into()
+        } else {
+            "ok  lod     cache inactive (server not running)".into()
+        }];
+    };
+    let noun = if stats.entries == 1 {
+        "entry"
+    } else {
+        "entries"
+    };
+    let mut lines = vec![format!(
+        "ok  lod     {} {noun}, {} / {} resident",
+        stats.entries,
+        format_bytes(stats.resident_bytes),
+        format_bytes(stats.capacity_bytes)
+    )];
+    if stats.entries > 0 {
+        let comparison = if stats.raw_bytes >= stats.resident_bytes {
+            let saved = stats.raw_bytes - stats.resident_bytes;
+            let percent = if stats.raw_bytes == 0 {
+                0
+            } else {
+                (saved as f64 / stats.raw_bytes as f64 * 100.0).round() as u64
+            };
+            format!("{} saved, {percent}%", format_bytes(saved))
+        } else {
+            format!(
+                "{} larger",
+                format_bytes(stats.resident_bytes - stats.raw_bytes)
+            )
+        };
+        lines.push(format!(
+            "    payload       {} Raw -> {} LOD ({comparison})",
+            format_bytes(stats.raw_bytes),
+            format_bytes(stats.resident_bytes)
+        ));
+        lines.push(format!(
+            "    triangles     {} source -> {} LOD",
+            stats.source_triangles, stats.lod_triangles
+        ));
+    }
+    lines
+}
+
+fn format_bytes(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    if bytes >= MIB {
+        format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    } else if bytes >= KIB {
+        format!("{:.1} KiB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doctor_lod_cache_lines_report_usage_and_savings() {
+        let stats = LodCacheStats {
+            entries: 2,
+            resident_bytes: 3 * 1024 * 1024,
+            capacity_bytes: 256 * 1024 * 1024,
+            raw_bytes: 12 * 1024 * 1024,
+            source_triangles: 1_200_000,
+            lod_triangles: 100_000,
+        };
+        assert_eq!(
+            lod_cache_lines(Some(&stats), true),
+            vec![
+                "ok  lod     2 entries, 3.0 MiB / 256.0 MiB resident",
+                "    payload       12.0 MiB Raw -> 3.0 MiB LOD (9.0 MiB saved, 75%)",
+                "    triangles     1200000 source -> 100000 LOD",
+            ]
+        );
+    }
+
+    #[test]
+    fn doctor_lod_cache_lines_distinguish_offline_and_legacy_server() {
+        assert_eq!(
+            lod_cache_lines(None, false),
+            vec!["ok  lod     cache inactive (server not running)"]
+        );
+        assert_eq!(
+            lod_cache_lines(None, true),
+            vec!["--  lod     cache statistics unavailable from running server"]
+        );
+    }
 }

@@ -199,6 +199,11 @@ this distribution:
 - tombstoned: Blind previously detected an invalid source;
 - corrupt: required fields or the encrypted payload cannot be read.
 
+When the server is running, `blind doctor` also reports the in-memory LOD cache:
+entry count, resident bytes versus the 256 MiB limit, Raw-to-LOD payload savings,
+and source-to-LOD triangle counts. With no server running it reports the cache as
+inactive because derived LODs never persist to disk.
+
 Invalid or all SQLite-backed short links can be deleted while Blind continues
 serving other requests:
 

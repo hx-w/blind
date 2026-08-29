@@ -30,7 +30,7 @@ use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
 use crate::{
     config::{Config, config_path, normalize_origin},
-    lod::{self, LodAsset, LodCache},
+    lod::{self, LodAsset, LodCache, LodCacheStats},
     mesh,
     network::{HostCandidate, discover},
     registry::{RegisteredScene, Registry, RegistryAudit, RegistryLookupError, is_short_secret},
@@ -137,6 +137,8 @@ pub struct DoctorRegistryReport {
     pub removed: usize,
     pub preserved: usize,
     pub key_repaired: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lod_cache: Option<LodCacheStats>,
 }
 
 impl DoctorRegistryReport {
@@ -150,6 +152,7 @@ impl DoctorRegistryReport {
             removed,
             preserved: audit.invalid().saturating_sub(removed),
             key_repaired: false,
+            lod_cache: None,
         }
     }
 
@@ -583,6 +586,7 @@ async fn doctor_registry_response(
     };
     let mut report = DoctorRegistryReport::new(&audit, removed);
     report.key_repaired = key_repaired;
+    report.lod_cache = Some(state.lod_cache.stats());
     Ok((no_store(), Json(report)))
 }
 

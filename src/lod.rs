@@ -6,6 +6,7 @@ use std::{
 
 use anyhow::{Result, bail};
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     mesh::{self, Geometry},
@@ -35,6 +36,16 @@ struct CacheState {
     entries: HashMap<String, Arc<LodAsset>>,
     order: VecDeque<String>,
     bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LodCacheStats {
+    pub entries: usize,
+    pub resident_bytes: usize,
+    pub capacity_bytes: usize,
+    pub raw_bytes: usize,
+    pub source_triangles: usize,
+    pub lod_triangles: usize,
 }
 
 impl Default for LodCache {
@@ -72,6 +83,29 @@ impl LodCache {
         state.bytes += asset.bytes.len();
         state.order.push_back(key.clone());
         state.entries.insert(key, asset);
+    }
+
+    pub fn stats(&self) -> LodCacheStats {
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut raw_bytes = 0_usize;
+        let mut source_triangles = 0_usize;
+        let mut lod_triangles = 0_usize;
+        for asset in state.entries.values() {
+            raw_bytes = raw_bytes.saturating_add(asset.raw_bytes);
+            source_triangles = source_triangles.saturating_add(asset.source_triangles);
+            lod_triangles = lod_triangles.saturating_add(asset.triangles);
+        }
+        LodCacheStats {
+            entries: state.entries.len(),
+            resident_bytes: state.bytes,
+            capacity_bytes: self.max_bytes,
+            raw_bytes,
+            source_triangles,
+            lod_triangles,
+        }
     }
 }
 
@@ -218,6 +252,17 @@ mod tests {
         cache.insert("b".into(), asset(2));
         assert!(cache.get("a").is_none());
         assert!(cache.get("b").is_some());
+        assert_eq!(
+            cache.stats(),
+            LodCacheStats {
+                entries: 1,
+                resident_bytes: 6,
+                capacity_bytes: 8,
+                raw_bytes: 12,
+                source_triangles: 2,
+                lod_triangles: 1,
+            }
+        );
     }
 
     #[test]
