@@ -301,9 +301,13 @@ export class MeshViewer {
 
   private prepareObject(object: THREE.Object3D, index: number, info: ViewerMesh): void {
     object.userData.modelIndex = index;
+    // Keep layer precedence stable while the camera moves. The depth bias resolves
+    // coplanar samples; renderOrder also makes translucent meshes deterministic.
+    object.renderOrder = index;
     object.traverse((child) => {
       if (!(child instanceof THREE.Mesh)) return;
       child.userData.modelIndex = index;
+      child.renderOrder = index;
       const geometry = child.geometry as THREE.BufferGeometry;
       normalizeGeometry(geometry);
       // Review the geometry itself rather than trusting optional exporter normals,

@@ -89,17 +89,18 @@
         <div class="panel-scroll" id="panel-scroll">
           <section data-panel-content="details">
             <label class="mesh-picker" for="detail-mesh-select"><span>当前 Mesh</span><select id="detail-mesh-select" aria-label="选择要编辑的 Mesh"></select></label>
-            <div class="mesh-summary"><span class="mesh-summary-dot" id="mesh-summary-dot"></span><span><strong id="mesh-summary-name"></strong><small id="mesh-summary-meta"></small></span></div>
+            <div class="mesh-summary">
+              <span class="mesh-summary-dot" id="mesh-summary-dot"></span>
+              <span class="mesh-summary-copy"><strong id="mesh-summary-name"></strong><small id="mesh-summary-meta"></small></span>
+              <label class="mesh-summary-visibility"><span>显示</span><input id="mesh-visible-toggle" type="checkbox" checked/><i></i></label>
+            </div>
             <div class="style-section"><span class="setting-label">精度</span><div class="segmented quality-segmented" aria-label="Mesh 精度">
               <button class="active" data-quality="lod" type="button">LOD</button><button data-quality="raw" type="button">Raw</button>
             </div><p class="lod-saving" id="lod-saving" aria-live="polite"></p></div>
-            <div class="style-section visibility-section"><span class="setting-label">显示</span><div class="toggle-grid toggle-grid-single">
-              <label><span>显示 Mesh</span><input id="mesh-visible-toggle" type="checkbox" checked/><i></i></label>
-            </div></div>
             <div class="style-section color-section"><span class="setting-label">颜色</span><div class="color-swatches" id="color-swatches" aria-label="Mesh 颜色"></div></div>
             <label class="range-row" for="opacity-range"><span>透明度</span><input id="opacity-range" type="range" min="5" max="100" value="100"/><output id="opacity-value">100%</output></label>
             <div class="style-section"><span class="setting-label">表面</span><div class="segmented segmented-three" aria-label="着色方式">
-              <button class="active" data-shading="smooth" type="button">平滑</button><button data-shading="flat" type="button">平面</button><button data-shading="wire" type="button">线框</button>
+              <button data-shading="smooth" type="button">平滑</button><button class="active" data-shading="flat" type="button">平面</button><button data-shading="wire" type="button">线框</button>
             </div></div>
             <div class="style-section"><span class="setting-label">投影</span><div class="segmented" aria-label="投影方式">
               <button class="active" data-projection="perspective" type="button">透视</button><button data-projection="orthographic" type="button">正交</button>

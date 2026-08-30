@@ -812,6 +812,14 @@ mod tests {
     }
 
     #[test]
+    fn shared_depth_bias_separates_layers_on_16_bit_depth_buffers() {
+        let material: MatteShader =
+            serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
+        let two_depth_units_in_webgl_clip_space = 4.0 / 65_536.0;
+        assert!(material.depth_bias_step >= two_depth_units_in_webgl_clip_space);
+    }
+
+    #[test]
     fn screen_strokes_are_composited_over_the_rendered_pixels() {
         let background = Rgba([41, 44, 50, 255]);
         let mut image = RgbaImage::from_pixel(100, 100, background);

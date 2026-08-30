@@ -12,7 +12,7 @@
   "rim_power": 1.8,
   "specular": 0.1,
   "shininess": 28.0,
-  "depth_bias_step": 0.000001,
+  "depth_bias_step": 0.00006103515625,
   "translucent_threshold": 0.999,
   "contrast_pivot": 0.72,
   "light_min": 0.3,

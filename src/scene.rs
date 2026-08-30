@@ -132,7 +132,7 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             selected: 0,
-            shading: Shading::Smooth,
+            shading: Shading::Flat,
             projection: Projection::Perspective,
             background: Background::Dark,
             axes: true,
@@ -396,6 +396,11 @@ mod tests {
                 .to_string()
                 .contains("supported PLY, STL, OBJ, or PTS")
         );
+    }
+
+    #[test]
+    fn new_scenes_default_to_flat_shading() {
+        assert_eq!(ViewState::default().shading, Shading::Flat);
     }
 
     #[test]
