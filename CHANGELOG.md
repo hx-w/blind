@@ -3,6 +3,21 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-08-30
+
+### Changed
+
+- Cold LOD generation streams the source revision check instead of buffering
+  the whole Mesh in memory, parses PTS once for both the Raw size and the
+  preview geometry, and re-checks sources after simplification with the cheap
+  length gate instead of a full scene hash sweep.
+- LOD cache keys now encode the simplification profile, so any profile change
+  invalidates cached entries automatically.
+- The scene payload no longer carries a separate LOD URL — the viewer derives
+  it from the Mesh URL — and LOD responses dropped informational headers
+  without a client. The viewer picks its parser from the response content
+  type instead of mirroring server container rules.
+
 ## [0.4.1] - 2026-08-29
 
 ### Added
@@ -126,6 +141,7 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.4.2]: https://github.com/hx-w/blind/releases/tag/v0.4.2
 [0.4.1]: https://github.com/hx-w/blind/releases/tag/v0.4.1
 [0.4.0]: https://github.com/hx-w/blind/releases/tag/v0.4.0
 [0.3.2]: https://github.com/hx-w/blind/releases/tag/v0.3.2
