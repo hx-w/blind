@@ -530,41 +530,13 @@ async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
                         config.repair_invalid_secret()?;
                         let registry = Registry::open(&config)?;
                         registry.repair()?;
-                        (
-                            DoctorRegistryReport {
-                                valid: 0,
-                                expired: 0,
-                                source_gone: 0,
-                                tombstoned: 0,
-                                corrupt: removed,
-                                removed,
-                                preserved: 0,
-                                key_repaired: false,
-                                lod_cache: None,
-                            },
-                            false,
-                            true,
-                        )
+                        (DoctorRegistryReport::cleared(removed), false, true)
                     }
                     Err(error) if clear_all && registry::is_key_mismatch(&error) => {
                         let removed = Registry::clear_without_key()?;
                         let registry = Registry::open(&config)?;
                         registry.repair()?;
-                        (
-                            DoctorRegistryReport {
-                                valid: 0,
-                                expired: 0,
-                                source_gone: 0,
-                                tombstoned: 0,
-                                corrupt: removed,
-                                removed,
-                                preserved: 0,
-                                key_repaired: false,
-                                lod_cache: None,
-                            },
-                            false,
-                            false,
-                        )
+                        (DoctorRegistryReport::cleared(removed), false, false)
                     }
                     Err(error) => return Err(error),
                     Ok(registry) => {

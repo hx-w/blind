@@ -190,26 +190,35 @@ pub fn serve_bytes(bytes: Vec<u8>, format: MeshFormat) -> Result<(Vec<u8>, &'sta
 }
 
 pub fn pts_geometry(bytes: &[u8]) -> Result<Geometry> {
-    pts_geometry_with_detail(
-        bytes,
+    pts_geometry_from_points(
+        &parse_pts_points(bytes)?,
         TUBE_RADIAL_SEGMENTS,
         SPHERE_LONGITUDE_SEGMENTS,
         SPHERE_LATITUDE_SEGMENTS,
     )
 }
 
-/// A lightweight PTS preview keeps every ordered source point while reducing
-/// only the procedural tube and marker tessellation.
-pub fn pts_lod_geometry(bytes: &[u8]) -> Result<Geometry> {
-    pts_geometry_with_detail(bytes, 6, 6, 4)
+/// Raw payload size and LOD preview from a single PTS parse: the raw endpoint
+/// ships PTS as generated binary PLY, so the raw size comes from the
+/// full-detail build.
+pub fn pts_raw_size_and_lod_geometry(bytes: &[u8]) -> Result<(usize, Geometry)> {
+    let points = parse_pts_points(bytes)?;
+    let raw_size = pts_geometry_from_points(
+        &points,
+        TUBE_RADIAL_SEGMENTS,
+        SPHERE_LONGITUDE_SEGMENTS,
+        SPHERE_LATITUDE_SEGMENTS,
+    )?
+    .to_binary_ply()?
+    .len();
+    Ok((raw_size, pts_lod_geometry_from_points(&points)?))
 }
 
-fn pts_geometry_with_detail(
-    bytes: &[u8],
-    tube_radial_segments: usize,
-    sphere_longitude_segments: usize,
-    sphere_latitude_segments: usize,
-) -> Result<Geometry> {
+fn pts_lod_geometry_from_points(points: &[Vec3]) -> Result<Geometry> {
+    pts_geometry_from_points(points, 6, 6, 4)
+}
+
+fn parse_pts_points(bytes: &[u8]) -> Result<Vec<Vec3>> {
     let mut points = Vec::new();
     for line in String::from_utf8_lossy(bytes).lines() {
         let line = line.trim();
@@ -246,7 +255,15 @@ fn pts_geometry_with_detail(
     if points.len() < 3 {
         bail!("PTS must contain at least three finite ordered points");
     }
+    Ok(points)
+}
 
+fn pts_geometry_from_points(
+    points: &[Vec3],
+    tube_radial_segments: usize,
+    sphere_longitude_segments: usize,
+    sphere_latitude_segments: usize,
+) -> Result<Geometry> {
     let (min, max) = bounds_of(points.iter().map(|point| point.to_array()));
     let diagonal = (Vec3::from_array(max) - Vec3::from_array(min))
         .length()
@@ -257,8 +274,8 @@ fn pts_geometry_with_detail(
         positions: Vec::new(),
         indices: Vec::new(),
     };
-    append_closed_tube(&mut geometry, &points, tube_radius, tube_radial_segments)?;
-    for point in points {
+    append_closed_tube(&mut geometry, points, tube_radius, tube_radial_segments)?;
+    for &point in points {
         append_sphere(
             &mut geometry,
             point,

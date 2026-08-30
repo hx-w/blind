@@ -3,8 +3,7 @@ import { ArcballControls } from 'three/addons/controls/ArcballControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { apiError } from './api';
-import type { PublicMesh, PublicScene, SceneUpdate, ScreenStroke, ViewState } from './api';
+import { apiError, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
 import { createMatteMaterial, updateMatteMaterial } from './material';
 import shader from '../../shaders/matte.json';
 
@@ -15,14 +14,9 @@ declare module 'three/addons/controls/ArcballControls.js' {
   }
 }
 
-export type MeshQuality = 'lod' | 'raw';
-
 export interface ViewerMesh extends PublicMesh {
-  quality: MeshQuality;
   raw_bytes: number;
   lod_bytes?: number;
-  source_triangles?: number;
-  lod_triangles?: number;
   loading: boolean;
   lod_error?: string;
 }
@@ -36,8 +30,6 @@ interface LoadedObject {
   object: THREE.Object3D;
   payloadBytes: number;
   rawBytes?: number;
-  sourceTriangles?: number;
-  lodTriangles?: number;
 }
 
 export interface MeshLoadProgress {
@@ -124,16 +116,8 @@ export class MeshViewer {
     }));
     loaded.forEach(({ quality, asset, lodError }, index) => {
       const source = scene.meshes[index];
-      const info: ViewerMesh = {
-        ...source,
-        quality,
-        raw_bytes: asset.rawBytes ?? source.byte_size,
-        lod_bytes: quality === 'lod' ? asset.payloadBytes : undefined,
-        source_triangles: asset.sourceTriangles,
-        lod_triangles: asset.lodTriangles,
-        loading: false,
-        lod_error: lodError,
-      };
+      const info: ViewerMesh = { ...source, raw_bytes: source.byte_size, loading: false, lod_error: lodError };
+      this.applyLoadedInfo(info, quality, asset);
       this.prepareObject(asset.object, index, info);
       this.models.push({ info, object: asset.object });
       this.scene.add(asset.object);
@@ -147,7 +131,6 @@ export class MeshViewer {
     this.resizeHelpers();
   }
 
-  get modelCount(): number { return this.models.length; }
   get selectedIndex(): number { return this.selected; }
   get selectedModel(): ViewerMesh | undefined { return this.models[this.selected]?.info; }
   get modelInfos(): ViewerMesh[] { return this.models.map((model) => model.info); }
@@ -169,10 +152,7 @@ export class MeshViewer {
     if (!model) return;
     model.info.visible = visible;
     model.object.visible = visible;
-    this.refreshVisibleBounds();
-    this.resizeHelpers();
-    this.updateClipping();
-    this.dirty = true;
+    this.relayout();
     this.onModelChange?.();
   }
 
@@ -190,19 +170,8 @@ export class MeshViewer {
       this.scene.remove(model.object);
       disposeObject(model.object);
       model.object = loaded.object;
-      model.info.quality = quality;
-      if (quality === 'lod') {
-        model.info.lod_bytes = loaded.payloadBytes;
-        model.info.raw_bytes = loaded.rawBytes ?? model.info.raw_bytes;
-        model.info.source_triangles = loaded.sourceTriangles;
-        model.info.lod_triangles = loaded.lodTriangles;
-      } else {
-        model.info.raw_bytes = loaded.rawBytes ?? loaded.payloadBytes;
-      }
-      this.refreshVisibleBounds();
-      this.resizeHelpers();
-      this.updateClipping();
-      this.dirty = true;
+      this.applyLoadedInfo(model.info, quality, loaded);
+      this.relayout();
     } catch (error) {
       if (quality === 'lod') {
         model.info.lod_error = error instanceof Error ? error.message : 'LOD 不可用';
@@ -288,6 +257,23 @@ export class MeshViewer {
     const orthographicHeight = this.orthographic.userData.height ?? 2;
     this.orthographic.left = -orthographicHeight * aspect / 2; this.orthographic.right = orthographicHeight * aspect / 2;
     this.orthographic.top = orthographicHeight / 2; this.orthographic.bottom = -orthographicHeight / 2; this.orthographic.updateProjectionMatrix();
+    this.updateClipping();
+    this.dirty = true;
+  }
+
+  // Single bookkeeping point for both load paths, so the raw/LOD accounting
+  // cannot drift between them. Raw quality keeps a previously measured
+  // lod_bytes so the panel can keep reporting the saving.
+  private applyLoadedInfo(info: ViewerMesh, quality: MeshQuality, loaded: LoadedObject): void {
+    info.quality = quality;
+    info.raw_bytes = loaded.rawBytes ?? info.raw_bytes;
+    if (quality === 'lod') info.lod_bytes = loaded.payloadBytes;
+  }
+
+  // Refresh the derived view state after a model's geometry or visibility changes.
+  private relayout(): void {
+    this.refreshVisibleBounds();
+    this.resizeHelpers();
     this.updateClipping();
     this.dirty = true;
   }
@@ -453,20 +439,25 @@ export class MeshViewer {
   };
 }
 
+function meshUrl(info: PublicMesh, quality: MeshQuality): string {
+  return quality === 'lod' ? `${info.source_url}/lod` : info.source_url;
+}
+
 async function loadObject(info: PublicMesh, quality: MeshQuality): Promise<LoadedObject> {
-  const response = await fetch(quality === 'lod' ? info.lod_url : info.source_url, { cache: 'no-store' }); if (!response.ok) throw await apiError(response);
+  const response = await fetch(meshUrl(info, quality), { cache: 'no-store' }); if (!response.ok) throw await apiError(response);
   const buffer = await response.arrayBuffer();
-  const format = quality === 'lod' ? 'ply' : info.format;
+  // The server owns the container decision — LOD and PTS raw ship as binary
+  // PLY — so pick the loader from the response content type instead of
+  // mirroring those rules here.
+  const type = response.headers.get('content-type')?.split(';')[0];
   let object: THREE.Object3D;
-  if (format === 'ply' || format === 'pts') object = new THREE.Mesh(new PLYLoader().parse(buffer));
-  else if (format === 'stl') object = new THREE.Mesh(new STLLoader().parse(buffer));
-  else object = new OBJLoader().parse(new TextDecoder().decode(buffer));
+  if (type === 'model/stl') object = new THREE.Mesh(new STLLoader().parse(buffer));
+  else if (type === 'model/obj') object = new OBJLoader().parse(new TextDecoder().decode(buffer));
+  else object = new THREE.Mesh(new PLYLoader().parse(buffer));
   return {
     object,
     payloadBytes: buffer.byteLength,
-    rawBytes: numberHeader(response, 'x-blind-raw-bytes'),
-    sourceTriangles: numberHeader(response, 'x-blind-source-triangles'),
-    lodTriangles: numberHeader(response, 'x-blind-lod-triangles'),
+    rawBytes: quality === 'lod' ? numberHeader(response, 'x-blind-raw-bytes') : buffer.byteLength,
   };
 }
 

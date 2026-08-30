@@ -1,7 +1,7 @@
 import './styles.css';
-import { ApiError, loadScene, shareScene, type HostCandidate, type PublicScene, type ShareResponse } from './api';
+import { ApiError, loadScene, shareScene, type HostCandidate, type MeshQuality, type PublicScene, type ShareResponse } from './api';
 import { MarkupCanvas } from './markup';
-import { MeshViewer, type MeshQuality } from './viewer';
+import { MeshViewer } from './viewer';
 
 const $ = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -24,9 +24,9 @@ const loadingProgress = $('#loading-progress');
 const invalid = $('#invalid-state');
 const empty = $('#empty-state');
 const panel = $('#control-panel');
-const panelTitle = $('#panel-title');
 const panelContext = $('#panel-context');
 const dragZone = $('#panel-drag-zone');
+const detailsTrigger = $('.panel-trigger') as HTMLButtonElement;
 const detailMeshSelect = $('#detail-mesh-select') as HTMLSelectElement;
 const meshVisibleToggle = $('#mesh-visible-toggle') as HTMLInputElement;
 const meshSummaryDot = $('#mesh-summary-dot');
@@ -59,7 +59,7 @@ const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa
 const token = location.pathname.match(/^\/(?:s|v)\/([^/]+)$/)?.[1];
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
-let activePanel: 'details' | null = null;
+let panelOpen = false;
 let shareLinks: ShareResponse | undefined;
 let toastTimer = 0;
 let panelHeight = 0;
@@ -176,7 +176,7 @@ function renderSwatches(): void {
 
 function syncDetailControls(): void {
   const selected = meshViewer.selectedModel; if (!selected) return;
-  panelContext.textContent = activePanel === 'details' ? selected.name : '';
+  panelContext.textContent = panelOpen ? selected.name : '';
   detailMeshSelect.value = String(meshViewer.selectedIndex);
   meshSummaryName.textContent = selected.name;
   meshSummaryMeta.textContent = `${selected.format.toUpperCase()} · Raw ${formatBytes(selected.raw_bytes)}`;
@@ -191,8 +191,7 @@ function syncDetailControls(): void {
   });
   if (selected.loading) lodSaving.textContent = `正在加载 ${selected.quality === 'lod' ? 'Raw' : 'LOD'} Mesh`;
   else if (selected.lod_bytes !== undefined) {
-    const delta = selected.raw_bytes - selected.lod_bytes;
-    const percent = selected.raw_bytes > 0 ? Math.round(Math.max(0, delta) / selected.raw_bytes * 100) : 0;
+    const { delta, percent } = savings(selected.raw_bytes, selected.lod_bytes);
     lodSaving.textContent = delta >= 0
       ? `Raw ${formatBytes(selected.raw_bytes)} · LOD ${formatBytes(selected.lod_bytes)} · 节省 ${formatBytes(delta)} (${percent}%)`
       : `Raw ${formatBytes(selected.raw_bytes)} · LOD ${formatBytes(selected.lod_bytes)} · 小型 Mesh 增加 ${formatBytes(-delta)}`;
@@ -205,31 +204,23 @@ function syncDetailControls(): void {
   axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
 }
 
-document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => button.addEventListener('click', () => {
-  const target = button.dataset.panel as 'details';
-  if (activePanel === target) closePanel(); else openPanel(target);
-}));
+detailsTrigger.addEventListener('click', () => {
+  if (panelOpen) closePanel(); else openPanel();
+});
 
-function openPanel(kind: 'details'): void {
-  activePanel = kind; expanded = false;
-  panelTitle.textContent = '详情';
+function openPanel(): void {
+  panelOpen = true; expanded = false;
   panelContext.textContent = meshViewer.selectedModel?.name ?? '';
-  document.querySelectorAll<HTMLElement>('[data-panel-content]').forEach((section) => { section.hidden = section.dataset.panelContent !== kind; });
-  document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => {
-    const active = button.dataset.panel === kind; button.classList.toggle('active', active); button.setAttribute('aria-expanded', String(active));
-  });
-  if (isMobileViewport()) {
-    panelHeight = innerHeight * 0.58;
-    setPanelHeight(panelHeight);
-  }
+  detailsTrigger.classList.add('active'); detailsTrigger.setAttribute('aria-expanded', 'true');
+  if (isMobileViewport()) setPanelHeight(innerHeight * 0.58);
   dragZone.setAttribute('aria-label', '展开详情面板');
   shell.classList.add('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'false');
   syncDetailControls();
 }
 
 function closePanel(): void {
-  activePanel = null; shell.classList.remove('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'true');
-  document.querySelectorAll<HTMLButtonElement>('.panel-trigger').forEach((button) => { button.classList.remove('active'); button.setAttribute('aria-expanded', 'false'); });
+  panelOpen = false; shell.classList.remove('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'true');
+  detailsTrigger.classList.remove('active'); detailsTrigger.setAttribute('aria-expanded', 'false');
   shell.style.setProperty('--sheet-height', '0px');
 }
 
@@ -239,7 +230,7 @@ function setPanelHeight(value: number): void {
 }
 
 dragZone.addEventListener('pointerdown', (event) => {
-  if (!activePanel || !isMobileViewport()) return;
+  if (!panelOpen || !isMobileViewport()) return;
   dragStart = { y: event.clientY, height: panelHeight }; dragZone.setPointerCapture(event.pointerId); panel.classList.add('dragging');
 });
 dragZone.addEventListener('pointermove', (event) => { if (dragStart) setPanelHeight(dragStart.height + dragStart.y - event.clientY); });
@@ -253,13 +244,13 @@ dragZone.addEventListener('pointerup', (event) => {
 });
 dragZone.addEventListener('click', () => {
   if (suppressHandleClick) { suppressHandleClick = false; return; }
-  if (activePanel === 'details' && isMobileViewport()) {
+  if (panelOpen && isMobileViewport()) {
     expanded = !expanded; applyDetailDetent();
   }
 });
 dragZone.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' || event.key === ' ') {
-    if (activePanel === 'details') { event.preventDefault(); expanded = !expanded; applyDetailDetent(); }
+    if (panelOpen) { event.preventDefault(); expanded = !expanded; applyDetailDetent(); }
   }
 });
 
@@ -370,7 +361,7 @@ shareDialog.addEventListener('click', (event) => {
 });
 
 window.addEventListener('resize', () => {
-  if (!activePanel || !isMobileViewport()) return;
+  if (!panelOpen || !isMobileViewport()) return;
   applyDetailDetent();
 });
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
@@ -493,15 +484,19 @@ function formatBytes(value: number): string {
   return `${value} B`;
 }
 
+function savings(raw: number, lod: number): { delta: number; percent: number; comparison: string } {
+  const delta = raw - lod;
+  const percent = raw > 0 ? Math.round(Math.max(0, delta) / raw * 100) : 0;
+  const comparison = delta >= 0 ? `节省 ${percent}%` : `增加 ${formatBytes(-delta)}`;
+  return { delta, percent, comparison };
+}
+
 function syncSceneMeta(): void {
   if (!scene) return;
   const models = meshViewer.modelInfos;
   const rawBytes = models.reduce((sum, mesh) => sum + mesh.raw_bytes, 0);
   const activeBytes = models.reduce((sum, mesh) => sum + (mesh.quality === 'lod' ? mesh.lod_bytes ?? mesh.raw_bytes : mesh.raw_bytes), 0);
-  const delta = rawBytes - activeBytes;
-  const percent = rawBytes > 0 ? Math.round(Math.max(0, delta) / rawBytes * 100) : 0;
-  const comparison = delta >= 0 ? `节省 ${percent}%` : `增加 ${formatBytes(-delta)}`;
-  meta.textContent = `${models.length} ${models.length === 1 ? 'mesh' : 'meshes'} · 当前 ${formatBytes(activeBytes)} · ${comparison}`;
+  meta.textContent = `${models.length} ${models.length === 1 ? 'mesh' : 'meshes'} · 当前 ${formatBytes(activeBytes)} · ${savings(rawBytes, activeBytes).comparison}`;
 }
 
 function escapeHtml(value: string): string { const div = document.createElement('div'); div.textContent = value; return div.innerHTML; }

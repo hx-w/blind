@@ -1,4 +1,5 @@
 export type MeshFormat = 'ply' | 'stl' | 'obj' | 'pts';
+export type MeshQuality = 'lod' | 'raw';
 export type Shading = 'smooth' | 'flat' | 'wire';
 export type Projection = 'perspective' | 'orthographic';
 export type Background = 'dark' | 'light';
@@ -37,9 +38,8 @@ export interface PublicMesh {
   color: string;
   opacity: number;
   visible: boolean;
-  quality: 'lod' | 'raw';
+  quality: MeshQuality;
   source_url: string;
-  lod_url: string;
 }
 
 export interface PublicScene {
@@ -71,7 +71,7 @@ export interface ShareResponse extends ShareLinks {
 }
 
 export interface SceneUpdate {
-  meshes: Array<{ color: string; opacity: number; visible: boolean; quality: 'lod' | 'raw' }>;
+  meshes: Array<{ color: string; opacity: number; visible: boolean; quality: MeshQuality }>;
   state: ViewState;
 }
 

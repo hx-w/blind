@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    fs,
     path::Path,
     sync::{Arc, Mutex},
 };
@@ -22,7 +23,6 @@ pub struct LodAsset {
     pub raw_bytes: usize,
     pub triangles: usize,
     pub source_triangles: usize,
-    pub error: f32,
 }
 
 #[derive(Clone)]
@@ -59,13 +59,18 @@ impl Default for LodCache {
 
 impl LodCache {
     pub fn get(&self, key: &str) -> Option<Arc<LodAsset>> {
-        self.inner.lock().ok()?.entries.get(key).cloned()
+        let state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.entries.get(key).cloned()
     }
 
     pub fn insert(&self, key: String, asset: Arc<LodAsset>) {
-        let Ok(mut state) = self.inner.lock() else {
-            return;
-        };
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if asset.bytes.len() > self.max_bytes {
             return;
         }
@@ -113,20 +118,11 @@ pub fn target_triangles(mesh_count: usize) -> usize {
     (150_000 / mesh_count.max(1)).clamp(2_000, 50_000)
 }
 
-pub fn build(
-    path: &Path,
-    source: Vec<u8>,
-    format: MeshFormat,
-    target_triangles: usize,
-) -> Result<LodAsset> {
+pub fn build(path: &Path, format: MeshFormat, target_triangles: usize) -> Result<LodAsset> {
     let (raw_bytes, geometry) = if format == MeshFormat::Pts {
-        (
-            mesh::pts_geometry(&source)?.to_binary_ply()?.len(),
-            mesh::pts_lod_geometry(&source)?,
-        )
+        mesh::pts_raw_size_and_lod_geometry(&fs::read(path)?)?
     } else {
-        let raw_bytes = source.len();
-        drop(source);
+        let raw_bytes = fs::metadata(path)?.len() as usize;
         (raw_bytes, Geometry::load(path, format)?)
     };
     if geometry
@@ -138,7 +134,7 @@ pub fn build(
         bail!("Mesh contains non-finite vertex coordinates");
     }
     let source_triangles = geometry.indices.len() / 3;
-    let (geometry, error) = simplify_geometry(geometry, target_triangles);
+    let geometry = simplify_geometry(geometry, target_triangles);
     let triangles = geometry.indices.len() / 3;
     let bytes = Bytes::from(geometry.to_binary_ply()?);
     Ok(LodAsset {
@@ -146,16 +142,15 @@ pub fn build(
         raw_bytes,
         triangles,
         source_triangles,
-        error,
     })
 }
 
-fn simplify_geometry(mut geometry: Geometry, target_triangles: usize) -> (Geometry, f32) {
+fn simplify_geometry(mut geometry: Geometry, target_triangles: usize) -> Geometry {
     let target_count = target_triangles
         .saturating_mul(3)
         .min(geometry.indices.len());
     if target_count >= geometry.indices.len() || target_count < 3 {
-        return (geometry, 0.0);
+        return geometry;
     }
     let mut error = 0.0;
     let mut indices = meshopt::simplify_decoder(
@@ -167,15 +162,17 @@ fn simplify_geometry(mut geometry: Geometry, target_triangles: usize) -> (Geomet
         Some(&mut error),
     );
     if indices.len() < 3 {
-        return (geometry, 0.0);
+        return geometry;
     }
     geometry.positions = meshopt::optimize_vertex_fetch(&mut indices, &geometry.positions);
     geometry.indices = indices;
-    (geometry, error)
+    geometry
 }
 
 pub fn cache_key(revision: &str, format: MeshFormat, target_triangles: usize) -> String {
-    format!("{revision}:{format:?}:{target_triangles}:v2")
+    // Encoding the profile parameters (instead of a hand-bumped suffix) makes
+    // any profile change invalidate cached entries automatically.
+    format!("{revision}:{format:?}:{target_triangles}:{TARGET_ERROR}")
 }
 
 #[cfg(test)]
@@ -206,7 +203,7 @@ mod tests {
     fn simplification_compacts_geometry_in_memory() {
         let source = grid(80);
         let source_triangles = source.indices.len() / 3;
-        let (lod, _) = simplify_geometry(source, 2_000);
+        let lod = simplify_geometry(source, 2_000);
         assert!(lod.indices.len() / 3 < source_triangles);
         assert!(lod.indices.len() / 3 <= 2_100);
         assert!(
@@ -225,12 +222,8 @@ mod tests {
     #[test]
     fn pts_lod_keeps_semantic_points_but_reduces_procedural_detail() {
         let source = b"0 0 0\n2 0 0\n2 2 0\n0 2 0\n";
-        let raw = mesh::pts_geometry(source).unwrap().to_binary_ply().unwrap();
-        let preview = mesh::pts_lod_geometry(source)
-            .unwrap()
-            .to_binary_ply()
-            .unwrap();
-        assert!(preview.len() < raw.len());
+        let (raw_size, preview) = mesh::pts_raw_size_and_lod_geometry(source).unwrap();
+        assert!(preview.to_binary_ply().unwrap().len() < raw_size);
     }
 
     #[test]
@@ -245,7 +238,6 @@ mod tests {
                 raw_bytes: 12,
                 triangles: 1,
                 source_triangles: 2,
-                error: 0.0,
             })
         };
         cache.insert("a".into(), asset(1));
@@ -280,7 +272,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("non-finite.ply");
         std::fs::write(&path, source).unwrap();
-        let error = build(&path, source.to_vec(), MeshFormat::Ply, 2_000).unwrap_err();
+        let error = build(&path, MeshFormat::Ply, 2_000).unwrap_err();
         assert!(error.to_string().contains("non-finite"));
     }
 }

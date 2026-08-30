@@ -35,7 +35,9 @@ use crate::{
     network::{HostCandidate, discover},
     registry::{RegisteredScene, Registry, RegistryAudit, RegistryLookupError, is_short_secret},
     render::Renderer,
-    scene::{MeshFormat, MeshQuality, SceneDescriptor, SceneGone, SceneUpdate, hash_bytes},
+    scene::{
+        MeshFormat, MeshQuality, SceneDescriptor, SceneGone, SceneUpdate, hash_bytes, hash_file,
+    },
     token::{Scope, TokenCodec},
 };
 
@@ -160,6 +162,21 @@ impl DoctorRegistryReport {
         self.expired + self.source_gone + self.tombstoned + self.corrupt
     }
 
+    /// Report for an offline clear that removed every link without auditing it.
+    pub fn cleared(removed: usize) -> Self {
+        Self {
+            valid: 0,
+            expired: 0,
+            source_gone: 0,
+            tombstoned: 0,
+            corrupt: removed,
+            removed,
+            preserved: 0,
+            key_repaired: false,
+            lod_cache: None,
+        }
+    }
+
     pub fn total(&self) -> usize {
         self.valid + self.invalid()
     }
@@ -184,7 +201,6 @@ struct PublicMesh {
     visible: bool,
     quality: MeshQuality,
     source_url: String,
-    lod_url: String,
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
@@ -657,7 +673,6 @@ async fn get_scene(
             visible: mesh.visible,
             quality: mesh.quality,
             source_url: format!("/api/v1/scenes/{token}/meshes/{index}"),
-            lod_url: format!("/api/v1/scenes/{token}/meshes/{index}/lod"),
         })
         .collect();
     Ok((
@@ -705,7 +720,6 @@ async fn get_mesh(
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CACHE_CONTROL, NO_STORE)
-        .header("x-blind-raw-bytes", bytes.len())
         .header(header::CONTENT_LENGTH, bytes.len())
         .body(Body::from(bytes))?)
 }
@@ -736,16 +750,16 @@ async fn get_mesh_lod(
         return lod_response(asset);
     }
 
-    // Do not retain a potentially large source buffer while this request waits
-    // for one of the bounded simplification slots.
-    let source = match tokio::fs::read(&mesh.path).await {
-        Ok(bytes) => bytes,
+    // Re-verify this Mesh after the wait, streaming the file instead of
+    // buffering it: lod::build re-reads the source inside the blocking slot.
+    let current = match hash_file(std::path::Path::new(&mesh.path)).await {
+        Ok(revision) => revision,
         Err(_) => {
             mark_scene_gone(&state, &token);
             return Err(SceneGone.into());
         }
     };
-    if hash_bytes(&source) != mesh.revision {
+    if current != mesh.revision {
         mark_scene_gone(&state, &token);
         return Err(SceneGone.into());
     }
@@ -753,18 +767,13 @@ async fn get_mesh_lod(
     let path = mesh.path.clone();
     let format = mesh.format;
     let asset = tokio::task::spawn_blocking(move || {
-        lod::build(
-            std::path::Path::new(&path),
-            source,
-            format,
-            target_triangles,
-        )
-        .map_err(|error| error.to_string())
+        lod::build(std::path::Path::new(&path), format, target_triangles)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| AppError::internal(&error.to_string()))?
     .map_err(|error| AppError::unprocessable(&error))?;
-    if scene.validate().await.is_err() {
+    if scene.verify_source_lengths().await.is_err() {
         mark_scene_gone(&state, &token);
         return Err(SceneGone.into());
     }
@@ -779,10 +788,6 @@ fn lod_response(asset: Arc<LodAsset>) -> Result<Response<Body>, AppError> {
         .header(header::CONTENT_TYPE, MeshFormat::Ply.mime())
         .header(header::CACHE_CONTROL, NO_STORE)
         .header("x-blind-raw-bytes", asset.raw_bytes)
-        .header("x-blind-lod-bytes", asset.bytes.len())
-        .header("x-blind-lod-triangles", asset.triangles)
-        .header("x-blind-source-triangles", asset.source_triangles)
-        .header("x-blind-lod-error", asset.error.to_string())
         .header(header::CONTENT_LENGTH, asset.bytes.len())
         .body(Body::from(asset.bytes.clone()))?)
 }

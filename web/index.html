@@ -58,7 +58,7 @@
         <button class="dock-tool" id="fit-view" type="button" aria-label="适配全部可见 Mesh">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/><circle cx="12" cy="12" r="2.5"/></svg><span>Fit</span>
         </button>
-        <button class="dock-tool panel-trigger" data-panel="details" type="button" aria-label="打开 Mesh 详情" aria-expanded="false">
+        <button class="dock-tool panel-trigger" type="button" aria-label="打开 Mesh 详情" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>详情</span>
         </button>
         <button class="dock-tool" id="brush-tool" type="button" aria-label="进入画笔模式" aria-pressed="false">
@@ -87,7 +87,7 @@
           <button class="close-panel" id="close-panel" type="button" aria-label="关闭面板"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
         </div>
         <div class="panel-scroll" id="panel-scroll">
-          <section data-panel-content="details">
+          <section>
             <label class="mesh-picker" for="detail-mesh-select"><span>当前 Mesh</span><select id="detail-mesh-select" aria-label="选择要编辑的 Mesh"></select></label>
             <div class="mesh-summary">
               <span class="mesh-summary-dot" id="mesh-summary-dot"></span>
