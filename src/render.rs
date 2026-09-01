@@ -1,4 +1,4 @@
-use std::{borrow::Cow, io::Cursor, mem, path::Path};
+use std::{borrow::Cow, io::Cursor, mem, num::NonZeroU64, path::Path};
 
 use anyhow::{Context, Result, bail};
 use bytemuck::{Pod, Zeroable};
@@ -15,6 +15,7 @@ use crate::{
 
 const MAX_RENDER_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RENDER_TRIANGLES: usize = 2_000_000;
+const MAX_RENDER_POINTS: usize = 2_000_000;
 const SAMPLE_COUNT: u32 = 4;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -39,6 +40,9 @@ struct Uniform {
     finish: [f32; 4],
     tone: [f32; 4],
     surface: [f32; 4],
+    point_scale: [f32; 4],
+    point_color: [f32; 4],
+    point_depth_bias: [f32; 4],
 }
 
 #[derive(Clone, Deserialize)]
@@ -57,6 +61,7 @@ struct MatteShader {
     specular: f32,
     shininess: f32,
     depth_bias_step: f32,
+    point_diameter_pixels: f32,
     translucent_threshold: f32,
     contrast_pivot: f32,
     light_min: f32,
@@ -91,6 +96,8 @@ pub struct Renderer {
     camera_layout: wgpu::BindGroupLayout,
     opaque_triangle_pipeline: wgpu::RenderPipeline,
     translucent_triangle_pipeline: wgpu::RenderPipeline,
+    opaque_point_pipeline: wgpu::RenderPipeline,
+    translucent_point_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     material: MatteShader,
     ink: ScreenInk,
@@ -134,8 +141,10 @@ impl Renderer {
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+                    // One uniform slot per batch, addressed with a dynamic
+                    // offset so point batches can carry their own color.
+                    has_dynamic_offset: true,
+                    min_binding_size: NonZeroU64::new(mem::size_of::<Uniform>() as u64),
                 },
                 count: None,
             }],
@@ -150,7 +159,7 @@ impl Renderer {
             &pipeline_layout,
             &shader,
             format,
-            wgpu::PrimitiveTopology::TriangleList,
+            PipelineKind::Mesh,
             None,
             true,
         );
@@ -159,7 +168,25 @@ impl Renderer {
             &pipeline_layout,
             &shader,
             format,
-            wgpu::PrimitiveTopology::TriangleList,
+            PipelineKind::Mesh,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+        );
+        let opaque_point_pipeline = create_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            PipelineKind::Point,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            true,
+        );
+        let translucent_point_pipeline = create_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            format,
+            PipelineKind::Point,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
         );
@@ -168,7 +195,7 @@ impl Renderer {
             &pipeline_layout,
             &shader,
             format,
-            wgpu::PrimitiveTopology::LineList,
+            PipelineKind::Line,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             true,
         );
@@ -178,6 +205,8 @@ impl Renderer {
             camera_layout,
             opaque_triangle_pipeline,
             translucent_triangle_pipeline,
+            opaque_point_pipeline,
+            translucent_point_pipeline,
             line_pipeline,
             material,
             ink,
@@ -282,12 +311,40 @@ impl Renderer {
                 self.material.specular,
                 self.material.shininess,
             ],
+            point_scale: [
+                self.material.point_diameter_pixels / width as f32,
+                self.material.point_diameter_pixels / height as f32,
+                0.0,
+                0.0,
+            ],
+            point_color: [0.0; 4],
+            point_depth_bias: [0.0; 4],
         };
+        // Every batch gets its own uniform slot so point batches carry their
+        // shared color and depth bias without paying per point.
+        let uniform_size = mem::size_of::<Uniform>();
+        let uniform_stride = align_to(
+            uniform_size as u32,
+            self.device.limits().min_uniform_buffer_offset_alignment,
+        );
+        let mut uniform_bytes = vec![0_u8; uniform_stride as usize * input.batches.len().max(1)];
+        for index in 0..input.batches.len().max(1) {
+            let mut slot = uniform;
+            if let Some(BatchGeometry::Points {
+                color, depth_bias, ..
+            }) = input.batches.get(index).map(|batch| &batch.geometry)
+            {
+                slot.point_color = *color;
+                slot.point_depth_bias = [*depth_bias, 0.0, 0.0, 0.0];
+            }
+            let start = index * uniform_stride as usize;
+            uniform_bytes[start..start + uniform_size].copy_from_slice(bytemuck::bytes_of(&slot));
+        }
         let uniform_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Camera uniform"),
-                contents: bytemuck::bytes_of(&uniform),
+                label: Some("Camera uniforms"),
+                contents: &uniform_bytes,
                 usage: wgpu::BufferUsages::UNIFORM,
             });
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -295,17 +352,21 @@ impl Renderer {
             layout: &self.camera_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &uniform_buffer,
+                    offset: 0,
+                    size: NonZeroU64::new(uniform_size as u64),
+                }),
             }],
         });
-        let mesh_buffers: Vec<_> = input
-            .mesh_batches
+        let batch_buffers: Vec<_> = input
+            .batches
             .iter()
             .map(|batch| {
                 self.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Mesh vertices"),
-                        contents: bytemuck::cast_slice(&batch.vertices),
+                        label: Some(batch.geometry.buffer_label()),
+                        contents: batch.geometry.bytes(),
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             })
@@ -357,17 +418,30 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            pass.set_bind_group(0, &bind_group, &[]);
-            for (batch, buffer) in input.mesh_batches.iter().zip(&mesh_buffers) {
-                pass.set_pipeline(if batch.translucent {
-                    &self.translucent_triangle_pipeline
-                } else {
-                    &self.opaque_triangle_pipeline
-                });
+            for (index, (batch, buffer)) in input.batches.iter().zip(&batch_buffers).enumerate() {
+                pass.set_bind_group(0, &bind_group, &[index as u32 * uniform_stride]);
                 pass.set_vertex_buffer(0, buffer.slice(..));
-                pass.draw(0..batch.vertices.len() as u32, 0..1);
+                match &batch.geometry {
+                    BatchGeometry::Mesh { vertices } => {
+                        pass.set_pipeline(if batch.translucent {
+                            &self.translucent_triangle_pipeline
+                        } else {
+                            &self.opaque_triangle_pipeline
+                        });
+                        pass.draw(0..vertices.len() as u32, 0..1);
+                    }
+                    BatchGeometry::Points { positions, .. } => {
+                        pass.set_pipeline(if batch.translucent {
+                            &self.translucent_point_pipeline
+                        } else {
+                            &self.opaque_point_pipeline
+                        });
+                        pass.draw(0..4, 0..positions.len() as u32);
+                    }
+                }
             }
             if let Some(buffer) = &line_buffer {
+                pass.set_bind_group(0, &bind_group, &[0]);
                 pass.set_pipeline(&self.line_pipeline);
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..input.line_vertices.len() as u32, 0..1);
@@ -428,7 +502,7 @@ impl Renderer {
 }
 
 struct RenderInput {
-    mesh_batches: Vec<MeshBatch>,
+    batches: Vec<RenderBatch>,
     line_vertices: Vec<Vertex>,
     width: u32,
     height: u32,
@@ -441,10 +515,37 @@ struct RenderInput {
     strokes: Vec<ScreenStroke>,
 }
 
-struct MeshBatch {
-    vertices: Vec<Vertex>,
+struct RenderBatch {
+    geometry: BatchGeometry,
     translucent: bool,
     center: Vec3,
+}
+
+enum BatchGeometry {
+    Mesh {
+        vertices: Vec<Vertex>,
+    },
+    Points {
+        positions: Vec<[f32; 3]>,
+        color: [f32; 4],
+        depth_bias: f32,
+    },
+}
+
+impl BatchGeometry {
+    fn buffer_label(&self) -> &'static str {
+        match self {
+            Self::Mesh { .. } => "Mesh vertices",
+            Self::Points { .. } => "Point positions",
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Mesh { vertices } => bytemuck::cast_slice(vertices),
+            Self::Points { positions, .. } => bytemuck::cast_slice(positions),
+        }
+    }
 }
 
 fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Result<RenderInput> {
@@ -460,6 +561,7 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
     let mut loaded = Vec::new();
     let mut source_bytes = 0_u64;
     let mut triangles = 0_usize;
+    let mut points = 0_usize;
     let mut bounds_min = Vec3::splat(f32::INFINITY);
     let mut bounds_max = Vec3::splat(f32::NEG_INFINITY);
     for (layer, mesh) in visible {
@@ -476,18 +578,42 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         if triangles > MAX_RENDER_TRIANGLES {
             bail!("image rendering supports at most 2,000,000 visible triangles");
         }
+        if geometry.is_point_cloud() {
+            points = points
+                .checked_add(geometry.positions.len())
+                .context("point count overflow")?;
+            if points > MAX_RENDER_POINTS {
+                bail!("image rendering supports at most 2,000,000 visible points");
+            }
+        }
         let (min, max) = geometry.bounds();
         bounds_min = bounds_min.min(Vec3::from_array(min));
         bounds_max = bounds_max.max(Vec3::from_array(max));
         loaded.push((layer, mesh, geometry, min, max));
     }
-    let mut mesh_batches = Vec::new();
+    let mut batches = Vec::new();
     let mut line_vertices = Vec::new();
     let wire = scene.state.shading == Shading::Wire;
     let flat = scene.state.shading == Shading::Flat;
     for (layer, mesh, geometry, mesh_min, mesh_max) in loaded {
         let color = parse_color(&mesh.color, mesh.opacity)?;
         let depth_bias = layer as f32 * material.depth_bias_step;
+        let center = (Vec3::from_array(mesh_min) + Vec3::from_array(mesh_max)) * 0.5;
+        let translucent = mesh.opacity < material.translucent_threshold;
+        if geometry.is_point_cloud() {
+            batches.push(RenderBatch {
+                // The position vec moves straight into the batch; the shared
+                // color and depth bias live in the batch's uniform slot.
+                geometry: BatchGeometry::Points {
+                    positions: geometry.positions,
+                    color,
+                    depth_bias,
+                },
+                translucent,
+                center,
+            });
+            continue;
+        }
         let normals = (!flat).then(|| geometry.smooth_normals());
         let mut vertices = Vec::with_capacity(geometry.indices.len());
         for triangle in geometry.indices.chunks_exact(3) {
@@ -522,10 +648,10 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
             }
         }
         if !vertices.is_empty() {
-            mesh_batches.push(MeshBatch {
-                vertices,
-                translucent: mesh.opacity < material.translucent_threshold,
-                center: (Vec3::from_array(mesh_min) + Vec3::from_array(mesh_max)) * 0.5,
+            batches.push(RenderBatch {
+                geometry: BatchGeometry::Mesh { vertices },
+                translucent,
+                center,
             });
         }
     }
@@ -564,7 +690,7 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         (camera_right * value[0] + camera_up * value[1] + camera_back * value[2])
             .normalize_or_zero()
     };
-    mesh_batches.sort_by(|left, right| match (left.translucent, right.translucent) {
+    batches.sort_by(|left, right| match (left.translucent, right.translucent) {
         (false, true) => std::cmp::Ordering::Less,
         (true, false) => std::cmp::Ordering::Greater,
         (true, true) => right
@@ -608,7 +734,7 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         Background::Light => clear_color(&material.background_light)?,
     };
     Ok(RenderInput {
-        mesh_batches,
+        batches,
         line_vertices,
         width: frame.width,
         height: frame.height,
@@ -719,27 +845,94 @@ fn render_dimensions(width: u32, height: u32) -> (u32, u32) {
     )
 }
 
+/// Static pipeline shapes; one factory creates all of them so pipeline policy
+/// (depth compare, MSAA, blend mask) stays in exactly one place.
+enum PipelineKind {
+    Mesh,
+    Line,
+    Point,
+}
+
+const MESH_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: mem::size_of::<Vertex>() as u64,
+    step_mode: wgpu::VertexStepMode::Vertex,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32],
+};
+
+const POINT_VERTEX_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+    array_stride: mem::size_of::<[f32; 3]>() as u64,
+    step_mode: wgpu::VertexStepMode::Instance,
+    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+};
+
 fn create_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
     shader: &wgpu::ShaderModule,
     format: wgpu::TextureFormat,
-    topology: wgpu::PrimitiveTopology,
+    kind: PipelineKind,
     blend: Option<wgpu::BlendState>,
     depth_write_enabled: bool,
 ) -> wgpu::RenderPipeline {
+    let (label, vertex_entry, fragment_entry, vertex_buffers, topology) = match kind {
+        PipelineKind::Mesh => (
+            "Blind pipeline",
+            "vs_main",
+            "fs_main",
+            &[MESH_VERTEX_LAYOUT][..],
+            wgpu::PrimitiveTopology::TriangleList,
+        ),
+        PipelineKind::Line => (
+            "Blind line pipeline",
+            "vs_main",
+            "fs_main",
+            &[MESH_VERTEX_LAYOUT][..],
+            wgpu::PrimitiveTopology::LineList,
+        ),
+        PipelineKind::Point => (
+            "Blind point cloud pipeline",
+            "point_vs_main",
+            "point_fs_main",
+            &[POINT_VERTEX_LAYOUT][..],
+            wgpu::PrimitiveTopology::TriangleStrip,
+        ),
+    };
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("Blind pipeline"), layout: Some(layout),
-        vertex: wgpu::VertexState { module: shader, entry_point: "vs_main", compilation_options: Default::default(), buffers: &[wgpu::VertexBufferLayout {
-            array_stride: mem::size_of::<Vertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32],
-        }] },
-        fragment: Some(wgpu::FragmentState { module: shader, entry_point: "fs_main", compilation_options: Default::default(), targets: &[Some(wgpu::ColorTargetState {
-            format, blend, write_mask: wgpu::ColorWrites::ALL,
-        })] }),
-        primitive: wgpu::PrimitiveState { topology, cull_mode: None, ..Default::default() },
-        depth_stencil: Some(wgpu::DepthStencilState { format: DEPTH_FORMAT, depth_write_enabled, depth_compare: wgpu::CompareFunction::Less, stencil: Default::default(), bias: Default::default() }),
-        multisample: wgpu::MultisampleState { count: SAMPLE_COUNT, ..Default::default() }, multiview: None,
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: vertex_entry,
+            compilation_options: Default::default(),
+            buffers: vertex_buffers,
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: fragment_entry,
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH_FORMAT,
+            depth_write_enabled,
+            depth_compare: wgpu::CompareFunction::Less,
+            stencil: Default::default(),
+            bias: Default::default(),
+        }),
+        multisample: wgpu::MultisampleState {
+            count: SAMPLE_COUNT,
+            ..Default::default()
+        },
+        multiview: None,
     })
 }
 
@@ -804,6 +997,39 @@ fn align_to(value: u32, alignment: u32) -> u32 {
 mod tests {
     use super::*;
     use image::Rgba;
+
+    #[tokio::test]
+    async fn renderer_initializes_all_shader_pipelines() {
+        Renderer::new().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn point_cloud_scene_builds_and_renders_instanced_batch() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cloud.ply");
+        // Two layers exercise the aligned dynamic-uniform offset used after
+        // the first point batch, not only the zero-offset happy path.
+        let mut scene = SceneDescriptor::create(&[path.clone(), path], None)
+            .await
+            .unwrap();
+        scene.state.axes = false;
+        scene.state.frame.width = 64;
+        scene.state.frame.height = 64;
+        let material: MatteShader =
+            serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
+
+        let input = load_scene_geometry(&scene, &material).unwrap();
+        assert_eq!(input.batches.len(), 2);
+        for batch in &input.batches {
+            match &batch.geometry {
+                BatchGeometry::Points { positions, .. } => assert_eq!(positions.len(), 27),
+                BatchGeometry::Mesh { .. } => panic!("point-only PLY rendered as a triangle Mesh"),
+            }
+        }
+
+        let png = Renderer::new().await.unwrap().render(&scene).await.unwrap();
+        let image = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
+        assert_eq!((image.width(), image.height()), (64, 64));
+    }
 
     #[test]
     fn oversized_render_dimensions_keep_the_scene_aspect_ratio() {

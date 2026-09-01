@@ -4,7 +4,7 @@ import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { apiError, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
-import { createMatteMaterial, updateMatteMaterial } from './material';
+import { createObjectMaterial, updateObjectMaterial } from './material';
 import shader from '../../shaders/matte.json';
 
 // The library class carries a target at runtime that its typings omit.
@@ -291,29 +291,30 @@ export class MeshViewer {
     // coplanar samples; renderOrder also makes translucent meshes deterministic.
     object.renderOrder = index;
     object.traverse((child) => {
-      if (!(child instanceof THREE.Mesh)) return;
+      if (!isDrawable(child)) return;
       child.userData.modelIndex = index;
       child.renderOrder = index;
       const geometry = child.geometry as THREE.BufferGeometry;
       normalizeGeometry(geometry);
-      // Review the geometry itself rather than trusting optional exporter normals,
-      // which are frequently quantized or face-split in scan files.
-      geometry.deleteAttribute('normal');
-      geometry.computeVertexNormals();
-      child.material = createMatteMaterial({
+      child.material = createObjectMaterial(child, {
         color: info.color,
         opacity: info.opacity,
         flat: this.state.shading === 'flat',
         wireframe: this.state.shading === 'wire',
         layer: index,
-      });
+      }, this.renderer.getPixelRatio());
+      if (child instanceof THREE.Points) return;
+      // Review the geometry itself rather than trusting optional exporter normals,
+      // which are frequently quantized or face-split in scan files.
+      geometry.deleteAttribute('normal');
+      geometry.computeVertexNormals();
     });
   }
 
   private applyMaterials(): void {
     this.models.forEach((model, index) => model.object.traverse((child) => {
-      if (!(child instanceof THREE.Mesh)) return;
-      updateMatteMaterial(child.material as THREE.ShaderMaterial, {
+      if (!isDrawable(child)) return;
+      updateObjectMaterial(child, {
         color: model.info.color,
         opacity: model.info.opacity,
         flat: this.state.shading === 'flat',
@@ -453,7 +454,10 @@ async function loadObject(info: PublicMesh, quality: MeshQuality): Promise<Loade
   let object: THREE.Object3D;
   if (type === 'model/stl') object = new THREE.Mesh(new STLLoader().parse(buffer));
   else if (type === 'model/obj') object = new OBJLoader().parse(new TextDecoder().decode(buffer));
-  else object = new THREE.Mesh(new PLYLoader().parse(buffer));
+  else {
+    const geometry = new PLYLoader().parse(buffer);
+    object = geometry.index?.count ? new THREE.Mesh(geometry) : new THREE.Points(geometry);
+  }
   return {
     object,
     payloadBytes: buffer.byteLength,
@@ -470,11 +474,17 @@ function numberHeader(response: Response, name: string): number | undefined {
 
 function disposeObject(object: THREE.Object3D): void {
   object.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) return;
+    if (!isDrawable(child)) return;
     child.geometry.dispose();
     const materials = Array.isArray(child.material) ? child.material : [child.material];
     materials.forEach((material) => material.dispose());
   });
+}
+
+type Drawable = THREE.Mesh | THREE.Points;
+
+function isDrawable(child: THREE.Object3D): child is Drawable {
+  return child instanceof THREE.Mesh || child instanceof THREE.Points;
 }
 
 function settledLayout(): Promise<void> {

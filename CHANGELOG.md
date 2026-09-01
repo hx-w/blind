@@ -3,6 +3,16 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-09-01
+
+### Added
+
+- Vertex-only and zero-face PLY files now render as point clouds in both the
+  interactive viewer and PNG links. Each point uses a circular, sphere-shaded
+  GPU sprite instead of expanding the source into sphere triangles.
+- Point-cloud LODs use bounded deterministic sampling, and `blind doctor`
+  reports source and LOD point counts alongside triangle statistics.
+
 ## [0.4.2] - 2026-08-30
 
 ### Changed
@@ -141,6 +151,7 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.4.3]: https://github.com/hx-w/blind/releases/tag/v0.4.3
 [0.4.2]: https://github.com/hx-w/blind/releases/tag/v0.4.2
 [0.4.1]: https://github.com/hx-w/blind/releases/tag/v0.4.1
 [0.4.0]: https://github.com/hx-w/blind/releases/tag/v0.4.0

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
@@ -21,8 +21,10 @@ const TARGET_ERROR: f32 = 0.002;
 pub struct LodAsset {
     pub bytes: Bytes,
     pub raw_bytes: usize,
-    pub triangles: usize,
-    pub source_triangles: usize,
+    /// Every asset is exactly one primitive kind, so only one count pair is live.
+    pub point_cloud: bool,
+    pub source_primitives: usize,
+    pub primitives: usize,
 }
 
 #[derive(Clone)]
@@ -46,6 +48,10 @@ pub struct LodCacheStats {
     pub raw_bytes: usize,
     pub source_triangles: usize,
     pub lod_triangles: usize,
+    #[serde(default)]
+    pub source_points: usize,
+    #[serde(default)]
+    pub lod_points: usize,
 }
 
 impl Default for LodCache {
@@ -98,10 +104,18 @@ impl LodCache {
         let mut raw_bytes = 0_usize;
         let mut source_triangles = 0_usize;
         let mut lod_triangles = 0_usize;
+        let mut source_points = 0_usize;
+        let mut lod_points = 0_usize;
         for asset in state.entries.values() {
             raw_bytes = raw_bytes.saturating_add(asset.raw_bytes);
-            source_triangles = source_triangles.saturating_add(asset.source_triangles);
-            lod_triangles = lod_triangles.saturating_add(asset.triangles);
+            let (source, lod) = (asset.source_primitives, asset.primitives);
+            if asset.point_cloud {
+                source_points = source_points.saturating_add(source);
+                lod_points = lod_points.saturating_add(lod);
+            } else {
+                source_triangles = source_triangles.saturating_add(source);
+                lod_triangles = lod_triangles.saturating_add(lod);
+            }
         }
         LodCacheStats {
             entries: state.entries.len(),
@@ -110,43 +124,51 @@ impl LodCache {
             raw_bytes,
             source_triangles,
             lod_triangles,
+            source_points,
+            lod_points,
         }
     }
 }
 
-pub fn target_triangles(mesh_count: usize) -> usize {
+pub fn target_primitives(mesh_count: usize) -> usize {
     (150_000 / mesh_count.max(1)).clamp(2_000, 50_000)
 }
 
-pub fn build(path: &Path, format: MeshFormat, target_triangles: usize) -> Result<LodAsset> {
+pub fn build(path: &Path, format: MeshFormat, target_primitives: usize) -> Result<LodAsset> {
     let (raw_bytes, geometry) = if format == MeshFormat::Pts {
         mesh::pts_raw_size_and_lod_geometry(&fs::read(path)?)?
     } else {
         let raw_bytes = fs::metadata(path)?.len() as usize;
         (raw_bytes, Geometry::load(path, format)?)
     };
-    if geometry
-        .positions
-        .iter()
-        .flatten()
-        .any(|value| !value.is_finite())
-    {
-        bail!("Mesh contains non-finite vertex coordinates");
-    }
-    let source_triangles = geometry.indices.len() / 3;
-    let geometry = simplify_geometry(geometry, target_triangles);
-    let triangles = geometry.indices.len() / 3;
-    let bytes = Bytes::from(geometry.to_binary_ply()?);
-    Ok(LodAsset {
-        bytes,
+    // Both feeds already reject non-finite coordinates: Geometry::load scans
+    // PLY/STL/OBJ, and the PTS parser skips non-finite points per line.
+    let point_cloud = geometry.is_point_cloud();
+    let source_primitives = geometry.primitive_count();
+    let geometry = simplify_geometry(geometry, target_primitives);
+    let asset = LodAsset {
+        bytes: Bytes::from(geometry.to_binary_ply()?),
         raw_bytes,
-        triangles,
-        source_triangles,
-    })
+        point_cloud,
+        source_primitives,
+        primitives: geometry.primitive_count(),
+    };
+    Ok(asset)
 }
 
-fn simplify_geometry(mut geometry: Geometry, target_triangles: usize) -> Geometry {
-    let target_count = target_triangles
+fn simplify_geometry(mut geometry: Geometry, target_primitives: usize) -> Geometry {
+    if geometry.is_point_cloud() {
+        let target_points = target_primitives.min(geometry.positions.len());
+        if target_points >= geometry.positions.len() || target_points < 2 {
+            return geometry;
+        }
+        let last = geometry.positions.len() - 1;
+        geometry.positions = (0..target_points)
+            .map(|index| geometry.positions[index * last / (target_points - 1)])
+            .collect();
+        return geometry;
+    }
+    let target_count = target_primitives
         .saturating_mul(3)
         .min(geometry.indices.len());
     if target_count >= geometry.indices.len() || target_count < 3 {
@@ -169,10 +191,10 @@ fn simplify_geometry(mut geometry: Geometry, target_triangles: usize) -> Geometr
     geometry
 }
 
-pub fn cache_key(revision: &str, format: MeshFormat, target_triangles: usize) -> String {
+pub fn cache_key(revision: &str, format: MeshFormat, target_primitives: usize) -> String {
     // Encoding the profile parameters (instead of a hand-bumped suffix) makes
     // any profile change invalidate cached entries automatically.
-    format!("{revision}:{format:?}:{target_triangles}:{TARGET_ERROR}")
+    format!("{revision}:{format:?}:{target_primitives}:{TARGET_ERROR}")
 }
 
 #[cfg(test)]
@@ -227,6 +249,37 @@ mod tests {
     }
 
     #[test]
+    fn point_cloud_lod_samples_the_full_input_range() {
+        let source = Geometry {
+            positions: (0..10_000).map(|index| [index as f32, 0.0, 0.0]).collect(),
+            indices: Vec::new(),
+        };
+        let lod = simplify_geometry(source, 2_000);
+        assert!(lod.is_point_cloud());
+        assert_eq!(lod.positions.len(), 2_000);
+        assert_eq!(lod.positions.first(), Some(&[0.0, 0.0, 0.0]));
+        assert_eq!(lod.positions.last(), Some(&[9_999.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn point_cloud_build_reports_point_counts() {
+        let mut source = String::from(
+            "ply\nformat ascii 1.0\nelement vertex 3000\nproperty float x\nproperty float y\nproperty float z\nend_header\n",
+        );
+        for index in 0..3_000 {
+            source.push_str(&format!("{index} 0 0\n"));
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cloud.ply");
+        std::fs::write(&path, source).unwrap();
+
+        let asset = build(&path, MeshFormat::Ply, 2_000).unwrap();
+        assert!(asset.point_cloud);
+        assert_eq!(asset.source_primitives, 3_000);
+        assert_eq!(asset.primitives, 2_000);
+    }
+
+    #[test]
     fn cache_is_memory_bounded() {
         let cache = LodCache {
             inner: Arc::new(Mutex::new(CacheState::default())),
@@ -236,8 +289,9 @@ mod tests {
             Arc::new(LodAsset {
                 bytes: Bytes::from(vec![value; 6]),
                 raw_bytes: 12,
-                triangles: 1,
-                source_triangles: 2,
+                point_cloud: false,
+                source_primitives: 2,
+                primitives: 1,
             })
         };
         cache.insert("a".into(), asset(1));
@@ -253,17 +307,34 @@ mod tests {
                 raw_bytes: 12,
                 source_triangles: 2,
                 lod_triangles: 1,
+                source_points: 0,
+                lod_points: 0,
             }
         );
     }
 
     #[test]
+    fn cache_stats_accept_legacy_servers_without_point_counts() {
+        let stats: LodCacheStats = serde_json::from_value(serde_json::json!({
+            "entries": 1,
+            "resident_bytes": 12,
+            "capacity_bytes": 24,
+            "raw_bytes": 48,
+            "source_triangles": 2,
+            "lod_triangles": 1
+        }))
+        .unwrap();
+        assert_eq!(stats.source_points, 0);
+        assert_eq!(stats.lod_points, 0);
+    }
+
+    #[test]
     fn lightweight_profile_distributes_a_fixed_scene_budget() {
-        assert_eq!(target_triangles(1), 50_000);
-        assert_eq!(target_triangles(3), 50_000);
-        assert_eq!(target_triangles(6), 25_000);
-        assert_eq!(target_triangles(30), 5_000);
-        assert_eq!(target_triangles(100), 2_000);
+        assert_eq!(target_primitives(1), 50_000);
+        assert_eq!(target_primitives(3), 50_000);
+        assert_eq!(target_primitives(6), 25_000);
+        assert_eq!(target_primitives(30), 5_000);
+        assert_eq!(target_primitives(100), 2_000);
     }
 
     #[test]

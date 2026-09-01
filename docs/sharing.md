@@ -62,15 +62,16 @@ Blind never partially restores a scene because a surviving subset could misrepre
 The image route:
 
 1. Decrypts and validates the descriptor.
-2. Parses all visible PLY, STL, OBJ, and PTS sources. PTS rings use one shared
-   generated tube-and-sphere triangle representation in both render paths.
+2. Parses all visible PLY, STL, OBJ, and PTS sources. Vertex-only PLY uses
+   sphere-shaded point sprites; PTS rings use one shared generated
+   tube-and-sphere triangle representation in both render paths.
 3. Rebuilds the camera, shared matte material, colors, deterministic overlap bias, and axes.
 4. Renders with the host graphics adapter into an offscreen texture.
 5. Composites the captured screen strokes with anti-aliased round joins and
    the same display widths used by the browser.
 6. Encodes PNG in memory and releases request resources.
 
-The response uses `Cache-Control: no-store, max-age=0`. Blind writes no rendered image to disk and bounds concurrent renders with a semaphore. Interactive WebGL and offscreen WebGPU consume the same material parameters and lighting formula, with target-specific shader adapters. Visible sources for one image request are limited to 512 MiB and 2,000,000 triangles. These limits apply only to the server-side PNG renderer; the interactive browser viewer remains independent.
+The response uses `Cache-Control: no-store, max-age=0`. Blind writes no rendered image to disk and bounds concurrent renders with a semaphore. Interactive WebGL and offscreen WebGPU consume the same material parameters and lighting formula, with target-specific shader adapters. Visible sources for one image request are limited to 512 MiB, 2,000,000 triangles, and 2,000,000 point-cloud points. These limits apply only to the server-side PNG renderer; the interactive browser viewer remains independent.
 
 ## Agent boundary
 

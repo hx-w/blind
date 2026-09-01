@@ -735,8 +735,8 @@ async fn get_mesh_lod(
         .meshes
         .get(index)
         .ok_or_else(|| AppError::not_found("Mesh not found"))?;
-    let target_triangles = lod::target_triangles(scene.meshes.len());
-    let key = lod::cache_key(&mesh.revision, mesh.format, target_triangles);
+    let target_primitives = lod::target_primitives(scene.meshes.len());
+    let key = lod::cache_key(&mesh.revision, mesh.format, target_primitives);
     if let Some(asset) = state.lod_cache.get(&key) {
         return lod_response(asset);
     }
@@ -767,7 +767,7 @@ async fn get_mesh_lod(
     let path = mesh.path.clone();
     let format = mesh.format;
     let asset = tokio::task::spawn_blocking(move || {
-        lod::build(std::path::Path::new(&path), format, target_triangles)
+        lod::build(std::path::Path::new(&path), format, target_primitives)
             .map_err(|error| error.to_string())
     })
     .await

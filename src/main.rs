@@ -29,8 +29,8 @@ use token::TokenCodec;
 #[command(
     name = "blind",
     version,
-    about = "Serve local PLY, STL, OBJ, and PTS geometry for instant 3D review",
-    long_about = "Blind runs one local Mesh-review server and creates short-lived review links.\n\nAgent workflow:\n  1. Start once:  blind serve\n  2. Share Meshes: blind share crown.ply prep.stl --format json\n  3. Use owner_url to review and public viewer_url/image_url to share.\n  4. Stop manually: blind stop\n\nRunning `blind serve` again is safe. It exits successfully when a Blind server is already running. Source files remain on the host; deleting or changing any source invalidates both the viewer and image links. Host addresses are discovered automatically, and `--host` selects a specific origin when needed.",
+    about = "Serve local Meshes and PLY point clouds for instant 3D review",
+    long_about = "Blind runs one local geometry-review server and creates short-lived review links.\n\nAgent workflow:\n  1. Start once:  blind serve\n  2. Share geometry: blind share crown.ply prep.stl --format json\n  3. Use owner_url to review and public viewer_url/image_url to share.\n  4. Stop manually: blind stop\n\nRunning `blind serve` again is safe. It exits successfully when a Blind server is already running. Source files remain on the host; deleting or changing any source invalidates both the viewer and image links. Host addresses are discovered automatically, and `--host` selects a specific origin when needed.",
     after_help = "Examples:\n  blind serve\n  blind share upper.ply lower.ply --format json\n  blind share jaw.ply margin.pts --format view\n  blind hosts\n  blind status\n  blind stop"
 )]
 struct Cli {
@@ -67,8 +67,8 @@ enum Command {
     )]
     Stop,
     #[command(
-        about = "Create short viewer and image links for one or more Meshes",
-        long_about = "Create one scene from local PLY, STL, OBJ, or Denta PTS files. PTS ordered rings render as a continuous tube with one sphere at every source point. By default Blind stores only an encrypted scene record in its bounded local registry and returns a six-character /s/ link valid for seven days. It never copies or caches source geometry or rendered images. Use `--stateless` only when a long self-contained link is preferred. Any source deletion or content change makes the entire scene return HTTP 410.\n\nUse `--format json` for agents. It includes viewer_url, image_url, owner_url, every detected Host candidate, canonical source paths, and SHA-256 revisions. Use owner_url for your own review because it enables the Complete information share option without exposing that permission in public links."
+        about = "Create short viewer and image links for local geometry",
+        long_about = "Create one scene from local PLY, STL, OBJ, or Denta PTS files. Vertex-only PLY renders as sphere-shaded point sprites; PTS ordered rings render as a continuous tube with one sphere at every source point. By default Blind stores only an encrypted scene record in its bounded local registry and returns a six-character /s/ link valid for seven days. It never copies or caches source geometry or rendered images. Use `--stateless` only when a long self-contained link is preferred. Any source deletion or content change makes the entire scene return HTTP 410.\n\nUse `--format json` for agents. It includes viewer_url, image_url, owner_url, every detected Host candidate, canonical source paths, and SHA-256 revisions. Use owner_url for your own review because it enables the Complete information share option without exposing that permission in public links."
     )]
     Share {
         #[arg(
@@ -633,10 +633,18 @@ fn lod_cache_lines(stats: Option<&LodCacheStats>, through_server: bool) -> Vec<S
             format_bytes(stats.raw_bytes),
             format_bytes(stats.resident_bytes)
         ));
-        lines.push(format!(
-            "    triangles     {} source -> {} LOD",
-            stats.source_triangles, stats.lod_triangles
-        ));
+        if stats.source_triangles > 0 {
+            lines.push(format!(
+                "    triangles     {} source -> {} LOD",
+                stats.source_triangles, stats.lod_triangles
+            ));
+        }
+        if stats.source_points > 0 {
+            lines.push(format!(
+                "    points        {} source -> {} LOD",
+                stats.source_points, stats.lod_points
+            ));
+        }
     }
     lines
 }
@@ -666,6 +674,8 @@ mod tests {
             raw_bytes: 12 * 1024 * 1024,
             source_triangles: 1_200_000,
             lod_triangles: 100_000,
+            source_points: 300_000,
+            lod_points: 50_000,
         };
         assert_eq!(
             lod_cache_lines(Some(&stats), true),
@@ -673,6 +683,7 @@ mod tests {
                 "ok  lod     2 entries, 3.0 MiB / 256.0 MiB resident",
                 "    payload       12.0 MiB Raw -> 3.0 MiB LOD (9.0 MiB saved, 75%)",
                 "    triangles     1200000 source -> 100000 LOD",
+                "    points        300000 source -> 50000 LOD",
             ]
         );
     }
@@ -687,5 +698,26 @@ mod tests {
             lod_cache_lines(None, true),
             vec!["--  lod     cache statistics unavailable from running server"]
         );
+    }
+
+    #[test]
+    fn doctor_lod_cache_lines_report_point_clouds_without_empty_triangle_line() {
+        let stats = LodCacheStats {
+            entries: 1,
+            resident_bytes: 12,
+            capacity_bytes: 256 * 1024 * 1024,
+            raw_bytes: 24,
+            source_triangles: 0,
+            lod_triangles: 0,
+            source_points: 4_000,
+            lod_points: 2_000,
+        };
+        let lines = lod_cache_lines(Some(&stats), true);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("4000 source -> 2000 LOD"))
+        );
+        assert!(lines.iter().all(|line| !line.contains("triangles")));
     }
 }

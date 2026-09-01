@@ -5,12 +5,13 @@
 [![macOS](https://img.shields.io/badge/platform-macOS-4b5563)](https://github.com/hx-w/blind#requirements)
 [![License: MIT](https://img.shields.io/github/license/hx-w/blind)](LICENSE)
 
-Instant mobile 3D review for Meshes on your Mac.
+Instant mobile 3D review for Meshes and point clouds on your Mac.
 
-Blind is one CLI binary that serves local PLY, STL, OBJ, and Denta PTS files through a
-mobile-first 3D viewer. It discovers usable Host addresses, preserves camera
-and style state behind six-character links, and can render the same scene
-directly as a PNG. There is no on-disk Mesh copy or persistent render cache; a
+Blind is one CLI binary that serves local PLY Meshes and point clouds, STL, OBJ,
+and Denta PTS files through a mobile-first 3D viewer. It discovers usable Host
+addresses, preserves camera and style state behind six-character links, and can
+render the same scene directly as a PNG. There is no on-disk Mesh copy or
+persistent render cache; a
 bounded local SQLite registry stores only encrypted scene descriptors, while
 derived review LODs live only in a bounded process-memory cache.
 
@@ -79,6 +80,9 @@ blind serve
 
 # Create one scene from one or more local Meshes.
 blind share crown.ply preparation.stl --format json
+
+# Vertex-only PLY files are detected and rendered as point clouds.
+blind share scan-cloud.ply --format view
 
 # Mix a Mesh with a Denta ordered point ring.
 blind share cropped_jaw.ply marginline.pts --format view
@@ -160,6 +164,8 @@ this contract instead of reimplementing scene or lifecycle logic.
   Mesh. Legacy links without this state still open as LOD.
 - The first cold load shows completed Mesh count while the server generates
   LODs. A single large Mesh remains indeterminate until meshoptimizer returns.
+- Vertex-only or zero-face PLY files render as circular GPU point sprites with
+  sphere-like lighting. They are not expanded into sphere triangle Meshes.
 - PTS rings render as a continuous tube with a sphere at every original point.
 - Details also changes surface mode, projection, axes, and the gray background
   theme.
@@ -174,14 +180,16 @@ this contract instead of reimplementing scene or lifecycle logic.
 The global toolbar never assigns one Mesh name to a multi-Mesh scene and does
 not duplicate visibility with a Solo mode.
 
-LOD generation uses meshoptimizer for PLY, STL, and OBJ triangle geometry. PTS
-previews preserve every ordered source point and reduce only the procedural
+LOD generation uses meshoptimizer for PLY, STL, and OBJ triangle geometry.
+PLY point clouds are deterministically sampled across the full source order;
+PTS previews preserve every ordered source point and reduce only the procedural
 tube and marker tessellation. Generated binary PLY bytes are cached in memory
 up to 256 MiB and disappear when the server exits; neither LODs nor Raw source
 copies are written to disk. Raw is fetched only after a client explicitly
-selects it. The fixed bandwidth-oriented profile targets 150,000 triangles per
-scene, clamps each Mesh to 2,000 through 50,000 triangles, and uses 0.002
-relative simplification error. It is intentionally not exposed as a setting.
+selects it. The fixed bandwidth-oriented profile targets 150,000 primitives per
+scene, clamps each resource to 2,000 through 50,000 triangles or points, and
+uses 0.002 relative simplification error for triangle Meshes. It is
+intentionally not exposed as a setting.
 
 ## Doctor and link maintenance
 
@@ -201,8 +209,8 @@ this distribution:
 
 When the server is running, `blind doctor` also reports the in-memory LOD cache:
 entry count, resident bytes versus the 256 MiB limit, Raw-to-LOD payload savings,
-and source-to-LOD triangle counts. With no server running it reports the cache as
-inactive because derived LODs never persist to disk.
+and source-to-LOD triangle and point counts. With no server running it reports
+the cache as inactive because derived LODs never persist to disk.
 
 Invalid or all SQLite-backed short links can be deleted while Blind continues
 serving other requests:

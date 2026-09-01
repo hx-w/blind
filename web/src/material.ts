@@ -15,42 +15,89 @@ const vertexShader = `
   }
 `;
 
-const fragmentShader = `
+const pointVertexShader = `
+  uniform float depthBias;
+  uniform float pointSize;
+  varying vec3 viewPosition;
+
+  void main() {
+    vec4 view = modelViewMatrix * vec4(position, 1.0);
+    viewPosition = view.xyz;
+    gl_Position = projectionMatrix * view;
+    gl_Position.z -= depthBias * gl_Position.w;
+    gl_PointSize = pointSize;
+  }
+`;
+
+// Uniform declarations shared by both fragment shaders.
+const sharedFragmentUniforms = `
   uniform vec3 baseColor;
   uniform float opacity;
-  uniform bool flatShading;
   uniform vec3 keyDirection;
   uniform vec3 fillDirection;
   uniform vec4 lighting;
   uniform vec3 finish;
   uniform vec4 tone;
-  uniform vec4 surface;
-  varying vec3 viewNormal;
-  varying vec3 viewPosition;
+`;
 
+// Shared matte lighting (wrapped key/fill, hemisphere, view facing, tone
+// clamp). This is the cross-renderer contract with src/render.wgsl; change
+// both in lockstep.
+const lightingChunk = `
   float wrappedDiffuse(float cosine, float wrap) {
     return clamp((cosine + wrap) / (1.0 + wrap), 0.0, 1.0);
   }
+
+  vec3 shadedLight(vec3 normal, vec3 viewDirection) {
+    float key = wrappedDiffuse(dot(normal, normalize(keyDirection)), finish.y);
+    float fill = wrappedDiffuse(dot(normal, normalize(fillDirection)), finish.y);
+    float hemisphere = normal.y * 0.5 + 0.5;
+    float facing = wrappedDiffuse(dot(normal, viewDirection), finish.y);
+    float light = lighting.x + key * lighting.y + fill * lighting.z
+      + hemisphere * lighting.w + facing * finish.x;
+    return vec3(clamp((light - tone.x) * finish.z + tone.x, tone.y, tone.z));
+  }
+`;
+
+const fragmentShader = `
+  uniform bool flatShading;
+  uniform vec4 surface;
+  varying vec3 viewNormal;
+  varying vec3 viewPosition;
+  ${sharedFragmentUniforms}
+  ${lightingChunk}
 
   void main() {
     vec3 normal = flatShading
       ? normalize(cross(dFdx(viewPosition), dFdy(viewPosition)))
       : normalize(viewNormal);
     if (!gl_FrontFacing) normal = -normal;
-    float key = wrappedDiffuse(dot(normal, normalize(keyDirection)), finish.y);
-    float fill = wrappedDiffuse(dot(normal, normalize(fillDirection)), finish.y);
-    float hemisphere = normal.y * 0.5 + 0.5;
     vec3 viewDirection = normalize(-viewPosition);
-    float facing = wrappedDiffuse(dot(normal, viewDirection), finish.y);
     vec3 halfDirection = normalize(normalize(keyDirection) + viewDirection);
     float specular = pow(max(dot(normal, halfDirection), 0.0), surface.w) * surface.z;
     float rim = pow(1.0 - clamp(dot(normal, viewDirection), 0.0, 1.0), surface.y) * surface.x;
-    float light = lighting.x + key * lighting.y + fill * lighting.z
-      + hemisphere * lighting.w + facing * finish.x;
-    light = clamp((light - tone.x) * finish.z + tone.x, tone.y, tone.z);
-    vec3 shaded = baseColor * light + vec3(specular);
+    vec3 shaded = baseColor * shadedLight(normal, viewDirection) + vec3(specular);
     shaded *= 1.0 - rim;
     gl_FragColor = vec4(shaded, opacity);
+    #include <tonemapping_fragment>
+    #include <colorspace_fragment>
+  }
+`;
+
+const pointFragmentShader = `
+  varying vec3 viewPosition;
+  ${sharedFragmentUniforms}
+  ${lightingChunk}
+
+  void main() {
+    vec2 disk = gl_PointCoord * 2.0 - 1.0;
+    float radiusSquared = dot(disk, disk);
+    if (radiusSquared > 1.0) discard;
+    vec3 normal = normalize(vec3(disk.x, -disk.y, sqrt(1.0 - radiusSquared)));
+    vec3 shaded = baseColor * shadedLight(normal, normalize(-viewPosition));
+    float edge = max(fwidth(radiusSquared), 0.001);
+    float coverage = 1.0 - smoothstep(1.0 - edge, 1.0, radiusSquared);
+    gl_FragColor = vec4(shaded, opacity * coverage);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
   }
@@ -64,43 +111,68 @@ export interface MeshMaterialStyle {
   layer: number;
 }
 
-export function createMatteMaterial(style: MeshMaterialStyle): THREE.ShaderMaterial {
-  const material = new THREE.ShaderMaterial({
-    vertexShader,
-    fragmentShader,
-    uniforms: {
-      baseColor: { value: new THREE.Color(style.color) },
-      opacity: { value: style.opacity },
-      flatShading: { value: style.flat },
-      keyDirection: { value: new THREE.Vector3(...shader.key_direction) },
-      fillDirection: { value: new THREE.Vector3(...shader.fill_direction) },
-      lighting: { value: new THREE.Vector4(shader.ambient, shader.key, shader.fill, shader.hemisphere) },
-      finish: { value: new THREE.Vector3(shader.view, shader.wrap, shader.contrast) },
-      tone: { value: new THREE.Vector4(shader.contrast_pivot, shader.light_min, shader.light_max, shader.translucent_threshold) },
-      surface: { value: new THREE.Vector4(shader.rim, shader.rim_power, shader.specular, shader.shininess) },
-      depthBias: { value: style.layer * shader.depth_bias_step },
-    },
-    side: isTranslucent(style.opacity) ? THREE.FrontSide : THREE.DoubleSide,
-    transparent: isTranslucent(style.opacity),
-    depthWrite: !isTranslucent(style.opacity),
-    wireframe: style.wireframe,
-  });
-  material.forceSinglePass = true;
-  return material;
-}
-
 function isTranslucent(opacity: number): boolean {
   return opacity < shader.translucent_threshold;
 }
 
-export function updateMatteMaterial(material: THREE.ShaderMaterial, style: MeshMaterialStyle): void {
+function baseUniforms(style: MeshMaterialStyle) {
+  return {
+    baseColor: { value: new THREE.Color(style.color) },
+    opacity: { value: style.opacity },
+    keyDirection: { value: new THREE.Vector3(...shader.key_direction) },
+    fillDirection: { value: new THREE.Vector3(...shader.fill_direction) },
+    lighting: { value: new THREE.Vector4(shader.ambient, shader.key, shader.fill, shader.hemisphere) },
+    finish: { value: new THREE.Vector3(shader.view, shader.wrap, shader.contrast) },
+    tone: { value: new THREE.Vector4(shader.contrast_pivot, shader.light_min, shader.light_max, shader.translucent_threshold) },
+    depthBias: { value: style.layer * shader.depth_bias_step },
+  };
+}
+
+// Single dispatch point for the Mesh/Points material families, so both load
+// paths style geometry identically.
+export function createObjectMaterial(
+  child: THREE.Mesh | THREE.Points,
+  style: MeshMaterialStyle,
+  pixelRatio: number,
+): THREE.ShaderMaterial {
+  const material = child instanceof THREE.Points
+    ? new THREE.ShaderMaterial({
+      vertexShader: pointVertexShader,
+      fragmentShader: pointFragmentShader,
+      uniforms: {
+        ...baseUniforms(style),
+        pointSize: { value: shader.point_diameter_pixels * pixelRatio },
+      },
+      transparent: true,
+      depthWrite: !isTranslucent(style.opacity),
+    })
+    : new THREE.ShaderMaterial({
+      vertexShader,
+      fragmentShader,
+      uniforms: {
+        ...baseUniforms(style),
+        flatShading: { value: style.flat },
+        surface: { value: new THREE.Vector4(shader.rim, shader.rim_power, shader.specular, shader.shininess) },
+      },
+      side: isTranslucent(style.opacity) ? THREE.FrontSide : THREE.DoubleSide,
+      transparent: isTranslucent(style.opacity),
+      depthWrite: !isTranslucent(style.opacity),
+      wireframe: style.wireframe,
+    });
+  material.forceSinglePass = true;
+  return material;
+}
+
+export function updateObjectMaterial(child: THREE.Mesh | THREE.Points, style: MeshMaterialStyle): void {
+  const material = child.material as THREE.ShaderMaterial;
   const translucent = isTranslucent(style.opacity);
   (material.uniforms.baseColor.value as THREE.Color).set(style.color);
   material.uniforms.opacity.value = style.opacity;
-  material.uniforms.flatShading.value = style.flat;
   material.uniforms.depthBias.value = style.layer * shader.depth_bias_step;
+  material.depthWrite = !translucent;
+  if (child instanceof THREE.Points) return;
+  material.uniforms.flatShading.value = style.flat;
   material.transparent = translucent;
   material.side = translucent ? THREE.FrontSide : THREE.DoubleSide;
-  material.depthWrite = !translucent;
   material.wireframe = style.wireframe;
 }

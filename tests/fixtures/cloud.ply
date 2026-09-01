@@ -1,0 +1,35 @@
+ply
+format ascii 1.0
+comment Blind point-cloud regression fixture
+element vertex 27
+property float x
+property float y
+property float z
+end_header
+-1 -1 -1
+0 -1 -1
+1 -1 -1
+-1 0 -1
+0 0 -1
+1 0 -1
+-1 1 -1
+0 1 -1
+1 1 -1
+-1 -1 0
+0 -1 0
+1 -1 0
+-1 0 0
+0 0 0
+1 0 0
+-1 1 0
+0 1 0
+1 1 0
+-1 -1 1
+0 -1 1
+1 -1 1
+-1 0 1
+0 0 1
+1 0 1
+-1 1 1
+0 1 1
+1 1 1

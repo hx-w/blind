@@ -13,6 +13,7 @@
   "specular": 0.1,
   "shininess": 28.0,
   "depth_bias_step": 0.00006103515625,
+  "point_diameter_pixels": 7.0,
   "translucent_threshold": 0.999,
   "contrast_pivot": 0.72,
   "light_min": 0.3,

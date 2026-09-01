@@ -33,7 +33,21 @@ impl Geometry {
             MeshFormat::Ply => load_ply(path),
             MeshFormat::Pts => load_pts(path),
         }?;
-        if geometry.positions.is_empty() || geometry.indices.len() < 3 {
+        if geometry.positions.is_empty() {
+            bail!("{} contains no vertices", path.display());
+        }
+        if geometry
+            .positions
+            .iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            bail!("{} contains non-finite vertex coordinates", path.display());
+        }
+        if geometry.indices.len() < 3 {
+            if geometry.indices.is_empty() && format == MeshFormat::Ply {
+                return Ok(geometry);
+            }
             bail!("{} contains no triangles", path.display());
         }
         if geometry.indices.len() % 3 != 0 {
@@ -47,6 +61,19 @@ impl Geometry {
             bail!("{} contains an out-of-range vertex index", path.display());
         }
         Ok(geometry)
+    }
+
+    pub fn is_point_cloud(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    /// Reviewable primitives: points for clouds, triangles otherwise.
+    pub fn primitive_count(&self) -> usize {
+        if self.is_point_cloud() {
+            self.positions.len()
+        } else {
+            self.indices.len() / 3
+        }
     }
 
     pub fn bounds(&self) -> ([f32; 3], [f32; 3]) {
@@ -154,19 +181,23 @@ fn load_ply(path: &Path) -> Result<Geometry> {
             ])
         })
         .collect::<Result<Vec<_>>>()?;
-    let faces = ply.payload.get("face").context("PLY has no face element")?;
     let mut indices = Vec::new();
-    for face in faces {
-        let values = list_u32(
-            face.get("vertex_indices")
-                .or_else(|| face.get("vertex_index"))
-                .context("PLY face has no vertex_indices property")?,
-        )?;
-        if values.len() < 3 {
-            continue;
+    if let Some(faces) = ply.payload.get("face") {
+        for face in faces {
+            let values = list_u32(
+                face.get("vertex_indices")
+                    .or_else(|| face.get("vertex_index"))
+                    .context("PLY face has no vertex_indices property")?,
+            )?;
+            if values.len() < 3 {
+                continue;
+            }
+            for index in 1..values.len() - 1 {
+                indices.extend_from_slice(&[values[0], values[index], values[index + 1]]);
+            }
         }
-        for index in 1..values.len() - 1 {
-            indices.extend_from_slice(&[values[0], values[index], values[index + 1]]);
+        if !faces.is_empty() && indices.is_empty() {
+            bail!("PLY face element contains no triangles");
         }
     }
     Ok(Geometry { positions, indices })
@@ -505,6 +536,35 @@ mod tests {
         let round_trip = load_ply(&path).unwrap();
         assert_eq!(round_trip.positions.len(), geometry.positions.len());
         assert_eq!(round_trip.indices.len(), geometry.indices.len());
+    }
+
+    #[test]
+    fn ply_without_faces_loads_as_point_cloud_and_round_trips() {
+        let source = b"ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nend_header\n0 0 0\n1 0 0\n0 1 0\n0 0 1\n";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cloud.ply");
+        std::fs::write(&path, source).unwrap();
+
+        let geometry = Geometry::load(&path, MeshFormat::Ply).unwrap();
+        assert!(geometry.is_point_cloud());
+        assert_eq!(geometry.positions.len(), 4);
+
+        let round_trip_path = directory.path().join("cloud-binary.ply");
+        std::fs::write(&round_trip_path, geometry.to_binary_ply().unwrap()).unwrap();
+        let round_trip = Geometry::load(&round_trip_path, MeshFormat::Ply).unwrap();
+        assert!(round_trip.is_point_cloud());
+        assert_eq!(round_trip.positions, geometry.positions);
+    }
+
+    #[test]
+    fn ply_with_nonempty_invalid_faces_is_not_treated_as_a_point_cloud() {
+        let source = b"ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar uint vertex_indices\nend_header\n0 0 0\n1 0 0\n2 0 1\n";
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("invalid-face.ply");
+        std::fs::write(&path, source).unwrap();
+
+        let error = Geometry::load(&path, MeshFormat::Ply).unwrap_err();
+        assert!(error.to_string().contains("contains no triangles"));
     }
 
     #[test]
