@@ -25,7 +25,6 @@
     "fit_padding": 1.15,
     "default_view_direction": [1.0, 0.7, 1.0],
     "near_floor_factor": 0.0001,
-    "near_radius_spans": 4.0,
-    "far_multiple": 100.0
+    "clip_padding_factor": 0.05
   }
 }

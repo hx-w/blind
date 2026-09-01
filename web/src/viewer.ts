@@ -388,14 +388,21 @@ export class MeshViewer {
     this.resize();
   }
 
+  // Cross-renderer contract with clip_planes in src/render.rs; change both in lockstep.
   private updateClipping(): void {
     const box = this.visibleBounds;
     if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
-    const radius = Math.max(box.getSize(new THREE.Vector3()).length() * 0.5, 1e-6);
-    const distance = this.camera.position.distanceTo(center);
-    const near = Math.max(radius * shader.camera.near_floor_factor, distance - radius * shader.camera.near_radius_spans);
-    const far = Math.max(near * shader.camera.far_multiple, distance + radius * shader.camera.near_radius_spans);
+    const half = box.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+    const forward = this.camera.getWorldDirection(new THREE.Vector3());
+    // Corner depths of an AABB span the center depth by the summed per-axis projections.
+    const span = Math.abs(half.x * forward.x) + Math.abs(half.y * forward.y) + Math.abs(half.z * forward.z);
+    const centerDepth = center.sub(this.camera.position).dot(forward);
+    const radius = Math.max(half.length(), 1e-6);
+    const padding = Math.max(radius * shader.camera.clip_padding_factor, 1e-6);
+    const near = Math.max(radius * shader.camera.near_floor_factor, centerDepth - span - padding);
+    // far must clear near by a full slack window even when the near floor wins.
+    const far = Math.max(near + padding * 2, centerDepth + span + padding);
     this.camera.near = near;
     this.camera.far = far;
     this.camera.updateProjectionMatrix();

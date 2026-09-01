@@ -77,8 +77,7 @@ struct CameraSpec {
     fit_padding: f32,
     default_view_direction: [f32; 3],
     near_floor_factor: f32,
-    near_radius_spans: f32,
-    far_multiple: f32,
+    clip_padding_factor: f32,
 }
 
 /// Appearance of screen strokes, shared with the browser markup layer.
@@ -660,8 +659,9 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
     }
     let frame = &scene.state.frame;
     let aspect = frame.width as f32 / frame.height.max(1) as f32;
+    let extent = bounds_max - bounds_min;
     let center = (bounds_min + bounds_max) * 0.5;
-    let diagonal = (bounds_max - bounds_min).length().max(0.001);
+    let diagonal = extent.length().max(0.001);
     let camera = scene.state.camera.as_ref();
     let camera_spec = &material.camera;
     let default_fov = camera_spec.fov_degrees.to_radians();
@@ -699,12 +699,7 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
             .total_cmp(&left.center.distance_squared(position)),
         (false, false) => std::cmp::Ordering::Equal,
     });
-    let radius = diagonal * 0.5;
-    let camera_distance = position.distance(center);
-    let near = (radius * camera_spec.near_floor_factor)
-        .max(camera_distance - radius * camera_spec.near_radius_spans);
-    let far = (near * camera_spec.far_multiple)
-        .max(camera_distance + radius * camera_spec.near_radius_spans);
+    let (near, far) = clip_planes(center, extent * 0.5, position, forward, camera_spec);
     let projection = match scene.state.projection {
         Projection::Perspective => Mat4::perspective_rh(
             camera
@@ -746,6 +741,25 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         background,
         strokes: scene.state.strokes.clone(),
     })
+}
+
+/// Mirrors `MeshViewer.updateClipping` in web/src/viewer.ts; change both in lockstep.
+fn clip_planes(
+    center: Vec3,
+    half: Vec3,
+    camera_position: Vec3,
+    forward: Vec3,
+    camera: &CameraSpec,
+) -> (f32, f32) {
+    let radius = half.length().max(1e-6);
+    // Corner depths of an AABB span the center depth by the summed per-axis projections.
+    let span = forward.abs().dot(half);
+    let center_depth = (center - camera_position).dot(forward);
+    let padding = (radius * camera.clip_padding_factor).max(1e-6);
+    let near = (radius * camera.near_floor_factor).max(center_depth - span - padding);
+    // far must clear near by a full slack window even when the near floor wins.
+    let far = (near + padding * 2.0).max(center_depth + span + padding);
+    (near, far)
 }
 
 fn overlay_screen_strokes(
@@ -1043,6 +1057,27 @@ mod tests {
             serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
         let two_depth_units_in_webgl_clip_space = 4.0 / 65_536.0;
         assert!(material.depth_bias_step >= two_depth_units_in_webgl_clip_space);
+    }
+
+    #[test]
+    fn clip_planes_stay_tight_when_the_camera_is_close_to_the_scene() {
+        let material: MatteShader =
+            serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
+        let (near, far) = clip_planes(
+            Vec3::ZERO,
+            Vec3::splat(1.0),
+            Vec3::new(0.0, 0.0, 6.8),
+            Vec3::NEG_Z,
+            &material.camera,
+        );
+
+        assert!(near > 5.0, "near plane was too loose: {near}");
+        assert!(far < 8.0, "far plane was too loose: {far}");
+        assert!(
+            far / near < 2.0,
+            "depth ratio was too large: {}",
+            far / near
+        );
     }
 
     #[test]

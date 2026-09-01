@@ -3,6 +3,13 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-09-01
+
+### Fixed
+
+- Interactive and PNG views now preserve true front-to-back occlusion for
+  overlapping Meshes without reintroducing coplanar flicker.
+
 ## [0.4.3] - 2026-09-01
 
 ### Added
@@ -151,6 +158,7 @@ All notable changes to Blind are documented here. This project follows
 - Automatic Host discovery, PAT-protected scene creation, foreground and
   launchd service lifecycles, and Agent-friendly JSON output.
 
+[0.4.4]: https://github.com/hx-w/blind/releases/tag/v0.4.4
 [0.4.3]: https://github.com/hx-w/blind/releases/tag/v0.4.3
 [0.4.2]: https://github.com/hx-w/blind/releases/tag/v0.4.2
 [0.4.1]: https://github.com/hx-w/blind/releases/tag/v0.4.1
