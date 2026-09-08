@@ -14,6 +14,7 @@ pub const PALETTE: [&str; 6] = [
 pub const MAX_SCREEN_STROKES: usize = 64;
 pub const MAX_SCREEN_STROKE_POINTS: usize = 512;
 pub const MAX_SCREEN_POINTS: usize = 4_096;
+pub const MAX_MESH_LABEL_CHARS: usize = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneDescriptor {
@@ -36,6 +37,31 @@ pub struct MeshRef {
     pub visible: bool,
     #[serde(default)]
     pub quality: MeshQuality,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<MeshLabel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeshLabel {
+    pub text: String,
+    /// World-space attachment point. None uses the Mesh bounds center.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<[f32; 3]>,
+}
+
+impl MeshLabel {
+    pub fn validate(&self) -> Result<()> {
+        if self.text.trim().is_empty() || self.text.chars().count() > MAX_MESH_LABEL_CHARS {
+            bail!("Mesh label must contain 1 to {MAX_MESH_LABEL_CHARS} characters");
+        }
+        if self
+            .anchor
+            .is_some_and(|point| point.iter().any(|v| !v.is_finite()))
+        {
+            bail!("Mesh label anchor must contain finite coordinates");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +152,15 @@ pub struct MeshStyleUpdate {
     pub visible: bool,
     #[serde(default)]
     pub quality: MeshQuality,
+    // Omitted by older clients: preserve. Explicit null: remove the label.
+    #[serde(default, deserialize_with = "deserialize_label_update")]
+    pub label: Option<Option<MeshLabel>>,
+}
+
+fn deserialize_label_update<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<MeshLabel>>, D::Error> {
+    Option::<MeshLabel>::deserialize(deserializer).map(Some)
 }
 
 impl Default for ViewState {
@@ -147,6 +182,19 @@ impl Default for ViewState {
 }
 
 impl SceneDescriptor {
+    pub fn set_labels(&mut self, labels: Vec<Option<MeshLabel>>) -> Result<()> {
+        if labels.len() != self.meshes.len() {
+            bail!("Mesh label count does not match the scene");
+        }
+        for label in labels.iter().flatten() {
+            label.validate()?;
+        }
+        for (mesh, label) in self.meshes.iter_mut().zip(labels) {
+            mesh.label = label;
+        }
+        Ok(())
+    }
+
     pub async fn create(paths: &[PathBuf], title: Option<String>) -> Result<Self> {
         if paths.is_empty() {
             bail!("at least one Mesh path is required");
@@ -180,6 +228,7 @@ impl SceneDescriptor {
                 opacity: 1.0,
                 visible: true,
                 quality: MeshQuality::Lod,
+                label: None,
             });
         }
         let title = title.unwrap_or_else(|| {
@@ -230,6 +279,11 @@ impl SceneDescriptor {
         if update.meshes.len() != self.meshes.len() {
             bail!("Mesh style count does not match the scene");
         }
+        for style in &update.meshes {
+            if let Some(Some(label)) = &style.label {
+                label.validate()?;
+            }
+        }
         for (mesh, style) in self.meshes.iter_mut().zip(update.meshes) {
             if !is_hex_color(&style.color) {
                 bail!("invalid Mesh color");
@@ -238,6 +292,9 @@ impl SceneDescriptor {
             mesh.opacity = style.opacity.clamp(0.05, 1.0);
             mesh.visible = style.visible;
             mesh.quality = style.quality;
+            if let Some(label) = style.label {
+                mesh.label = label;
+            }
         }
         let mut state = update.state;
         state.selected = state.selected.min(self.meshes.len().saturating_sub(1));
@@ -440,6 +497,7 @@ mod tests {
                         opacity: mesh.opacity,
                         visible: mesh.visible,
                         quality: MeshQuality::Raw,
+                        label: None,
                     })
                     .collect(),
                 state,
@@ -462,6 +520,7 @@ mod tests {
                             opacity: mesh.opacity,
                             visible: mesh.visible,
                             quality: mesh.quality,
+                            label: None,
                         })
                         .collect(),
                     state: invalid,
@@ -484,5 +543,65 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(mesh.quality, MeshQuality::Lod);
+    }
+
+    #[tokio::test]
+    async fn mesh_labels_survive_sharing_and_legacy_updates_and_can_be_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mesh.ply");
+        std::fs::write(&path, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
+        let label = MeshLabel {
+            text: "供体 A · 真实牙冠".into(),
+            anchor: Some([0.1, 0.2, 0.3]),
+        };
+        scene.set_labels(vec![Some(label.clone())]).unwrap();
+        let codec = crate::token::TokenCodec::new([17; 32]);
+        let token = codec.seal(crate::token::Scope::Public, &scene).unwrap();
+        let mut reopened = codec.open(&token).unwrap().scene;
+        assert_eq!(reopened.meshes[0].label, Some(label.clone()));
+
+        let mut payload = serde_json::json!({
+            "meshes": [{ "color": "#8fa9c9", "opacity": 1.0, "visible": true }],
+            "state": reopened.state
+        });
+        reopened
+            .apply_update(serde_json::from_value(payload.clone()).unwrap())
+            .unwrap();
+        assert_eq!(reopened.meshes[0].label, Some(label));
+        payload["meshes"][0]["label"] = serde_json::Value::Null;
+        reopened
+            .apply_update(serde_json::from_value(payload.clone()).unwrap())
+            .unwrap();
+        assert_eq!(reopened.meshes[0].label, None);
+        payload["meshes"][0]["label"] = serde_json::json!({"text": "生成结果"});
+        reopened
+            .apply_update(serde_json::from_value(payload).unwrap())
+            .unwrap();
+        assert_eq!(reopened.meshes[0].label.as_ref().unwrap().text, "生成结果");
+        assert_eq!(reopened.meshes[0].label.as_ref().unwrap().anchor, None);
+    }
+
+    #[test]
+    fn mesh_labels_reject_blank_oversized_and_nonfinite_annotations() {
+        for text in ["  \n".to_owned(), "牙".repeat(MAX_MESH_LABEL_CHARS + 1)] {
+            assert!(MeshLabel { text, anchor: None }.validate().is_err());
+        }
+        assert!(
+            MeshLabel {
+                text: "牙".repeat(MAX_MESH_LABEL_CHARS),
+                anchor: None
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            MeshLabel {
+                text: "A".into(),
+                anchor: Some([f32::NAN, 0.0, 0.0])
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

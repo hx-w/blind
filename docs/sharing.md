@@ -18,6 +18,9 @@ The encrypted descriptor contains:
 - Schema version, title, and creation time.
 - Canonical source path, format, byte size, and SHA-256 revision for every Mesh.
 - Visibility, selected Mesh, color, and opacity.
+- An optional label per Mesh: `{"text":"供体 A","anchor":[0,1,2]}`.
+  Text is limited to 120 characters; the optional anchor is a finite world-space
+  point. Omitting it attaches the label to the Mesh bounds center.
 - Camera position, target, up vector, field of view, zoom, projection, and orthographic height.
 - Captured frame dimensions.
 - Surface mode, axes, and gray background mode.
@@ -41,6 +44,19 @@ Screen markup is tied to that exact camera framing rather than Mesh geometry.
 It can cross empty space and remaps across viewport aspect ratios. The first
 rotate, pan, zoom, Fit, canonical-view, or projection action hides all marks in
 that browser session; reloading the immutable link restores the snapshot.
+
+Mesh labels stay attached as the camera changes. The interactive viewer projects
+their anchors into screen space and lays out readable text with a leader and
+attachment dot. Hidden Meshes and anchors outside the camera view hide their
+labels. Label placement adapts to the viewport and available space; text and
+world-space anchors are preserved in both registry and stateless scene records.
+PNG rendering currently does not draw Mesh labels.
+
+For API clients, scene creation accepts an optional `labels` array parallel to
+`paths`, containing label objects or `null`. Scene/share Mesh entries expose a
+`label` field. In a share update, omit `label` to preserve it, send a label object
+to replace it, or send `null` to remove it. Editing and sharing creates a new
+snapshot; the original link is unchanged.
 
 ## Lifecycle
 

@@ -10,12 +10,8 @@
   <body>
     <a class="skip-link" href="#viewer">跳到 3D 视图</a>
     <div class="app-shell" id="app-shell">
-      <header class="topbar" aria-label="场景信息">
-        <div class="scene-copy">
-          <h1 id="scene-title">Blind</h1>
-          <p id="scene-meta">正在读取场景</p>
-        </div>
-        <div class="top-actions" data-viewer-chrome>
+      <header class="topbar" aria-label="场景操作">
+        <div class="top-actions" data-viewer-chrome data-label-obstacle>
           <button class="icon-button share-button" id="share-view" type="button" aria-label="分享当前场景">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 8l4-4 4 4"/><path d="M5 12v7h14v-7"/></svg>
           </button>
@@ -28,7 +24,7 @@
       <main id="viewer" class="viewer" tabindex="-1">
         <div id="canvas-root" class="canvas-root" aria-label="可交互 3D Mesh 视图"></div>
         <canvas id="markup-canvas" class="markup-canvas" aria-label="屏幕批注画布" aria-hidden="true"></canvas>
-        <div class="view-control" data-viewer-chrome>
+        <div class="view-control" data-viewer-chrome data-label-obstacle>
           <button class="axis-orb" id="axis-orb" type="button" aria-label="打开标准视角" aria-expanded="false">
             <span class="axis-y">Y</span><span class="axis-x">X</span><span class="axis-z">Z</span><span class="axis-center"></span>
           </button>
@@ -54,7 +50,7 @@
         <div class="toast" id="toast" role="status" aria-live="polite"></div>
       </main>
 
-      <nav class="review-dock" aria-label="查看工具" data-viewer-chrome>
+      <nav class="review-dock" aria-label="查看工具" data-viewer-chrome data-label-obstacle>
         <button class="dock-tool" id="fit-view" type="button" aria-label="适配全部可见 Mesh">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/><circle cx="12" cy="12" r="2.5"/></svg><span>Fit</span>
         </button>
@@ -64,9 +60,12 @@
         <button class="dock-tool" id="brush-tool" type="button" aria-label="进入画笔模式" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5 4 4L9 19l-5 1 1-5 9.5-9.5Z"/><path d="m12.5 7.5 4 4"/></svg><span>画笔</span>
         </button>
+        <button class="dock-tool" id="scene-info-toggle" type="button" aria-label="打开场景信息" aria-expanded="false" aria-controls="control-panel">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.5"/></svg><span>信息</span>
+        </button>
       </nav>
 
-      <div class="brush-toolbar" id="brush-toolbar" role="toolbar" aria-label="画笔工具" hidden data-viewer-chrome>
+      <div class="brush-toolbar" id="brush-toolbar" role="toolbar" aria-label="画笔工具" hidden data-viewer-chrome data-label-obstacle>
         <div class="brush-colors" aria-label="画笔颜色">
           <button class="brush-color active" data-brush-color="#ff6b5e" type="button" aria-label="珊瑚红" aria-pressed="true"><i></i></button>
           <button class="brush-color" data-brush-color="#ffc857" type="button" aria-label="琥珀黄" aria-pressed="false"><i></i></button>
@@ -81,18 +80,29 @@
         </div>
       </div>
 
-      <aside class="control-panel" id="control-panel" aria-hidden="true">
+      <aside class="control-panel" id="control-panel" aria-hidden="true" aria-labelledby="panel-title" inert>
         <div class="panel-drag-zone" id="panel-drag-zone" role="button" tabindex="0" aria-label="调整面板高度"><div class="panel-handle" aria-hidden="true"></div></div>
         <div class="panel-heading"><h2 id="panel-title">详情</h2><span id="panel-context"></span>
           <button class="close-panel" id="close-panel" type="button" aria-label="关闭面板"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
         </div>
         <div class="panel-scroll" id="panel-scroll">
-          <section>
+          <section class="scene-info" id="scene-info" hidden>
+            <div class="scene-info-scroll" tabindex="0" role="region" aria-label="场景说明">
+              <h1 id="scene-title">Blind</h1>
+            </div>
+            <p id="scene-meta">正在读取场景</p>
+          </section>
+          <section id="mesh-controls">
             <label class="mesh-picker" for="detail-mesh-select"><span>当前 Mesh</span><select id="detail-mesh-select" aria-label="选择要编辑的 Mesh"></select></label>
             <div class="mesh-summary">
               <span class="mesh-summary-dot" id="mesh-summary-dot"></span>
               <span class="mesh-summary-copy"><strong id="mesh-summary-name"></strong><small id="mesh-summary-meta"></small></span>
               <label class="mesh-summary-visibility"><span>显示</span><input id="mesh-visible-toggle" type="checkbox" checked/><i></i></label>
+            </div>
+            <div class="mesh-label-editor">
+              <label class="setting-label" for="mesh-label-text">3D 标注</label>
+              <input id="mesh-label-text" type="text" maxlength="120" placeholder="例如：供体 A · 真实牙冠" autocomplete="off" aria-describedby="mesh-label-help" />
+              <p id="mesh-label-help">随模型显示，分享时保存。清空文字可移除。</p>
             </div>
             <div class="style-section"><span class="setting-label">精度</span><div class="segmented quality-segmented" aria-label="Mesh 精度">
               <button class="active" data-quality="lod" type="button">LOD</button><button data-quality="raw" type="button">Raw</button>

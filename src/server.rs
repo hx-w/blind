@@ -98,6 +98,7 @@ struct CreateSceneRequest {
     paths: Vec<String>,
     title: Option<String>,
     origin: Option<String>,
+    labels: Option<Vec<Option<crate::scene::MeshLabel>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +201,7 @@ struct PublicMesh {
     opacity: f32,
     visible: bool,
     quality: MeshQuality,
+    label: Option<crate::scene::MeshLabel>,
     source_url: String,
 }
 
@@ -630,7 +632,12 @@ async fn create_scene(
         .into_iter()
         .map(Into::into)
         .collect::<Vec<_>>();
-    let scene = SceneDescriptor::create(&paths, request.title).await?;
+    let mut scene = SceneDescriptor::create(&paths, request.title).await?;
+    if let Some(labels) = request.labels {
+        scene
+            .set_labels(labels)
+            .map_err(|error| AppError::bad_request(&error.to_string()))?;
+    }
     let origin = match request.origin {
         Some(origin) => normalize_origin(&origin)?,
         None => request_origin(&headers, &state.config)?,
@@ -672,6 +679,7 @@ async fn get_scene(
             opacity: mesh.opacity,
             visible: mesh.visible,
             quality: mesh.quality,
+            label: mesh.label.clone(),
             source_url: format!("/api/v1/scenes/{token}/meshes/{index}"),
         })
         .collect();

@@ -28,6 +28,11 @@ Buttons use a 10px radius and 42px minimum hit target. The bottom dock uses a 16
 
 The canvas is full bleed. On phones, the bottom dock remains persistent while a docked sheet changes the usable 3D viewport. On landscape and desktop, settings move to a 340px right sheet.
 
+Scene information is hidden by default and opens through the dock's information
+button. It shares the details panel with Mesh controls. On phones, the four dock
+actions stack their icon above their label to fit narrow screens. Scene messages
+wrap and scroll inside the panel, with the close control and statistics visible.
+
 ## 6. Depth
 
 Depth comes from background lightness steps and restrained shadows. No blur glass, decorative gradients, or hard card outlines.

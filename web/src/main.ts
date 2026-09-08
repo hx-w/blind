@@ -16,6 +16,11 @@ const root = $('#canvas-root');
 const viewerElement = $('#viewer');
 const title = $('#scene-title');
 const meta = $('#scene-meta');
+const sceneInfo = $('#scene-info');
+const sceneInfoToggle = $('#scene-info-toggle');
+const meshControls = $('#mesh-controls');
+const panelTitle = $('#panel-title');
+const panelScroll = $('#panel-scroll');
 const loading = $('#loading-state');
 const loadingTitle = $('#loading-title');
 const loadingMeter = $('#loading-meter');
@@ -29,6 +34,7 @@ const dragZone = $('#panel-drag-zone');
 const detailsTrigger = $('.panel-trigger') as HTMLButtonElement;
 const detailMeshSelect = $('#detail-mesh-select') as HTMLSelectElement;
 const meshVisibleToggle = $('#mesh-visible-toggle') as HTMLInputElement;
+const meshLabelText = $('#mesh-label-text') as HTMLInputElement;
 const meshSummaryDot = $('#mesh-summary-dot');
 const meshSummaryName = $('#mesh-summary-name');
 const meshSummaryMeta = $('#mesh-summary-meta');
@@ -60,6 +66,7 @@ const token = location.pathname.match(/^\/(?:s|v)\/([^/]+)$/)?.[1];
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
 let panelOpen = false;
+let panelMode: 'mesh' | 'info' = 'mesh';
 let shareLinks: ShareResponse | undefined;
 let toastTimer = 0;
 let panelHeight = 0;
@@ -88,6 +95,10 @@ markup.onActiveChange = (active) => shell.classList.toggle('drawing-stroke', act
 
 void start();
 
+sceneInfoToggle.addEventListener('click', () => {
+  if (panelOpen && panelMode === 'info') closePanel(); else openPanel('info');
+});
+
 async function start(): Promise<void> {
   if (!token) {
     loading.hidden = true; empty.hidden = false;
@@ -96,10 +107,10 @@ async function start(): Promise<void> {
   try {
     startLongLoadHint();
     scene = await loadScene(token, owner);
+    title.textContent = scene.title;
     startLongLoadHint();
     await meshViewer.load(scene);
     markup.load(scene.state.strokes ?? []);
-    title.textContent = scene.title;
     owner = scene.owner ? owner : undefined;
     renderMeshOptions(); renderSwatches(); syncDetailControls(); syncSceneMeta();
     finishLoading();
@@ -176,12 +187,13 @@ function renderSwatches(): void {
 
 function syncDetailControls(): void {
   const selected = meshViewer.selectedModel; if (!selected) return;
-  panelContext.textContent = panelOpen ? selected.name : '';
+  panelContext.textContent = panelOpen && panelMode === 'mesh' ? selected.name : '';
   detailMeshSelect.value = String(meshViewer.selectedIndex);
   meshSummaryName.textContent = selected.name;
   meshSummaryMeta.textContent = `${selected.format.toUpperCase()} · Raw ${formatBytes(selected.raw_bytes)}`;
   meshSummaryDot.style.setProperty('--mesh-color', selected.color);
   meshVisibleToggle.checked = selected.visible;
+  meshLabelText.value = selected.label?.text ?? '';
   opacity.value = String(Math.round(selected.opacity * 100)); opacityValue.value = `${opacity.value}%`;
   document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach((button) => {
     const quality = button.dataset.quality as MeshQuality;
@@ -205,23 +217,40 @@ function syncDetailControls(): void {
 }
 
 detailsTrigger.addEventListener('click', () => {
-  if (panelOpen) closePanel(); else openPanel();
+  if (panelOpen && panelMode === 'mesh') closePanel(); else openPanel('mesh');
 });
 
-function openPanel(): void {
+meshLabelText.addEventListener('input', () => meshViewer.setLabel(meshLabelText.value));
+
+function openPanel(mode: 'mesh' | 'info'): void {
   panelOpen = true; expanded = false;
-  panelContext.textContent = meshViewer.selectedModel?.name ?? '';
-  detailsTrigger.classList.add('active'); detailsTrigger.setAttribute('aria-expanded', 'true');
+  panelMode = mode;
+  sceneInfo.hidden = mode !== 'info'; meshControls.hidden = mode !== 'mesh';
+  panelTitle.textContent = mode === 'info' ? '场景信息' : '详情';
+  panelScroll.classList.toggle('show-scene-info', mode === 'info');
+  panelScroll.scrollTop = 0;
+  syncPanelTriggers();
   if (isMobileViewport()) setPanelHeight(innerHeight * 0.58);
   dragZone.setAttribute('aria-label', '展开详情面板');
   shell.classList.add('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'false');
+  panel.inert = false;
   syncDetailControls();
 }
 
-function closePanel(): void {
+function closePanel(restoreFocus = false): void {
   panelOpen = false; shell.classList.remove('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'true');
-  detailsTrigger.classList.remove('active'); detailsTrigger.setAttribute('aria-expanded', 'false');
+  if (restoreFocus) (panelMode === 'info' ? sceneInfoToggle : detailsTrigger).focus();
+  panel.inert = true;
+  syncPanelTriggers();
   shell.style.setProperty('--sheet-height', '0px');
+}
+
+function syncPanelTriggers(): void {
+  for (const [trigger, mode] of [[detailsTrigger, 'mesh'], [sceneInfoToggle, 'info']] as const) {
+    const active = panelOpen && panelMode === mode;
+    trigger.classList.toggle('active', active);
+    trigger.setAttribute('aria-expanded', String(active));
+  }
 }
 
 function setPanelHeight(value: number): void {
@@ -260,7 +289,10 @@ function applyDetailDetent(): void {
   dragZone.setAttribute('aria-label', expanded ? '收起详情面板' : '展开详情面板');
 }
 
-$('#close-panel').addEventListener('click', closePanel);
+$('#close-panel').addEventListener('click', () => closePanel(true));
+panel.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') { event.preventDefault(); closePanel(true); }
+});
 $('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast('已适配全部可见 Mesh'); });
 detailMeshSelect.addEventListener('change', () => meshViewer.select(Number(detailMeshSelect.value)));
 meshVisibleToggle.addEventListener('change', () => meshViewer.setVisible(meshViewer.selectedIndex, meshVisibleToggle.checked));
@@ -379,6 +411,7 @@ function enterDrawMode(): void {
   drawHint.hidden = false;
   brushTool.setAttribute('aria-pressed', 'true');
   syncBrushControls();
+  meshViewer.refreshLabels();
 }
 
 function exitDrawMode(): void {
@@ -389,6 +422,7 @@ function exitDrawMode(): void {
   brushToolbar.hidden = true;
   drawHint.hidden = true;
   brushTool.setAttribute('aria-pressed', 'false');
+  meshViewer.refreshLabels();
 }
 
 function invalidateMarkupForViewChange(): void {

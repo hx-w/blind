@@ -3,6 +3,25 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-09-08
+
+### Added
+
+- Per-Mesh 3D labels in the interactive viewer, editable in Mesh details or
+  supplied with repeated `--label INDEX=TEXT` CLI options. Labels follow their
+  Mesh, keep a readable screen size, and persist in shared scenes.
+
+### Changed
+
+- Scene information now opens from the toolbar's information button and stays
+  hidden by default. Multiline text and long words wrap on mobile and desktop,
+  with independent scrolling for long notes.
+
+### Fixed
+
+- Mesh label placement remains stable during camera rotation, including when
+  projected anchors cross the screen center or leave and re-enter the view.
+
 ## [0.4.4] - 2026-09-01
 
 ### Fixed

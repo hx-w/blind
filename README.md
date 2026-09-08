@@ -97,6 +97,40 @@ blind stop
 Open `owner_url` on your phone for your own review. Give other people
 `viewer_url` or `image_url`.
 
+Use `--title` for a short label or a detailed, multiline scene message:
+
+```sh
+blind share crown.ply preparation.stl --title 'Crown comparison
+
+Top: reference crowns. Bottom: generated results.
+Review the cusps, grooves, and marginal ridges from the same view.' --format json
+```
+
+Scene information is hidden by default. Open **ⓘ 信息** in the bottom toolbar
+to read it in a bottom sheet on phones or the side panel on desktop. Messages
+preserve line breaks and wrap long words. Long messages scroll without
+truncation, while the close control and Mesh statistics remain visible. The
+information panel and Mesh details share the same space and can be switched
+directly from the toolbar.
+
+Attach labels to individual Meshes with repeated `--label INDEX=TEXT` options
+(indices start at 1 and follow the input file order):
+
+```sh
+blind share donor-a.ply donor-b.ply --label '1=供体 A' --label '2=供体 B' --format json
+```
+
+In the interactive viewer, choose a Mesh in **详情** and edit **3D 标注**.
+Labels use a small leader and an attachment dot, follow the Mesh in 3D, and keep
+a readable screen size as the camera moves. Placement prefers space outside
+Mesh bounds and avoids other labels and controls where space permits.
+During camera motion, each label retains its placement
+relative to its projected anchor so it does not jump between sides. Hidden
+Meshes hide their labels. Clear the text to remove a label; share the current
+view to save edits in a new link. Existing links keep their original labels.
+Each label accepts up to 120 characters. Labels appear in interactive links;
+server-rendered PNG links currently include geometry and screen strokes only.
+
 To keep Blind running after login:
 
 ```sh

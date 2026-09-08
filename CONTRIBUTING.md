@@ -8,6 +8,7 @@ Requirements are macOS, Rust 1.85 or newer, Node.js 24, and npm.
 
 ```sh
 npm ci --prefix web
+npm test --prefix web
 npm run build --prefix web
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings

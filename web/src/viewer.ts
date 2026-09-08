@@ -5,6 +5,7 @@ import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { apiError, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
 import { createObjectMaterial, updateObjectMaterial } from './material';
+import { MeshLabels } from './labels';
 import shader from '../../shaders/matte.json';
 
 // The library class carries a target at runtime that its typings omit.
@@ -24,6 +25,7 @@ export interface ViewerMesh extends PublicMesh {
 interface Model {
   info: ViewerMesh;
   object: THREE.Object3D;
+  bounds: THREE.Box3;
 }
 
 interface LoadedObject {
@@ -41,6 +43,7 @@ export interface MeshLoadProgress {
 export class MeshViewer {
   private readonly scene = new THREE.Scene();
   private readonly renderer: THREE.WebGLRenderer;
+  private readonly labels: MeshLabels;
   private readonly perspective = new THREE.PerspectiveCamera(shader.camera.fov_degrees, 1, 0.001, 1_000_000);
   private readonly orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1_000_000);
   private readonly controls: ArcballControls;
@@ -67,6 +70,7 @@ export class MeshViewer {
     this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.root.append(this.renderer.domElement);
+    this.labels = new MeshLabels(this.root);
     this.camera = this.perspective;
     this.controls = new ArcballControls(this.camera, this.renderer.domElement, this.scene);
     this.controls.enableAnimations = false;
@@ -119,7 +123,7 @@ export class MeshViewer {
       const info: ViewerMesh = { ...source, raw_bytes: source.byte_size, loading: false, lod_error: lodError };
       this.applyLoadedInfo(info, quality, asset);
       this.prepareObject(asset.object, index, info);
-      this.models.push({ info, object: asset.object });
+      this.models.push({ info, object: asset.object, bounds: new THREE.Box3().setFromObject(asset.object) });
       this.scene.add(asset.object);
     });
     this.applyState();
@@ -128,6 +132,7 @@ export class MeshViewer {
     await settledLayout();
     if (scene.state.camera) this.restoreCamera(scene.state);
     else this.fitAll(true);
+    this.labels.invalidateLayout();
     this.resizeHelpers();
   }
 
@@ -170,6 +175,7 @@ export class MeshViewer {
       this.scene.remove(model.object);
       disposeObject(model.object);
       model.object = loaded.object;
+      model.bounds.setFromObject(loaded.object);
       this.applyLoadedInfo(model.info, quality, loaded);
       this.relayout();
     } catch (error) {
@@ -184,6 +190,14 @@ export class MeshViewer {
   }
 
   setColor(color: string): void { const model = this.models[this.selected]; if (model) { model.info.color = color; this.applyMaterials(); } }
+  setLabel(text: string): void {
+    const model = this.models[this.selected];
+    if (!model) return;
+    model.info.label = text.trim() ? { ...model.info.label, text } : null;
+    this.refreshLabels();
+  }
+
+  refreshLabels(): void { this.labels.invalidateLayout(); this.dirty = true; }
   setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); } }
   setShading(shading: ViewState['shading']): void { this.state.shading = shading; this.applyMaterials(); }
   setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.dirty = true; }
@@ -223,7 +237,7 @@ export class MeshViewer {
   focusSelected(): void {
     const model = this.models[this.selected];
     if (!model) return;
-    this.fitBox(new THREE.Box3().setFromObject(model.object), true);
+    this.fitBox(model.bounds, true);
   }
 
   setCanonicalView(code: string): void {
@@ -245,7 +259,7 @@ export class MeshViewer {
 
   exportUpdate(): SceneUpdate {
     return {
-      meshes: this.models.map(({ info }) => ({ color: info.color, opacity: info.opacity, visible: info.visible, quality: info.quality })),
+      meshes: this.models.map(({ info }) => ({ color: info.color, opacity: info.opacity, visible: info.visible, quality: info.quality, label: info.label ?? null })),
       state: this.exportState(),
     };
   }
@@ -419,7 +433,7 @@ export class MeshViewer {
   // Refresh the cached joint bounds; only visibility and model changes alter them.
   private refreshVisibleBounds(): void {
     this.visibleBounds.makeEmpty();
-    for (const model of this.models) if (model.info.visible) this.visibleBounds.expandByObject(model.object);
+    for (const model of this.models) if (model.info.visible) this.visibleBounds.union(model.bounds);
   }
   private resizeHelpers(): void {
     const box = this.visibleBounds; if (box.isEmpty()) return; const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.001);
@@ -442,6 +456,7 @@ export class MeshViewer {
     requestAnimationFrame(this.animate);
     if (this.dirty) {
       this.renderer.render(this.scene, this.camera);
+      this.labels.render(this.models, this.camera, this.selected);
       this.dirty = false;
     }
   };

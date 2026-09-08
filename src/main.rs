@@ -76,8 +76,14 @@ enum Command {
             help = "Local .ply, .stl, .obj, or .pts paths in the same scene"
         )]
         meshes: Vec<PathBuf>,
-        #[arg(long, help = "Scene title shown above the viewer")]
+        #[arg(long, help = "Scene description shown in the viewer information panel")]
         title: Option<String>,
+        #[arg(
+            long = "label",
+            value_name = "INDEX=TEXT",
+            help = "Attach a 3D label to a Mesh (1-based index); repeat for more Meshes"
+        )]
+        labels: Vec<String>,
         #[arg(
             long,
             help = "Use this HTTP(S) origin instead of the primary discovered Host"
@@ -215,10 +221,11 @@ async fn main() -> Result<()> {
         Command::Share {
             meshes,
             title,
+            labels,
             host,
             stateless,
             format,
-        } => share(meshes, title, host, stateless, format).await?,
+        } => share(meshes, title, labels, host, stateless, format).await?,
         Command::Hosts { json } => hosts(json)?,
         Command::Status { json } => status(json).await?,
         Command::Doctor {
@@ -406,6 +413,7 @@ fn init(host: Option<String>, show_pat: bool) -> Result<()> {
 async fn share(
     meshes: Vec<PathBuf>,
     title: Option<String>,
+    labels: Vec<String>,
     host: Option<String>,
     stateless: bool,
     format: OutputFormat,
@@ -414,7 +422,29 @@ async fn share(
     if server::probe(&config).await?.is_none() {
         anyhow::bail!("Blind server is not running; run `blind serve` first");
     }
-    let scene = SceneDescriptor::create(&meshes, title).await?;
+    let mut scene = SceneDescriptor::create(&meshes, title).await?;
+    if !labels.is_empty() {
+        let mut assignments = vec![None; meshes.len()];
+        for assignment in labels {
+            let (index, text) = assignment
+                .split_once('=')
+                .context("use --label INDEX=TEXT (1-based Mesh index)")?;
+            let index = index
+                .parse::<usize>()
+                .ok()
+                .and_then(|i| i.checked_sub(1))
+                .filter(|&i| i < meshes.len())
+                .context("label index must identify a Mesh in the input list")?;
+            if assignments[index].is_some() {
+                anyhow::bail!("duplicate label for Mesh {}", index + 1);
+            }
+            assignments[index] = Some(scene::MeshLabel {
+                text: text.trim().to_owned(),
+                anchor: None,
+            });
+        }
+        scene.set_labels(assignments)?;
+    }
     let hosts = discover(config.port()?, config.preferred_origin.as_deref())?;
     let origin = match host {
         Some(host) => normalize_origin(&host)?,

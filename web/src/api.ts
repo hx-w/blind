@@ -40,6 +40,12 @@ export interface PublicMesh {
   visible: boolean;
   quality: MeshQuality;
   source_url: string;
+  label?: MeshLabel | null;
+}
+
+export interface MeshLabel {
+  text: string;
+  anchor?: [number, number, number];
 }
 
 export interface PublicScene {
@@ -71,7 +77,7 @@ export interface ShareResponse extends ShareLinks {
 }
 
 export interface SceneUpdate {
-  meshes: Array<{ color: string; opacity: number; visible: boolean; quality: MeshQuality }>;
+  meshes: Array<{ color: string; opacity: number; visible: boolean; quality: MeshQuality; label?: MeshLabel | null }>;
   state: ViewState;
 }
 
