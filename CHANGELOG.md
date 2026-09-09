@@ -3,6 +3,13 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-09-09
+
+### Changed
+
+- CLI help now recommends adding Mesh labels when sharing, with examples that
+  explain input order, repeated labels, and the interactive-viewer scope.
+
 ## [0.5.0] - 2026-09-08
 
 ### Added
