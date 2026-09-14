@@ -3,6 +3,16 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-09-14
+
+### Added
+
+- Optional `base_path` config field (e.g. `"/blind"`) so the whole app can be
+  served under a sub-path behind a reverse proxy. The router is mounted under
+  both the configured prefix and the root, so pre-existing `/s/{token}` share
+  links keep working after enabling a base path. Share origins and discovered
+  host candidates carry the prefix automatically.
+
 ## [0.5.1] - 2026-09-09
 
 ### Changed
