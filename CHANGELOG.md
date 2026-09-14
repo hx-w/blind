@@ -3,6 +3,15 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-09-14
+
+### Changed
+
+- With `base_path` configured the app is now served only under the configured
+  prefix; the root-level routes (`/s/{token}`, `/i/…`, `/api/…`, `/`) are no
+  longer registered, keeping the root path free for other independent services
+  behind the same host. Deployments without `base_path` are unchanged.
+
 ## [0.6.0] - 2026-09-14
 
 ### Added

@@ -256,23 +256,21 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/i/{*token}", get(render_image))
         .route("/s/{token}", get(view_scene))
         .route("/v/{token}", get(view_scene))
-        .route("/", get(index))
-        .with_state(state.clone());
-    // Root mounting keeps pre-existing links (e.g. /s/{token} shared before a
-    // base path was configured) working; the nested mount additionally serves
-    // the configured base path (e.g. /blind/...).
+        .route("/", get(index));
+    // With a base path the app lives exclusively under that prefix: the
+    // root-level routes are not registered, so the root path stays free for
+    // other independent services behind the same host.
     let app = match config.base_path().as_deref() {
         // axum 0.8 maps the nested "/" route to "{base}" (no trailing slash);
-        // serve the viewer index at "{base}/" as well so both spellings work.
+        // "{base}/" must reach the viewer index as well.
         Some(base) => {
             let with_slash = format!("{base}/");
-            routes
-                .clone()
-                .route(&with_slash, get(index))
+            Router::new()
                 .nest(base, routes)
+                .route(&with_slash, get(index))
                 .fallback(asset)
         }
-        None => routes.fallback(asset),
+        None => routes,
     }
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("content-security-policy"),
