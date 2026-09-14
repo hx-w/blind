@@ -17,15 +17,24 @@ pub struct HostCandidate {
     pub primary: bool,
 }
 
-pub fn discover(port: u16, preferred: Option<&str>) -> Result<Vec<HostCandidate>> {
+pub fn discover(port: u16, preferred: Option<&str>, base_path: Option<&str>) -> Result<Vec<HostCandidate>> {
+    let suffix = base_path.unwrap_or_default();
+    let with_base = |origin: String| -> String {
+        if !suffix.is_empty() && !origin.ends_with(&suffix) {
+            format!("{origin}{suffix}")
+        } else {
+            origin
+        }
+    };
     let mut candidates = Vec::new();
     let mut seen = HashSet::new();
 
     if let Some(origin) = preferred {
-        seen.insert(origin.to_string());
+        let origin = with_base(origin.to_string());
+        seen.insert(origin.clone());
         candidates.push(HostCandidate {
-            origin: origin.to_string(),
-            address: origin.to_string(),
+            origin: origin.clone(),
+            address: origin,
             scope: "configured",
             interface: "configured".into(),
             primary: false,
@@ -50,7 +59,7 @@ pub fn discover(port: u16, preferred: Option<&str>) -> Result<Vec<HostCandidate>
             IpAddr::V4(ip) => ip.to_string(),
             IpAddr::V6(ip) => format!("[{ip}]"),
         };
-        let origin = format!("http://{host}:{port}");
+        let origin = with_base(format!("http://{host}:{port}"));
         if !seen.insert(origin.clone()) {
             continue;
         }
@@ -63,7 +72,7 @@ pub fn discover(port: u16, preferred: Option<&str>) -> Result<Vec<HostCandidate>
         });
     }
 
-    let local = format!("http://127.0.0.1:{port}");
+    let local = with_base(format!("http://127.0.0.1:{port}"));
     if seen.insert(local.clone()) {
         candidates.push(HostCandidate {
             origin: local,

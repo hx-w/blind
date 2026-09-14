@@ -90,13 +90,13 @@ function headers(owner?: string): HeadersInit {
 }
 
 export async function loadScene(token: string, owner?: string): Promise<PublicScene> {
-  const response = await fetch(`/api/v1/scenes/${token}`, { headers: headers(owner), cache: 'no-store' });
+  const response = await fetch(`api/v1/scenes/${token}`, { headers: headers(owner), cache: 'no-store' });
   if (!response.ok) throw await apiError(response);
   return response.json() as Promise<PublicScene>;
 }
 
 export async function shareScene(token: string, update: SceneUpdate, owner?: string, origin?: string): Promise<ShareResponse> {
-  const response = await fetch(`/api/v1/scenes/${token}/share`, {
+  const response = await fetch(`api/v1/scenes/${token}/share`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers(owner) },
     body: JSON.stringify({ ...update, ...(origin ? { origin } : {}) }),

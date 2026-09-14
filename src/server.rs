@@ -220,7 +220,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     };
     let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
     let state = AppState {
-        config: Arc::new(config),
+        config: Arc::new(config.clone()),
         codec,
         registry,
         renderer,
@@ -231,7 +231,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         doctor_lock: Arc::new(tokio::sync::Mutex::new(())),
         short_misses: Arc::new(Mutex::new(MissLimiter::default())),
     };
-    let app = Router::new()
+    let routes = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/control/health", get(control_health))
         .route("/api/v1/control/stop", post(control_stop))
@@ -257,11 +257,27 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/s/{token}", get(view_scene))
         .route("/v/{token}", get(view_scene))
         .route("/", get(index))
-        .fallback(asset)
+        .with_state(state.clone());
+    // Root mounting keeps pre-existing links (e.g. /s/{token} shared before a
+    // base path was configured) working; the nested mount additionally serves
+    // the configured base path (e.g. /blind/...).
+    let app = match config.base_path().as_deref() {
+        // axum 0.8 maps the nested "/" route to "{base}" (no trailing slash);
+        // serve the viewer index at "{base}/" as well so both spellings work.
+        Some(base) => {
+            let with_slash = format!("{base}/");
+            routes
+                .clone()
+                .route(&with_slash, get(index))
+                .nest(base, routes)
+                .fallback(asset)
+        }
+        None => routes.fallback(asset),
+    }
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("content-security-policy"),
             HeaderValue::from_static(
-                "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+                "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
             ),
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -617,6 +633,7 @@ async fn hosts(
         Json(discover(
             state.config.port()?,
             state.config.preferred_origin.as_deref(),
+            state.config.base_path().as_deref(),
         )?),
     ))
 }
@@ -639,13 +656,14 @@ async fn create_scene(
             .map_err(|error| AppError::bad_request(&error.to_string()))?;
     }
     let origin = match request.origin {
-        Some(origin) => normalize_origin(&origin)?,
+        Some(origin) => state.config.normalize_share_origin(&origin)?,
         None => request_origin(&headers, &state.config)?,
     };
     let links = links_for(&state.registry, &scene, &origin, true)?;
     let hosts = discover(
         state.config.port()?,
         state.config.preferred_origin.as_deref(),
+        state.config.base_path().as_deref(),
     )?;
     Ok((
         no_store(),
@@ -680,7 +698,9 @@ async fn get_scene(
             visible: mesh.visible,
             quality: mesh.quality,
             label: mesh.label.clone(),
-            source_url: format!("/api/v1/scenes/{token}/meshes/{index}"),
+            // Relative to the document base so both root and base-path mounts
+            // resolve to the correct API prefix.
+            source_url: format!("api/v1/scenes/{token}/meshes/{index}"),
         })
         .collect();
     Ok((
@@ -815,7 +835,7 @@ async fn reshare(
         .map_err(|error| AppError::bad_request(&error.to_string()))?;
     let current_origin = request_origin(&headers, &state.config)?;
     let hosts = share_hosts(&state.config, &current_origin)?;
-    let origin = select_share_origin(request.origin, &current_origin, &hosts)?;
+    let origin = select_share_origin(&state.config, request.origin, &current_origin, &hosts)?;
     Ok((
         no_store(),
         Json(ShareResponse {
@@ -862,18 +882,24 @@ async fn render_image(
         .body(Body::from(bytes))?)
 }
 
-fn serve_index() -> Result<Response<Body>, AppError> {
+fn serve_index(base_path: Option<String>) -> Result<Response<Body>, AppError> {
     let asset =
         WebAssets::get("index.html").ok_or_else(|| AppError::not_found("Viewer not built"))?;
+    // Anchor every relative URL (API fetches, bundled assets) to the configured
+    // base path so the viewer works under both mounts. With no base path this
+    // resolves to "/" which preserves the original absolute-path behavior.
+    let href = format!("{}/", base_path.as_deref().unwrap_or_default());
+    let html = String::from_utf8_lossy(&asset.data)
+        .replacen("<head>", &format!("<head>\n    <base href=\"{href}\">"), 1);
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, NO_STORE)
-        .body(Body::from(asset.data.into_owned()))?)
+        .body(Body::from(html))?)
 }
 
-async fn index() -> Result<Response<Body>, AppError> {
-    serve_index()
+async fn index(State(state): State<AppState>) -> Result<Response<Body>, AppError> {
+    serve_index(state.config.base_path())
 }
 
 async fn view_scene(
@@ -882,13 +908,27 @@ async fn view_scene(
     AxumPath(token): AxumPath<String>,
 ) -> Result<Response<Body>, AppError> {
     resolved_scene(&state, &token, peer.ip()).await?;
-    serve_index()
+    serve_index(state.config.base_path())
 }
 
-async fn asset(uri: axum::http::Uri) -> Result<Response<Body>, AppError> {
-    let path = uri.path().trim_start_matches('/');
-    let asset = WebAssets::get(path).ok_or_else(|| AppError::not_found("Not found"))?;
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
+async fn asset(
+    State(state): State<AppState>,
+    uri: axum::http::Uri,
+) -> Result<Response<Body>, AppError> {
+    let path = match state.config.base_path() {
+        // Only strip when the remainder starts with its own segment boundary,
+        // so look-alike prefixes (e.g. /blindfoo under base /blind) stay intact.
+        Some(base) => uri
+            .path()
+            .strip_prefix(&base)
+            .filter(|rest| rest.starts_with('/'))
+            .unwrap_or(uri.path())
+            .trim_start_matches('/')
+            .to_owned(),
+        None => uri.path().trim_start_matches('/').to_owned(),
+    };
+    let asset = WebAssets::get(&path).ok_or_else(|| AppError::not_found("Not found"))?;
+    let mime = mime_guess::from_path(&path).first_or_octet_stream();
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, mime.as_ref())
@@ -947,7 +987,7 @@ fn request_origin(headers: &HeaderMap, config: &Config) -> Result<String, AppErr
         .and_then(|value| value.to_str().ok())
         && let Ok(origin) = normalize_origin(origin)
     {
-        return Ok(origin);
+        return Ok(config.origin_with_base(&origin));
     }
     let scheme = headers
         .get("x-forwarded-proto")
@@ -965,9 +1005,11 @@ fn request_origin(headers: &HeaderMap, config: &Config) -> Result<String, AppErr
     if matches!(scheme, "http" | "https")
         && let Some(host) = host
     {
-        return normalize_origin(&format!("{scheme}://{host}")).map_err(Into::into);
+        return normalize_origin(&format!("{scheme}://{host}"))
+            .map(|origin| config.origin_with_base(&origin))
+            .map_err(Into::into);
     }
-    let hosts = discover(config.port()?, config.preferred_origin.as_deref())?;
+    let hosts = discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())?;
     hosts
         .first()
         .map(|host| host.origin.clone())
@@ -975,7 +1017,7 @@ fn request_origin(headers: &HeaderMap, config: &Config) -> Result<String, AppErr
 }
 
 fn share_hosts(config: &Config, current_origin: &str) -> Result<Vec<HostCandidate>, AppError> {
-    let mut hosts = discover(config.port()?, config.preferred_origin.as_deref())?;
+    let mut hosts = discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())?;
     if !hosts.iter().any(|host| host.origin == current_origin) {
         hosts.insert(
             0,
@@ -992,6 +1034,7 @@ fn share_hosts(config: &Config, current_origin: &str) -> Result<Vec<HostCandidat
 }
 
 fn select_share_origin(
+    config: &Config,
     requested: Option<String>,
     current_origin: &str,
     hosts: &[HostCandidate],
@@ -999,7 +1042,7 @@ fn select_share_origin(
     let Some(requested) = requested else {
         return Ok(current_origin.to_string());
     };
-    let requested = normalize_origin(&requested)?;
+    let requested = config.normalize_share_origin(&requested)?;
     // `share_hosts` always inserts the current origin, so membership is the
     // only check needed.
     if hosts.iter().any(|host| host.origin == requested) {
@@ -1229,11 +1272,23 @@ mod tests {
         }
     }
 
+    fn test_config(base_path: Option<&str>) -> Config {
+        Config {
+            listen: "127.0.0.1:0".into(),
+            preferred_origin: None,
+            base_path: base_path.map(Into::into),
+            pat: String::new(),
+            secret: String::new(),
+        }
+    }
+
     #[test]
     fn share_origin_must_be_current_or_discovered() {
+        let config = test_config(None);
         let hosts = vec![host("http://100.100.100.100:7400")];
         assert_eq!(
             select_share_origin(
+                &config,
                 Some("http://100.100.100.100:7400".into()),
                 "http://192.168.1.2:7400",
                 &hosts,
@@ -1243,8 +1298,36 @@ mod tests {
         );
         assert!(
             select_share_origin(
+                &config,
                 Some("http://example.com:7400".into()),
                 "http://192.168.1.2:7400",
+                &hosts,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn share_origin_tolerates_configured_base_path() {
+        // The share picker echoes origins from `discover`, which carry the
+        // base path; selecting one must not fail on the path suffix.
+        let config = test_config(Some("/blind"));
+        let hosts = vec![host("http://100.100.100.100:7400/blind")];
+        assert_eq!(
+            select_share_origin(
+                &config,
+                Some("http://100.100.100.100:7400/blind".into()),
+                "http://192.168.1.2:7400/blind",
+                &hosts,
+            )
+            .unwrap(),
+            "http://100.100.100.100:7400/blind"
+        );
+        assert!(
+            select_share_origin(
+                &config,
+                Some("http://example.com:7400/blind".into()),
+                "http://192.168.1.2:7400/blind",
                 &hosts,
             )
             .is_err()

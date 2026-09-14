@@ -11,20 +11,48 @@ use subtle::ConstantTimeEq;
 pub struct Config {
     pub listen: String,
     pub preferred_origin: Option<String>,
+    /// Optional path prefix the whole app is served under, e.g. "/blind".
+    /// Stored normalized (leading slash, no trailing slash) via [`Self::base_path`].
+    #[serde(default)]
+    pub base_path: Option<String>,
     pub pat: String,
     pub secret: String,
 }
 
 impl Config {
+    /// Normalized base path ("/blind"), or None when unset/blank/root.
+    pub fn base_path(&self) -> Option<String> {
+        let trimmed = self.base_path.as_deref()?.trim().trim_matches('/');
+        (!trimmed.is_empty()).then(|| format!("/{trimmed}"))
+    }
+
+    /// Appends the configured base path to an origin, unless already present.
+    pub fn origin_with_base(&self, origin: &str) -> String {
+        match self.base_path() {
+            Some(base) if !origin.ends_with(&base) => format!("{origin}{base}"),
+            _ => origin.to_string(),
+        }
+    }
+
+    /// Normalizes a user-supplied host, tolerating (and re-applying) the base
+    /// path so origins copied from `blind hosts` or the share picker round-trip.
+    pub fn normalize_share_origin(&self, value: &str) -> Result<String> {
+        let origin = match self.base_path() {
+            Some(base) => value.strip_suffix(&base).unwrap_or(value),
+            None => value,
+        };
+        Ok(self.origin_with_base(&normalize_origin(origin)?))
+    }
+
     pub fn load_or_create() -> Result<(Self, bool)> {
         let path = config_path()?;
         if path.exists() {
             let bytes =
                 fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-            return Ok((
-                serde_json::from_slice(&bytes).context("invalid Blind config")?,
-                false,
-            ));
+            let config: Self =
+                serde_json::from_slice(&bytes).context("invalid Blind config")?;
+            config.validate_base_path()?;
+            return Ok((config, false));
         }
 
         let config = Self::fresh();
@@ -36,9 +64,31 @@ impl Config {
         Self {
             listen: "0.0.0.0:7400".into(),
             preferred_origin: None,
+            base_path: None,
             pat: format!("blind_pat_{}", random_b64(24)),
             secret: random_b64(32),
         }
+    }
+
+    /// Rejects base paths that would break URL assembly or HTML embedding:
+    /// every segment must be non-empty and free of URL-reserved characters,
+    /// so values like "/a//b", "/.", or '/x"><script>' fail loudly at load.
+    fn validate_base_path(&self) -> Result<()> {
+        if let Some(base) = self.base_path()
+            && !base[1..]
+                .split('/')
+                .all(|segment| {
+                    !segment.is_empty()
+                        && segment != "."
+                        && segment != ".."
+                        && segment
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+                })
+        {
+            bail!("config base_path segments may only contain letters, digits, '-', '_', '.', or '~'");
+        }
+        Ok(())
     }
 
     pub fn save(&self) -> Result<()> {
@@ -157,4 +207,89 @@ pub fn normalize_origin(value: &str) -> Result<String> {
         bail!("host URL must not include a path, query, or fragment");
     }
     Ok(value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_with(base_path: Option<&str>) -> Config {
+        Config {
+            listen: "127.0.0.1:0".into(),
+            preferred_origin: None,
+            base_path: base_path.map(Into::into),
+            pat: String::new(),
+            secret: String::new(),
+        }
+    }
+
+    #[test]
+    fn base_path_normalization() {
+        assert_eq!(config_with(None).base_path(), None);
+        assert_eq!(config_with(Some("")).base_path(), None);
+        assert_eq!(config_with(Some("/")).base_path(), None);
+        assert_eq!(config_with(Some("  ")).base_path(), None);
+        assert_eq!(
+            config_with(Some("blind")).base_path().as_deref(),
+            Some("/blind")
+        );
+        assert_eq!(
+            config_with(Some("/blind/")).base_path().as_deref(),
+            Some("/blind")
+        );
+        assert_eq!(
+            config_with(Some(" a/b ")).base_path().as_deref(),
+            Some("/a/b")
+        );
+        assert_eq!(
+            config_with(Some("/x/y/")).base_path().as_deref(),
+            Some("/x/y")
+        );
+    }
+
+    #[test]
+    fn origin_with_base_appends_once() {
+        let config = config_with(Some("/blind"));
+        assert_eq!(
+            config.origin_with_base("http://h:7400"),
+            "http://h:7400/blind"
+        );
+        assert_eq!(
+            config.origin_with_base("http://h:7400/blind"),
+            "http://h:7400/blind"
+        );
+        let plain = config_with(None);
+        assert_eq!(plain.origin_with_base("http://h:7400"), "http://h:7400");
+    }
+
+    #[test]
+    fn normalize_share_origin_accepts_base_suffix() {
+        let config = config_with(Some("/blind"));
+        assert_eq!(
+            config.normalize_share_origin("http://h:7400").unwrap(),
+            "http://h:7400/blind"
+        );
+        assert_eq!(
+            config.normalize_share_origin("http://h:7400/blind").unwrap(),
+            "http://h:7400/blind"
+        );
+        assert!(config.normalize_share_origin("http://h:7400/other").is_err());
+        let plain = config_with(None);
+        assert_eq!(
+            plain.normalize_share_origin("http://h:7400").unwrap(),
+            "http://h:7400"
+        );
+    }
+
+    #[test]
+    fn base_path_validation_rejects_hostile_values() {
+        assert!(config_with(Some("/a//b")).validate_base_path().is_err());
+        assert!(config_with(Some("/.")).validate_base_path().is_err());
+        assert!(config_with(Some("/a/../b")).validate_base_path().is_err());
+        assert!(config_with(Some("/a b")).validate_base_path().is_err());
+        assert!(config_with(Some("/x\"><script>")).validate_base_path().is_err());
+        assert!(config_with(Some("/blind")).validate_base_path().is_ok());
+        assert!(config_with(Some("/my_app-1.2~")).validate_base_path().is_ok());
+        assert!(config_with(Some("")).validate_base_path().is_ok());
+    }
 }

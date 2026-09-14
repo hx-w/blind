@@ -62,7 +62,15 @@ const undoBrush = $('#undo-brush') as HTMLButtonElement;
 const clearBrush = $('#clear-brush') as HTMLButtonElement;
 const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 
-const token = location.pathname.match(/^\/(?:s|v)\/([^/]+)$/)?.[1];
+// The viewer may be mounted under a configured base path, so the s/v marker
+// can sit after an arbitrary prefix (e.g. /blind/s/{token}).
+const token = location.pathname.match(/\/(?:s|v)\/([^/]+)$/)?.[1];
+// With a <base href> injected, fragment-only links resolve against the base
+// URL and would navigate away from the scene; scroll and focus manually.
+$('.skip-link').addEventListener('click', (event) => {
+  event.preventDefault();
+  viewerElement.focus();
+});
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
 let panelOpen = false;
