@@ -203,7 +203,11 @@ async fn main() -> Result<()> {
             } else {
                 let port = config.port()?;
                 eprintln!("Available hosts:");
-                for host in discover(port, config.preferred_origin.as_deref(), config.base_path().as_deref())? {
+                for host in discover(
+                    port,
+                    config.preferred_origin.as_deref(),
+                    config.base_path().as_deref(),
+                )? {
                     eprintln!("  {}", host.origin);
                 }
                 let retry_config = config.clone();
@@ -405,7 +409,11 @@ fn init(host: Option<String>, show_pat: bool) -> Result<()> {
     if created || show_pat {
         println!("PAT: {}", config.pat);
     }
-    for host in discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())? {
+    for host in discover(
+        config.port()?,
+        config.preferred_origin.as_deref(),
+        config.base_path().as_deref(),
+    )? {
         println!("Host: {}", host.origin);
     }
     Ok(())
@@ -446,7 +454,11 @@ async fn share(
         }
         scene.set_labels(assignments)?;
     }
-    let hosts = discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())?;
+    let hosts = discover(
+        config.port()?,
+        config.preferred_origin.as_deref(),
+        config.base_path().as_deref(),
+    )?;
     let origin = match host {
         Some(host) => config.normalize_share_origin(&host)?,
         None => hosts
@@ -490,7 +502,11 @@ async fn share(
 
 fn hosts(json: bool) -> Result<()> {
     let (config, _) = Config::load_or_create()?;
-    let hosts = discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())?;
+    let hosts = discover(
+        config.port()?,
+        config.preferred_origin.as_deref(),
+        config.base_path().as_deref(),
+    )?;
     if json {
         println!("{}", serde_json::to_string_pretty(&hosts)?);
     } else {
@@ -539,7 +555,11 @@ async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
         }
     );
     println!("ok  listen  {}", config.listen);
-    let hosts = discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())?;
+    let hosts = discover(
+        config.port()?,
+        config.preferred_origin.as_deref(),
+        config.base_path().as_deref(),
+    )?;
     println!("ok  hosts   {} detected", hosts.len());
     let action = if clean_invalid {
         DoctorAction::CleanInvalid

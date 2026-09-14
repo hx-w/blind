@@ -49,8 +49,7 @@ impl Config {
         if path.exists() {
             let bytes =
                 fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
-            let config: Self =
-                serde_json::from_slice(&bytes).context("invalid Blind config")?;
+            let config: Self = serde_json::from_slice(&bytes).context("invalid Blind config")?;
             config.validate_base_path()?;
             return Ok((config, false));
         }
@@ -75,18 +74,18 @@ impl Config {
     /// so values like "/a//b", "/.", or '/x"><script>' fail loudly at load.
     fn validate_base_path(&self) -> Result<()> {
         if let Some(base) = self.base_path()
-            && !base[1..]
-                .split('/')
-                .all(|segment| {
-                    !segment.is_empty()
-                        && segment != "."
-                        && segment != ".."
-                        && segment
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
-                })
+            && !base[1..].split('/').all(|segment| {
+                !segment.is_empty()
+                    && segment != "."
+                    && segment != ".."
+                    && segment
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~'))
+            })
         {
-            bail!("config base_path segments may only contain letters, digits, '-', '_', '.', or '~'");
+            bail!(
+                "config base_path segments may only contain letters, digits, '-', '_', '.', or '~'"
+            );
         }
         Ok(())
     }
@@ -270,10 +269,16 @@ mod tests {
             "http://h:7400/blind"
         );
         assert_eq!(
-            config.normalize_share_origin("http://h:7400/blind").unwrap(),
+            config
+                .normalize_share_origin("http://h:7400/blind")
+                .unwrap(),
             "http://h:7400/blind"
         );
-        assert!(config.normalize_share_origin("http://h:7400/other").is_err());
+        assert!(
+            config
+                .normalize_share_origin("http://h:7400/other")
+                .is_err()
+        );
         let plain = config_with(None);
         assert_eq!(
             plain.normalize_share_origin("http://h:7400").unwrap(),
@@ -287,9 +292,17 @@ mod tests {
         assert!(config_with(Some("/.")).validate_base_path().is_err());
         assert!(config_with(Some("/a/../b")).validate_base_path().is_err());
         assert!(config_with(Some("/a b")).validate_base_path().is_err());
-        assert!(config_with(Some("/x\"><script>")).validate_base_path().is_err());
+        assert!(
+            config_with(Some("/x\"><script>"))
+                .validate_base_path()
+                .is_err()
+        );
         assert!(config_with(Some("/blind")).validate_base_path().is_ok());
-        assert!(config_with(Some("/my_app-1.2~")).validate_base_path().is_ok());
+        assert!(
+            config_with(Some("/my_app-1.2~"))
+                .validate_base_path()
+                .is_ok()
+        );
         assert!(config_with(Some("")).validate_base_path().is_ok());
     }
 }

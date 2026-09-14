@@ -17,7 +17,11 @@ pub struct HostCandidate {
     pub primary: bool,
 }
 
-pub fn discover(port: u16, preferred: Option<&str>, base_path: Option<&str>) -> Result<Vec<HostCandidate>> {
+pub fn discover(
+    port: u16,
+    preferred: Option<&str>,
+    base_path: Option<&str>,
+) -> Result<Vec<HostCandidate>> {
     let suffix = base_path.unwrap_or_default();
     let with_base = |origin: String| -> String {
         if !suffix.is_empty() && !origin.ends_with(&suffix) {

@@ -889,8 +889,11 @@ fn serve_index(base_path: Option<String>) -> Result<Response<Body>, AppError> {
     // base path so the viewer works under both mounts. With no base path this
     // resolves to "/" which preserves the original absolute-path behavior.
     let href = format!("{}/", base_path.as_deref().unwrap_or_default());
-    let html = String::from_utf8_lossy(&asset.data)
-        .replacen("<head>", &format!("<head>\n    <base href=\"{href}\">"), 1);
+    let html = String::from_utf8_lossy(&asset.data).replacen(
+        "<head>",
+        &format!("<head>\n    <base href=\"{href}\">"),
+        1,
+    );
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
@@ -1009,7 +1012,11 @@ fn request_origin(headers: &HeaderMap, config: &Config) -> Result<String, AppErr
             .map(|origin| config.origin_with_base(&origin))
             .map_err(Into::into);
     }
-    let hosts = discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())?;
+    let hosts = discover(
+        config.port()?,
+        config.preferred_origin.as_deref(),
+        config.base_path().as_deref(),
+    )?;
     hosts
         .first()
         .map(|host| host.origin.clone())
@@ -1017,7 +1024,11 @@ fn request_origin(headers: &HeaderMap, config: &Config) -> Result<String, AppErr
 }
 
 fn share_hosts(config: &Config, current_origin: &str) -> Result<Vec<HostCandidate>, AppError> {
-    let mut hosts = discover(config.port()?, config.preferred_origin.as_deref(), config.base_path().as_deref())?;
+    let mut hosts = discover(
+        config.port()?,
+        config.preferred_origin.as_deref(),
+        config.base_path().as_deref(),
+    )?;
     if !hosts.iter().any(|host| host.origin == current_origin) {
         hosts.insert(
             0,
