@@ -52,6 +52,7 @@ export class MeshViewer {
   private readonly pointer = new THREE.Vector2();
   private readonly resizeObserver: ResizeObserver;
   private readonly visibleBounds = new THREE.Box3();
+  private readonly rendererSize = new THREE.Vector2();
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   private models: Model[] = [];
   private state!: ViewState;
@@ -266,7 +267,6 @@ export class MeshViewer {
 
   resize(): void {
     const width = Math.max(this.root.clientWidth, 1); const height = Math.max(this.root.clientHeight, 1); const aspect = width / height;
-    this.renderer.setSize(width, height, false);
     this.perspective.aspect = aspect; this.perspective.updateProjectionMatrix();
     const orthographicHeight = this.orthographic.userData.height ?? 2;
     this.orthographic.left = -orthographicHeight * aspect / 2; this.orthographic.right = orthographicHeight * aspect / 2;
@@ -455,6 +455,11 @@ export class MeshViewer {
   private animate = (): void => {
     requestAnimationFrame(this.animate);
     if (this.dirty) {
+      const width = Math.max(this.root.clientWidth, 1); const height = Math.max(this.root.clientHeight, 1);
+      this.renderer.getSize(this.rendererSize);
+      // Resizing clears the drawing buffer, even at the same size. Do it only
+      // when needed, immediately before rendering, never in ResizeObserver.
+      if (this.rendererSize.x !== width || this.rendererSize.y !== height) this.renderer.setSize(width, height, false);
       this.renderer.render(this.scene, this.camera);
       this.labels.render(this.models, this.camera, this.selected);
       this.dirty = false;

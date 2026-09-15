@@ -97,7 +97,6 @@
             <div class="mesh-summary">
               <span class="mesh-summary-dot" id="mesh-summary-dot"></span>
               <span class="mesh-summary-copy"><strong id="mesh-summary-name"></strong><small id="mesh-summary-meta"></small></span>
-              <label class="mesh-summary-visibility"><span>显示</span><input id="mesh-visible-toggle" type="checkbox" checked/><i></i></label>
             </div>
             <div class="mesh-label-editor">
               <label class="setting-label" for="mesh-label-text">3D 标注</label>
@@ -108,7 +107,13 @@
               <button class="active" data-quality="lod" type="button">LOD</button><button data-quality="raw" type="button">Raw</button>
             </div><p class="lod-saving" id="lod-saving" aria-live="polite"></p></div>
             <div class="style-section color-section"><span class="setting-label">颜色</span><div class="color-swatches" id="color-swatches" aria-label="Mesh 颜色"></div></div>
-            <label class="range-row" for="opacity-range"><span>透明度</span><input id="opacity-range" type="range" min="5" max="100" value="100"/><output id="opacity-value">100%</output></label>
+            <div class="opacity-controls">
+              <div class="opacity-heading">
+                <label class="setting-label" for="opacity-range">透明度</label>
+                <label class="mesh-visibility"><span>显示</span><input id="mesh-visible-toggle" type="checkbox" checked/><i aria-hidden="true"></i></label>
+              </div>
+              <div class="range-row"><input id="opacity-range" type="range" min="5" max="100" value="100"/><output id="opacity-value" for="opacity-range">100%</output></div>
+            </div>
             <div class="style-section"><span class="setting-label">表面</span><div class="segmented segmented-three" aria-label="着色方式">
               <button data-shading="smooth" type="button">平滑</button><button class="active" data-shading="flat" type="button">平面</button><button data-shading="wire" type="button">线框</button>
             </div></div>

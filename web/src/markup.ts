@@ -203,12 +203,6 @@ export class MarkupCanvas {
     const host = this.canvas.parentElement ?? this.canvas;
     this.cssWidth = Math.max(host.clientWidth, 1);
     this.cssHeight = Math.max(host.clientHeight, 1);
-    const pixelRatio = Math.min(window.devicePixelRatio, 2);
-    this.canvas.width = Math.round(this.cssWidth * pixelRatio);
-    this.canvas.height = Math.round(this.cssHeight * pixelRatio);
-    this.canvas.style.width = `${this.cssWidth}px`;
-    this.canvas.style.height = `${this.cssHeight}px`;
-    this.context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     this.scheduleDraw();
   }
 
@@ -222,6 +216,13 @@ export class MarkupCanvas {
 
   private draw(): void {
     const context = this.context;
+    const pixelRatio = Math.min(window.devicePixelRatio, 2);
+    const width = Math.round(this.cssWidth * pixelRatio); const height = Math.round(this.cssHeight * pixelRatio);
+    // Keep the old frame until its resized replacement can be drawn.
+    if (this.canvas.width !== width || this.canvas.height !== height) {
+      this.canvas.width = width; this.canvas.height = height;
+      context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+    }
     context.clearRect(0, 0, this.cssWidth, this.cssHeight);
     for (const stroke of this.strokes) this.drawStroke(stroke);
     if (this.active) {
