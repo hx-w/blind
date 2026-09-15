@@ -3,6 +3,27 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-09-15
+
+### Added
+
+- Client/Server responsibilities separated behind one `blind` executable:
+  `serve` on A, short-lived `join` and `share` commands on B/C.
+- One-use invitation registration, independent OS-user credentials, pinned SSH
+  host identity, and server-owned per-source SSH keys restricted to read-only SFTP.
+- Direct local registration for the same OS user; no Client background service.
+- Source host attribution in scene information and complete share text.
+- Linux server locking and Docker/HTTPS deployment examples.
+
+### Changed
+
+- `blind status` now reports Client registration; use `blind server-status` for Server status.
+- Remote source bytes feed LOD and PNG generation entirely in memory.
+- Temporarily unavailable sources return 503 and survive doctor cleanup;
+  confirmed source changes, deletions, and revocation return 410.
+- `/s/`, `/i/`, `/v/`, owner capabilities and legacy local descriptors remain compatible.
+- Restore static viewer assets when running without a base path.
+
 ## [0.6.1] - 2026-09-14
 
 ### Changed

@@ -1,7 +1,6 @@
 use std::{
     fs,
-    fs::File,
-    io::{BufReader, Write},
+    io::{BufReader, Cursor, Write},
     path::Path,
 };
 
@@ -27,14 +26,18 @@ pub struct Geometry {
 
 impl Geometry {
     pub fn load(path: &Path, format: MeshFormat) -> Result<Self> {
+        Self::from_bytes(&fs::read(path)?, format)
+    }
+
+    pub fn from_bytes(bytes: &[u8], format: MeshFormat) -> Result<Self> {
         let geometry = match format {
-            MeshFormat::Obj => load_obj(path),
-            MeshFormat::Stl => load_stl(path),
-            MeshFormat::Ply => load_ply(path),
-            MeshFormat::Pts => load_pts(path),
+            MeshFormat::Obj => load_obj(bytes),
+            MeshFormat::Stl => load_stl(bytes),
+            MeshFormat::Ply => load_ply(bytes),
+            MeshFormat::Pts => load_pts(bytes),
         }?;
         if geometry.positions.is_empty() {
-            bail!("{} contains no vertices", path.display());
+            bail!("{} contains no vertices", "source");
         }
         if geometry
             .positions
@@ -42,23 +45,23 @@ impl Geometry {
             .flatten()
             .any(|value| !value.is_finite())
         {
-            bail!("{} contains non-finite vertex coordinates", path.display());
+            bail!("{} contains non-finite vertex coordinates", "source");
         }
         if geometry.indices.len() < 3 {
             if geometry.indices.is_empty() && format == MeshFormat::Ply {
                 return Ok(geometry);
             }
-            bail!("{} contains no triangles", path.display());
+            bail!("{} contains no triangles", "source");
         }
         if geometry.indices.len() % 3 != 0 {
-            bail!("{} contains an incomplete triangle", path.display());
+            bail!("{} contains an incomplete triangle", "source");
         }
         if geometry
             .indices
             .iter()
             .any(|index| *index as usize >= geometry.positions.len())
         {
-            bail!("{} contains an out-of-range vertex index", path.display());
+            bail!("{} contains an out-of-range vertex index", "source");
         }
         Ok(geometry)
     }
@@ -123,14 +126,16 @@ impl Geometry {
     }
 }
 
-fn load_obj(path: &Path) -> Result<Geometry> {
+fn load_obj(bytes: &[u8]) -> Result<Geometry> {
     let options = tobj::LoadOptions {
         triangulate: true,
         single_index: true,
         ..Default::default()
     };
-    let (models, _) = tobj::load_obj(path, &options)
-        .with_context(|| format!("failed to parse OBJ {}", path.display()))?;
+    let (models, _) = tobj::load_obj_buf(&mut BufReader::new(Cursor::new(bytes)), &options, |_| {
+        Ok((Vec::new(), Default::default()))
+    })
+    .with_context(|| format!("failed to parse OBJ {}", "source"))?;
     let mut positions = Vec::new();
     let mut indices = Vec::new();
     for model in models {
@@ -147,10 +152,10 @@ fn load_obj(path: &Path) -> Result<Geometry> {
     Ok(Geometry { positions, indices })
 }
 
-fn load_stl(path: &Path) -> Result<Geometry> {
-    let mut file = BufReader::new(File::open(path)?);
-    let mesh = stl_io::read_stl(&mut file)
-        .with_context(|| format!("failed to parse STL {}", path.display()))?;
+fn load_stl(bytes: &[u8]) -> Result<Geometry> {
+    let mut file = BufReader::new(Cursor::new(bytes));
+    let mesh =
+        stl_io::read_stl(&mut file).with_context(|| format!("failed to parse STL {}", "source"))?;
     Ok(Geometry {
         positions: mesh.vertices.into_iter().map(|value| value.0).collect(),
         indices: mesh
@@ -161,12 +166,12 @@ fn load_stl(path: &Path) -> Result<Geometry> {
     })
 }
 
-fn load_ply(path: &Path) -> Result<Geometry> {
-    let mut file = BufReader::new(File::open(path)?);
+fn load_ply(bytes: &[u8]) -> Result<Geometry> {
+    let mut file = BufReader::new(Cursor::new(bytes));
     let parser = Parser::<DefaultElement>::new();
     let ply = parser
         .read_ply(&mut file)
-        .with_context(|| format!("failed to parse PLY {}", path.display()))?;
+        .with_context(|| format!("failed to parse PLY {}", "source"))?;
     let vertices = ply
         .payload
         .get("vertex")
@@ -203,9 +208,8 @@ fn load_ply(path: &Path) -> Result<Geometry> {
     Ok(Geometry { positions, indices })
 }
 
-fn load_pts(path: &Path) -> Result<Geometry> {
-    let bytes = fs::read(path).with_context(|| format!("failed to read PTS {}", path.display()))?;
-    pts_geometry(&bytes).with_context(|| format!("failed to parse PTS {}", path.display()))
+fn load_pts(bytes: &[u8]) -> Result<Geometry> {
+    pts_geometry(bytes)
 }
 
 /// Bytes ready to serve over HTTP plus their content type: PTS rings ship as
@@ -533,7 +537,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("margin.ply");
         std::fs::write(&path, geometry.to_binary_ply().unwrap()).unwrap();
-        let round_trip = load_ply(&path).unwrap();
+        let round_trip = load_ply(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(round_trip.positions.len(), geometry.positions.len());
         assert_eq!(round_trip.indices.len(), geometry.indices.len());
     }

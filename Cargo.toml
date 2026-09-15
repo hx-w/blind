@@ -1,6 +1,6 @@
 [package]
 name = "blind"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Instant local geometry review from any device"
@@ -50,6 +50,8 @@ mime_guess = "2.0"
 meshopt = "0.6.2"
 ply-rs = "0.1"
 rand = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rust-embed = "8.5"
 serde = { version = "1.0", features = ["derive"] }

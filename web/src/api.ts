@@ -49,6 +49,7 @@ export interface MeshLabel {
 }
 
 export interface PublicScene {
+  source?: { id: string; name: string; host: string; user: string } | null;
   title: string;
   meshes: PublicMesh[];
   state: ViewState;

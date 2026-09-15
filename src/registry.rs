@@ -24,6 +24,7 @@ const MAX_ACTIVE_SCENES: i64 = 10_000;
 const MAX_REGISTRY_ROWS: i64 = 12_000;
 
 pub struct Registry {
+    pub sources: crate::source::Sources,
     connection: Mutex<Connection>,
     codec: TokenCodec,
     fingerprint_key: [u8; 32],
@@ -45,6 +46,7 @@ pub struct RegisteredScene {
 
 #[derive(Debug, Default, Clone)]
 pub struct RegistryAudit {
+    pub unavailable: usize,
     pub valid: usize,
     pub expired: usize,
     pub source_gone: usize,
@@ -80,6 +82,7 @@ struct AuditRow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuditStatus {
+    Unavailable,
     Valid,
     Expired,
     SourceGone,
@@ -186,6 +189,9 @@ impl Registry {
         ensure_key_identity(&connection, &codec, &key)?;
         let key_id = hex::encode(Sha256::digest(key));
         let registry = Self {
+            sources: crate::source::Sources::open(
+                path.parent().context("registry parent missing")?,
+            )?,
             connection: Mutex::new(connection),
             codec,
             fingerprint_key: key,
@@ -406,44 +412,50 @@ impl Registry {
 
             for row in rows {
                 after_rowid = row.rowid;
-                let status = if !row.storage_types_are_valid()
-                    || !row.code().is_some_and(is_short_secret)
-                {
-                    AuditStatus::Corrupt
-                } else if row.gone_at().is_some() || row.payload == Value::Null {
-                    AuditStatus::Tombstoned
-                } else if row.expires_at().is_some_and(|expires| expires <= current) {
-                    AuditStatus::Expired
-                } else if !row.owner_secret().is_some_and(is_short_secret) {
-                    AuditStatus::Corrupt
-                } else {
-                    let payload = row.payload().expect("payload checked above");
-                    match self.codec.open(payload) {
-                        Ok(envelope) => {
-                            if envelope.scope != Scope::Public
-                                || self.fingerprint(&envelope.scene).ok().as_deref()
-                                    != row.fingerprint()
-                            {
-                                AuditStatus::Corrupt
-                            } else if scene_sources_are_valid(&envelope.scene, &mut source_cache)
-                                .await
-                            {
-                                AuditStatus::Valid
-                            } else {
-                                AuditStatus::SourceGone
+                let status =
+                    if !row.storage_types_are_valid() || !row.code().is_some_and(is_short_secret) {
+                        AuditStatus::Corrupt
+                    } else if row.gone_at().is_some() || row.payload == Value::Null {
+                        AuditStatus::Tombstoned
+                    } else if row.expires_at().is_some_and(|expires| expires <= current) {
+                        AuditStatus::Expired
+                    } else if !row.owner_secret().is_some_and(is_short_secret) {
+                        AuditStatus::Corrupt
+                    } else {
+                        let payload = row.payload().expect("payload checked above");
+                        match self.codec.open(payload) {
+                            Ok(envelope) => {
+                                if envelope.scope != Scope::Public
+                                    || self.fingerprint(&envelope.scene).ok().as_deref()
+                                        != row.fingerprint()
+                                {
+                                    AuditStatus::Corrupt
+                                } else {
+                                    match scene_sources_are_valid(
+                                        &envelope.scene,
+                                        &mut source_cache,
+                                        &self.sources,
+                                    )
+                                    .await
+                                    {
+                                        Ok(true) => AuditStatus::Valid,
+                                        Ok(false) => AuditStatus::SourceGone,
+                                        Err(_) => AuditStatus::Unavailable,
+                                    }
+                                }
                             }
+                            Err(_) => AuditStatus::Corrupt,
                         }
-                        Err(_) => AuditStatus::Corrupt,
-                    }
-                };
+                    };
                 match status {
                     AuditStatus::Valid => audit.valid += 1,
+                    AuditStatus::Unavailable => audit.unavailable += 1,
                     AuditStatus::Expired => audit.expired += 1,
                     AuditStatus::SourceGone => audit.source_gone += 1,
                     AuditStatus::Tombstoned => audit.tombstoned += 1,
                     AuditStatus::Corrupt => audit.corrupt += 1,
                 }
-                if !matches!(status, AuditStatus::Valid) {
+                if !matches!(status, AuditStatus::Valid | AuditStatus::Unavailable) {
                     audit.invalid_rows.push(InvalidRow { row, status });
                 }
             }
@@ -464,7 +476,13 @@ impl Registry {
                         .payload()
                         .expect("source-gone row has a payload");
                     if let Ok(envelope) = self.codec.open(payload)
-                        && scene_sources_are_valid(&envelope.scene, &mut source_cache).await
+                        && scene_sources_are_valid(
+                            &envelope.scene,
+                            &mut source_cache,
+                            &self.sources,
+                        )
+                        .await
+                        .unwrap_or(true)
                     {
                         continue;
                     }
@@ -531,16 +549,27 @@ pub fn is_key_mismatch(error: &anyhow::Error) -> bool {
     error.downcast_ref::<RegistryKeyMismatch>().is_some()
 }
 
-async fn scene_sources_are_valid(scene: &SceneDescriptor, cache: &mut SourceCache) -> bool {
+async fn scene_sources_are_valid(
+    scene: &SceneDescriptor,
+    cache: &mut SourceCache,
+    sources: &crate::source::Sources,
+) -> Result<bool, crate::source::SourceError> {
+    if scene.source.is_some() {
+        return match sources.validate(scene).await {
+            Ok(()) => Ok(true),
+            Err(crate::source::SourceError::Gone) => Ok(false),
+            Err(error) => Err(error),
+        };
+    }
     for mesh in &scene.meshes {
         let Some(observed) = cache.observe(&mesh.path).await else {
-            return false;
+            return Ok(false);
         };
         if observed.byte_size != mesh.byte_size || observed.revision != mesh.revision {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 impl SourceCache {

@@ -90,6 +90,7 @@ mod tests {
 
     fn scene() -> SceneDescriptor {
         SceneDescriptor {
+            source: None,
             schema: 1,
             title: "review".into(),
             created_at: 1,

@@ -1,9 +1,10 @@
+#[cfg(not(target_os = "linux"))]
+use std::process::Command;
 use std::{
     collections::HashMap,
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
-    process::Command,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::{compression::CompressionLayer, trace::TraceLayer};
 
+use crate::source::{FinishRequest, JoinRequest, Source, SourceError};
 use crate::{
     config::{Config, config_path, normalize_origin},
     lod::{self, LodAsset, LodCache, LodCacheStats},
@@ -35,9 +37,7 @@ use crate::{
     network::{HostCandidate, discover},
     registry::{RegisteredScene, Registry, RegistryAudit, RegistryLookupError, is_short_secret},
     render::Renderer,
-    scene::{
-        MeshFormat, MeshQuality, SceneDescriptor, SceneGone, SceneUpdate, hash_bytes, hash_file,
-    },
+    scene::{MeshFormat, MeshQuality, SceneDescriptor, SceneGone, SceneUpdate},
     token::{Scope, TokenCodec},
 };
 
@@ -70,8 +70,12 @@ struct MissWindow {
 }
 
 pub struct ServerLease {
+    #[cfg(not(target_os = "linux"))]
     path: PathBuf,
+    #[cfg(not(target_os = "linux"))]
     pid: u32,
+    #[cfg(target_os = "linux")]
+    _file: fs::File,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -85,7 +89,7 @@ pub struct ShareLinks {
 }
 
 #[derive(Debug, Serialize)]
-struct ShareResponse {
+pub struct ShareResponse {
     #[serde(flatten)]
     links: ShareLinks,
     /// Origin used to compose the links, echoed for the share-sheet host picker.
@@ -99,6 +103,8 @@ struct CreateSceneRequest {
     title: Option<String>,
     origin: Option<String>,
     labels: Option<Vec<Option<crate::scene::MeshLabel>>>,
+    #[serde(default)]
+    stateless: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,6 +138,8 @@ pub enum DoctorAction {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorRegistryReport {
+    #[serde(default)]
+    pub unavailable: usize,
     pub valid: usize,
     pub expired: usize,
     pub source_gone: usize,
@@ -148,6 +156,7 @@ impl DoctorRegistryReport {
     pub fn new(audit: &RegistryAudit, removed: usize) -> Self {
         Self {
             valid: audit.valid,
+            unavailable: audit.unavailable,
             expired: audit.expired,
             source_gone: audit.source_gone,
             tombstoned: audit.tombstoned,
@@ -167,6 +176,7 @@ impl DoctorRegistryReport {
     pub fn cleared(removed: usize) -> Self {
         Self {
             valid: 0,
+            unavailable: 0,
             expired: 0,
             source_gone: 0,
             tombstoned: 0,
@@ -179,12 +189,13 @@ impl DoctorRegistryReport {
     }
 
     pub fn total(&self) -> usize {
-        self.valid + self.invalid()
+        self.valid + self.unavailable + self.invalid()
     }
 }
 
 #[derive(Debug, Serialize)]
 struct PublicScene {
+    source: Option<crate::source::SceneSource>,
     title: String,
     meshes: Vec<PublicMesh>,
     state: crate::scene::ViewState,
@@ -246,6 +257,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .route("/api/v1/hosts", get(hosts))
         .route("/api/v1/scenes", post(create_scene))
+        .route("/api/v1/clients/join", post(join_client))
+        .route("/api/v1/client", get(client_info))
+        .route("/api/v1/client/activate", post(activate_client))
+        .route("/api/v1/client/revoke", post(revoke_client))
+        .route("/api/v1/client/scenes", post(client_scene))
+        .route("/api/v1/control/sources/local", post(local_client))
         .route("/api/v1/scenes/{token}", get(get_scene))
         .route("/api/v1/scenes/{token}/meshes/{index}", get(get_mesh))
         .route(
@@ -270,7 +287,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 .route(&with_slash, get(index))
                 .fallback(asset)
         }
-        None => routes,
+        None => routes.fallback(asset),
     }
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("content-security-policy"),
@@ -312,19 +329,41 @@ impl ServerLease {
             .context("config path has no parent")?
             .join("server.lock");
         let pid = std::process::id();
-        let output = Command::new("/usr/bin/shlock")
-            .args(["-f"])
-            .arg(&path)
-            .args(["-p", &pid.to_string()])
-            .output()
-            .context("could not run the macOS server lock helper")?;
-        if !output.status.success() {
-            anyhow::bail!("another Blind server or offline maintenance operation is active");
+        #[cfg(target_os = "linux")]
+        {
+            use std::io::Write;
+            use std::os::fd::AsRawFd;
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            // Keep the inode in place so all competing processes lock the same file.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+                anyhow::bail!("another Blind server or offline maintenance operation is active");
+            }
+            file.set_len(0)?;
+            writeln!(file, "{pid}")?;
+            Ok(Self { _file: file })
         }
-        Ok(Self { path, pid })
+        #[cfg(not(target_os = "linux"))]
+        {
+            let output = Command::new("/usr/bin/shlock")
+                .args(["-f"])
+                .arg(&path)
+                .args(["-p", &pid.to_string()])
+                .output()
+                .context("could not run the macOS server lock helper")?;
+            if !output.status.success() {
+                anyhow::bail!("another Blind server or offline maintenance operation is active");
+            }
+            Ok(Self { path, pid })
+        }
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Drop for ServerLease {
     fn drop(&mut self) {
         let owned = fs::read_to_string(&self.path)
@@ -476,7 +515,7 @@ async fn control_request_with_timeout(
     Ok(Some((status, body)))
 }
 
-fn control_address(config: &Config) -> anyhow::Result<SocketAddr> {
+pub(crate) fn control_address(config: &Config) -> anyhow::Result<SocketAddr> {
     let configured: SocketAddr = config.listen.parse()?;
     let ip = match configured.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -704,6 +743,7 @@ async fn get_scene(
     Ok((
         no_store(),
         Json(PublicScene {
+            source: scene.source.clone(),
             title: scene.title,
             meshes,
             state: scene.state,
@@ -723,17 +763,12 @@ async fn get_mesh(
         .meshes
         .get(index)
         .ok_or_else(|| AppError::not_found("Mesh not found"))?;
-    let bytes = match tokio::fs::read(&mesh.path).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            mark_scene_gone(&state, &token);
-            return Err(SceneGone.into());
-        }
-    };
-    if hash_bytes(&bytes) != mesh.revision {
-        mark_scene_gone(&state, &token);
-        return Err(SceneGone.into());
-    }
+    let bytes = source_result(
+        &state,
+        &token,
+        state.registry.sources.read_mesh(&scene, mesh, true).await,
+    )?
+    .bytes;
     let format = mesh.format;
     let served = tokio::task::spawn_blocking(move || {
         mesh::serve_bytes(bytes, format).map_err(|error| error.to_string())
@@ -776,33 +811,17 @@ async fn get_mesh_lod(
         return lod_response(asset);
     }
 
-    // Re-verify this Mesh after the wait, streaming the file instead of
-    // buffering it: lod::build re-reads the source inside the blocking slot.
-    let current = match hash_file(std::path::Path::new(&mesh.path)).await {
-        Ok(revision) => revision,
-        Err(_) => {
-            mark_scene_gone(&state, &token);
-            return Err(SceneGone.into());
-        }
-    };
-    if current != mesh.revision {
-        mark_scene_gone(&state, &token);
-        return Err(SceneGone.into());
-    }
-
-    let path = mesh.path.clone();
+    let bytes = source_result(
+        &state,
+        &token,
+        state.registry.sources.read_mesh(&scene, mesh, true).await,
+    )?
+    .bytes;
     let format = mesh.format;
-    let asset = tokio::task::spawn_blocking(move || {
-        lod::build(std::path::Path::new(&path), format, target_primitives)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| AppError::internal(&error.to_string()))?
-    .map_err(|error| AppError::unprocessable(&error))?;
-    if scene.verify_source_lengths().await.is_err() {
-        mark_scene_gone(&state, &token);
-        return Err(SceneGone.into());
-    }
+    let asset =
+        tokio::task::spawn_blocking(move || lod::build_bytes(&bytes, format, target_primitives))
+            .await
+            .map_err(|e| AppError::internal(&e.to_string()))??;
     let asset = Arc::new(asset);
     state.lod_cache.insert(key, asset.clone());
     lod_response(asset)
@@ -856,22 +875,38 @@ async fn render_image(
     let token = token.strip_suffix(".png").unwrap_or(&token);
     let opened = open_scene(&state, token, peer.ip())?;
     let scene = opened.scene;
-    if scene.verify_source_lengths().await.is_err() {
-        mark_scene_gone(&state, token);
-        return Err(SceneGone.into());
+    source_result(&state, token, state.registry.sources.validate(&scene).await)?;
+    let mut sources = Vec::with_capacity(scene.meshes.len());
+    let mut source_bytes = 0u64;
+    for mesh in &scene.meshes {
+        if mesh.visible {
+            source_bytes = source_bytes
+                .checked_add(mesh.byte_size)
+                .ok_or_else(|| AppError::unprocessable("source size overflow"))?;
+            if source_bytes > crate::source::MAX_SOURCE_BYTES {
+                return Err(AppError::unprocessable("image sources exceed 512 MiB"));
+            }
+            sources.push(Some(
+                source_result(
+                    &state,
+                    token,
+                    state.registry.sources.read_mesh(&scene, mesh, true).await,
+                )?
+                .bytes,
+            ));
+        } else {
+            sources.push(None);
+        }
     }
     let renderer = state
         .renderer
         .as_ref()
         .ok_or_else(|| AppError::unavailable("Image renderer unavailable"))?;
-    let bytes = renderer.render(&scene).await.map_err(|error| {
+    let bytes = renderer.render(&scene, sources).await.map_err(|error| {
         tracing::warn!(%error, "image render failed");
         AppError::unprocessable("Image render failed")
     })?;
-    if scene.validate().await.is_err() {
-        mark_scene_gone(&state, token);
-        return Err(SceneGone.into());
-    }
+    source_result(&state, token, state.registry.sources.validate(&scene).await)?;
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
@@ -975,7 +1010,8 @@ fn owner_matches(headers: &HeaderMap, state: &AppState, opened: &OpenedScene) ->
 }
 
 fn same_sources(a: &SceneDescriptor, b: &SceneDescriptor) -> bool {
-    a.meshes.len() == b.meshes.len()
+    a.source.as_ref().map(|s| &s.id) == b.source.as_ref().map(|s| &s.id)
+        && a.meshes.len() == b.meshes.len()
         && a.meshes
             .iter()
             .zip(&b.meshes)
@@ -1200,10 +1236,11 @@ async fn resolved_scene(
     peer: IpAddr,
 ) -> Result<OpenedScene, AppError> {
     let opened = open_scene(state, token, peer)?;
-    if opened.scene.validate().await.is_err() {
-        mark_scene_gone(state, token);
-        return Err(SceneGone.into());
-    }
+    source_result(
+        state,
+        token,
+        state.registry.sources.validate(&opened.scene).await,
+    )?;
     Ok(opened)
 }
 
@@ -1292,6 +1329,19 @@ mod tests {
     }
 
     #[test]
+    fn local_control_preserves_listen_address_family() {
+        let mut config = test_config(None);
+        for (listen, expected) in [
+            ("[::1]:7400", "[::1]:7400"),
+            ("[::]:7400", "[::1]:7400"),
+            ("0.0.0.0:7400", "127.0.0.1:7400"),
+        ] {
+            config.listen = listen.into();
+            assert_eq!(control_address(&config).unwrap().to_string(), expected);
+        }
+    }
+
+    #[test]
     fn share_origin_must_be_current_or_discovered() {
         let config = test_config(None);
         let hosts = vec![host("http://100.100.100.100:7400")];
@@ -1342,4 +1392,222 @@ mod tests {
             .is_err()
         );
     }
+}
+
+fn source_result<T>(
+    state: &AppState,
+    token: &str,
+    result: Result<T, SourceError>,
+) -> Result<T, AppError> {
+    result.map_err(|error| match error {
+        SourceError::Gone => {
+            mark_scene_gone(state, token);
+            AppError::gone("Scene source changed, was deleted, or was revoked")
+        }
+        SourceError::Unavailable(reason) => {
+            tracing::warn!(%reason,"source unavailable");
+            AppError::unavailable(
+                "Source host is temporarily unavailable; retry after it reconnects",
+            )
+        }
+        SourceError::TooLarge => AppError::unprocessable("Source exceeds the 512 MiB file limit"),
+    })
+}
+fn client_auth(state: &AppState, headers: &HeaderMap, pending: bool) -> Result<Source, AppError> {
+    let credential =
+        bearer(headers).ok_or_else(|| AppError::unauthorized("Client credential required"))?;
+    state
+        .registry
+        .sources
+        .authenticate(credential, pending)
+        .map_err(|_| AppError::unauthorized("Client registration is invalid, expired or revoked"))
+}
+async fn join_client(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(mut request): Json<JoinRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let token = bearer(&headers)
+        .ok_or_else(|| AppError::unauthorized("invitation required"))?
+        .to_owned();
+    if request.host.is_empty() {
+        request.host = peer.ip().to_string();
+    }
+    let sources = state.registry.sources.clone();
+    let result = tokio::task::spawn_blocking(move || sources.begin(&token, request))
+        .await
+        .map_err(|e| AppError::internal(&e.to_string()))?
+        .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    Ok((no_store(), Json(result)))
+}
+async fn client_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    Ok((no_store(), Json(client_auth(&state, &headers, true)?)))
+}
+async fn activate_client(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<FinishRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let source = client_auth(&state, &headers, true)?;
+    if source.active {
+        return Ok((no_store(), Json(source)));
+    }
+    let source = state
+        .registry
+        .sources
+        .finish(source, request)
+        .await
+        .map_err(|e| AppError::bad_request(&format!("SFTP registration failed: {e}")))?;
+    Ok((no_store(), Json(source)))
+}
+async fn revoke_client(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let source = client_auth(&state, &headers, true)?;
+    state.registry.sources.revoke(&source.id)?;
+    Ok((no_store(), Json(serde_json::json!({"revoked":true}))))
+}
+#[derive(Deserialize)]
+struct LocalRequest {
+    name: String,
+    host: String,
+    user: String,
+}
+async fn local_client(
+    State(state): State<AppState>,
+    _pat: PatAuth,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(request): Json<LocalRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    if !peer.ip().is_loopback() {
+        return Err(AppError::unauthorized(
+            "local registration requires loopback and the server owner's PAT",
+        ));
+    }
+    let (user, host) = crate::client::local_identity()?;
+    if request.user != user || request.host != host {
+        return Err(AppError::bad_request(
+            "local registration requires the same OS user and filesystem; use SFTP for another user or a container host",
+        ));
+    }
+    let result = state
+        .registry
+        .sources
+        .local(request.name, request.host, request.user)?;
+    Ok((no_store(), Json(result)))
+}
+async fn client_scene(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSceneRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let source = client_auth(&state, &headers, false)?;
+    if request.paths.is_empty() || request.paths.len() > 64 {
+        return Err(AppError::bad_request("a scene needs 1–64 files"));
+    }
+    let source_ref = source.scene_source();
+    let mut meshes = Vec::new();
+    for (i, path) in request.paths.iter().enumerate() {
+        let observed = state
+            .registry
+            .sources
+            .observe(Some(&source_ref), path, false)
+            .await
+            .map_err(|e| match e {
+                SourceError::Gone => AppError::bad_request("Source file not found"),
+                SourceError::TooLarge => AppError::unprocessable("Source exceeds 512 MiB"),
+                SourceError::Unavailable(_) => AppError::unavailable(
+                    "Could not read source; check address, SSH permissions and host identity",
+                ),
+            })?;
+        let path = PathBuf::from(&observed.path);
+        let format = MeshFormat::from_path(&path)?;
+        meshes.push(crate::scene::MeshRef {
+            path: observed.path.clone(),
+            name: path
+                .file_name()
+                .context("missing filename")?
+                .to_string_lossy()
+                .into_owned(),
+            format,
+            revision: observed.revision,
+            byte_size: observed.size,
+            color: crate::scene::PALETTE[i % crate::scene::PALETTE.len()].into(),
+            opacity: 1.0,
+            visible: true,
+            quality: MeshQuality::Lod,
+            label: None,
+        });
+    }
+    let title = request.title.unwrap_or_else(|| {
+        if meshes.len() == 1 {
+            meshes[0].name.clone()
+        } else {
+            format!("{} Meshes", meshes.len())
+        }
+    });
+    let mut scene = SceneDescriptor {
+        source: Some(source_ref),
+        schema: 2,
+        title,
+        created_at: crate::source::now() as u64,
+        meshes,
+        state: Default::default(),
+    };
+    if let Some(labels) = request.labels {
+        scene
+            .set_labels(labels)
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    }
+    // Server configuration/request origin selects the public endpoint; source addresses never form URLs.
+    let origin = match request.origin {
+        Some(origin) => state.config.normalize_share_origin(&origin)?,
+        None => {
+            if let Some(origin) = &state.config.preferred_origin {
+                state.config.origin_with_base(origin)
+            } else if source.local {
+                discover(
+                    state.config.port()?,
+                    None,
+                    state.config.base_path().as_deref(),
+                )?
+                .first()
+                .context("no server origin")?
+                .origin
+                .clone()
+            } else {
+                request_origin(&headers, &state.config)?
+            }
+        }
+    };
+    let links = if request.stateless {
+        stateless_links_for(&state.codec, &scene, &origin, true)?
+    } else {
+        links_for(&state.registry, &scene, &origin, true)?
+    };
+    let hosts = discover(
+        state.config.port()?,
+        state.config.preferred_origin.as_deref(),
+        state.config.base_path().as_deref(),
+    )?;
+    let mut response = serde_json::to_value(ShareResponse {
+        links,
+        origin,
+        hosts,
+    })
+    .map_err(anyhow::Error::from)?;
+    response["resources"] = serde_json::json!(
+        scene
+            .meshes
+            .iter()
+            .map(|m| serde_json::json!({"path":m.path,"revision":m.revision}))
+            .collect::<Vec<_>>()
+    );
+    response["source"] = serde_json::to_value(&scene.source).map_err(anyhow::Error::from)?;
+    Ok((no_store(), Json(response)))
 }

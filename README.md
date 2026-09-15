@@ -5,15 +5,19 @@
 [![macOS](https://img.shields.io/badge/platform-macOS-4b5563)](https://github.com/hx-w/blind#requirements)
 [![License: MIT](https://img.shields.io/github/license/hx-w/blind)](LICENSE)
 
-Instant mobile 3D review for Meshes and point clouds on your Mac.
+Instant mobile 3D review across your team's machines.
 
-Blind is one CLI binary that serves local PLY Meshes and point clouds, STL, OBJ,
-and Denta PTS files through a mobile-first 3D viewer. It discovers usable Host
-addresses, preserves camera and style state behind six-character links, and can
-render the same scene directly as a PNG. There is no on-disk Mesh copy or
-persistent render cache; a
-bounded local SQLite registry stores only encrypted scene descriptors, while
-derived review LODs live only in a bounded process-memory cache.
+`blind` is one executable with separate Client and Server responsibilities.
+On A, `blind serve` runs the viewer, source registry, LOD generation and PNG
+renderer. On B/C, `blind join` and `blind share` are short-lived Client commands;
+they do not start a background service. Supported files are PLY meshes and
+point clouds, STL, OBJ, and Denta PTS.
+
+Original files stay on their owning host. The server reads remote files through
+**read-only SFTP**, or reads directly when Client and Server share the same OS
+user and filesystem. It never persists original geometry or rendered images;
+only encrypted scene descriptors, registration metadata, and dedicated SSH keys
+are stored. Derived LODs use a bounded memory cache.
 
 ## Why Blind
 
@@ -29,70 +33,67 @@ scene and every view or image link for that scene immediately returns
 
 ## Install
 
-### Requirements
-
-- macOS 14 or newer
-- Apple Silicon or Intel
-
-Install the latest release:
+Install the same executable on A and B/C:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | sh
 ```
 
-Run the same command again to update. The installer selects the correct macOS
-binary, verifies it against the release checksum, and replaces the existing
-installation atomically. It never invokes `sudo`. To inspect before running:
+`blind update` updates that executable and reconciles its macOS LaunchAgent
+when one is installed. `BLIND_VERSION` and `BLIND_INSTALL_DIR` select a version
+and installation directory. The installer never invokes sudo. Client/Server
+registration is available starting with v0.7.0.
 
-```sh
-curl -fsSLO https://raw.githubusercontent.com/hx-w/blind/main/install.sh
-less install.sh
-sh install.sh
-```
-
-After Blind is installed, update it in place with the same checksum and archive
-validation:
-
-```sh
-blind update
-```
-
-If the current Blind executable is running as the managed background service,
-Blind restarts it and verifies the new version after a successful update. A
-service using another Blind installation is left unchanged. Otherwise the
-update does not enable automatic startup.
-
-Optional controls:
-
-```sh
-# Install a specific release.
-curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | BLIND_VERSION=0.2.0 sh
-
-# Select an installation directory already on PATH.
-curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | BLIND_INSTALL_DIR="$HOME/.local/bin" sh
-```
+Prebuilt releases support macOS 14+ on Apple Silicon and Intel. Linux servers
+can be built and run with the [Docker instructions](docs/client-server.md).
 
 ## Quick start
 
+### Central server A
+
 ```sh
-# Start once. Repeating this is safe and exits successfully.
+blind init --host https://blind.example.com
 blind serve
-
-# Create one scene from one or more local Meshes.
-blind share crown.ply preparation.stl --format json
-
-# Vertex-only PLY files are detected and rendered as point clouds.
-blind share scan-cloud.ply --format view
-
-# Mix a Mesh with a Denta ordered point ring.
-blind share cropped_jaw.ply marginline.pts --format view
-
-# Optional: emit a long self-contained link without using the registry.
-blind share crown.ply --stateless --format view
-
-# Stop a manually started server.
-blind stop
+# In another terminal, issue one invitation for each user (valid for 10 minutes).
+blind invite --host https://blind.example.com
 ```
+
+Point your HTTPS reverse proxy at the server. Keep its configured public origin
+on A; generated URLs never use the source machine's SFTP address.
+
+### Remote Client B/C
+
+Enable the OS OpenSSH/SFTP service once. On macOS: **System Settings → General →
+Sharing → Remote Login**, allowing the current user. Then:
+
+```sh
+# Paste the invitation through stdin; do not put it in shell history.
+blind join --stdin --address workstation.local --name carol
+# Finish stdin with Ctrl-D. The address must be reachable from A.
+blind share crown.ply preparation.stl --label '1=Crown' --format json
+blind status
+```
+
+The Client installs a dedicated, forced read-only SFTP public key in this user's
+`authorized_keys`; it never uploads a personal private key. Registration tests
+both host identity and read-only access. There is no Client daemon. Each OS user
+on B registers separately and uses an independent identity and key.
+
+### Client and Server on the same host
+
+```sh
+blind serve
+# In another terminal, under the same OS user:
+blind join --local
+blind share crown.ply --format json
+```
+
+SFTP is unnecessary in this case. The first `blind share` can register locally
+automatically if no Client registration exists. Different OS users, or a host
+Client accessing a containerized Server, use the remote SFTP flow.
+
+Use `--stateless` for a long self-contained link. See
+[registration, recovery and deployment](docs/client-server.md) for details.
 
 Open `owner_url` on your phone for your own review. Give other people
 `viewer_url` or `image_url`.
@@ -106,7 +107,7 @@ Top: reference crowns. Bottom: generated results.
 Review the cusps, grooves, and marginal ridges from the same view.' --format json
 ```
 
-Scene information is hidden by default. Open **ⓘ 信息** in the bottom toolbar
+Scene information includes the source hostname, OS user, and registration name by default. The panel is hidden by default. Open **ⓘ 信息** in the bottom toolbar
 to read it in a bottom sheet on phones or the side panel on desktop. Messages
 preserve line breaks and wrap long words. Long messages scroll without
 truncation, while the close control and Mesh statistics remain visible. The
@@ -177,6 +178,7 @@ The JSON result contains:
 - `image_url` renders a fresh PNG on each request.
 - `hosts` lists detected origins and marks the primary candidate.
 - `resources` gives the canonical source paths and revisions to the Agent.
+- `source` identifies the owning host, OS user, and registration name.
 
 A Skill is useful for teaching an Agent when to invoke Blind. An MCP adapter
 can wrap the CLI for clients that require tool discovery, but it should call
@@ -236,8 +238,8 @@ this distribution:
 - valid: the payload decrypts, has not expired, and every source revision still
   matches;
 - expired: the absolute seven-day lifetime has ended;
-- source gone: a source was deleted, moved, replaced, changed, or became
-  unreadable;
+- source gone: a source was deleted, moved, replaced, changed, or was revoked;
+- unavailable: the source host is offline, authentication fails, or access is temporarily denied; these links are retained by `--clean-invalid`;
 - tombstoned: Blind previously detected an invalid source;
 - corrupt: required fields or the encrypted payload cannot be read.
 
@@ -328,7 +330,7 @@ automatic copy after the browser confirms the clipboard write.
 
 ## Authentication and security
 
-The control API that creates scenes and lists Host interfaces requires a PAT.
+The Server control API requires its private PAT. Remote Clients use their own registration credentials for scene creation and cannot choose another user's source.
 Initialize and print it locally:
 
 ```sh

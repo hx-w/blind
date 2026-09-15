@@ -212,11 +212,17 @@ impl Renderer {
         })
     }
 
-    pub async fn render(&self, scene: &SceneDescriptor) -> Result<Vec<u8>> {
+    pub async fn render(
+        &self,
+        scene: &SceneDescriptor,
+        sources: Vec<Option<Vec<u8>>>,
+    ) -> Result<Vec<u8>> {
         let scene = scene.clone();
         let material = self.material.clone();
-        let geometry =
-            tokio::task::spawn_blocking(move || load_scene_geometry(&scene, &material)).await??;
+        let geometry = tokio::task::spawn_blocking(move || {
+            load_scene_geometry_bytes(&scene, &material, Some(&sources))
+        })
+        .await??;
         self.render_geometry(&geometry).await
     }
 
@@ -547,7 +553,16 @@ impl BatchGeometry {
     }
 }
 
+#[cfg(test)]
 fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Result<RenderInput> {
+    load_scene_geometry_bytes(scene, material, None)
+}
+
+fn load_scene_geometry_bytes(
+    scene: &SceneDescriptor,
+    material: &MatteShader,
+    sources: Option<&[Option<Vec<u8>>]>,
+) -> Result<RenderInput> {
     let visible: Vec<_> = scene
         .meshes
         .iter()
@@ -570,7 +585,15 @@ fn load_scene_geometry(scene: &SceneDescriptor, material: &MatteShader) -> Resul
         if source_bytes > MAX_RENDER_SOURCE_BYTES {
             bail!("image rendering supports at most 512 MiB of visible source data");
         }
-        let geometry = Geometry::load(Path::new(&mesh.path), mesh.format)?;
+        let geometry = match sources {
+            Some(data) => Geometry::from_bytes(
+                data.get(layer)
+                    .and_then(Option::as_deref)
+                    .context("missing verified source bytes")?,
+                mesh.format,
+            )?,
+            None => Geometry::load(Path::new(&mesh.path), mesh.format)?,
+        };
         triangles = triangles
             .checked_add(geometry.indices.len() / 3)
             .context("triangle count overflow")?;
@@ -1040,7 +1063,17 @@ mod tests {
             }
         }
 
-        let png = Renderer::new().await.unwrap().render(&scene).await.unwrap();
+        let sources = scene
+            .meshes
+            .iter()
+            .map(|m| Some(std::fs::read(&m.path).unwrap()))
+            .collect();
+        let png = Renderer::new()
+            .await
+            .unwrap()
+            .render(&scene, sources)
+            .await
+            .unwrap();
         let image = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
         assert_eq!((image.width(), image.height()), (64, 64));
     }

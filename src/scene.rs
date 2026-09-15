@@ -18,6 +18,8 @@ pub const MAX_MESH_LABEL_CHARS: usize = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<crate::source::SceneSource>,
     pub schema: u8,
     pub title: String,
     pub created_at: u64,
@@ -239,6 +241,7 @@ impl SceneDescriptor {
             }
         });
         Ok(Self {
+            source: None,
             schema: 2,
             title,
             created_at: SystemTime::now()
@@ -318,7 +321,14 @@ impl SceneDescriptor {
             .map(|mesh| format!("- {}", mesh.path))
             .collect::<Vec<_>>()
             .join("\n");
-        format!("Blind scene\n\nMeshes:\n{paths}\n\nView:\n{viewer_url}\n\nImage:\n{image_url}")
+        let source = self
+            .source
+            .as_ref()
+            .map(|s| format!("\nSource: {}@{} ({})\n", s.user, s.host, s.name))
+            .unwrap_or_default();
+        format!(
+            "Blind scene\n{source}\nMeshes:\n{paths}\n\nView:\n{viewer_url}\n\nImage:\n{image_url}"
+        )
     }
 }
 

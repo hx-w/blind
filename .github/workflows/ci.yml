@@ -38,7 +38,10 @@ jobs:
       - name: Verify CLI
         run: |
           ./target/release/blind --version
+          ./target/release/blind join --help
           ./target/release/blind --help
           ./target/release/blind doctor --help
           ./target/release/blind share --help
           ./target/release/blind update --help
+      - name: Verify Client and read-only SFTP
+        run: python3 tests/integration_sftp.py target/release

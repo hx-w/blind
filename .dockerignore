@@ -1,0 +1,6 @@
+**
+!deploy/
+!deploy/Dockerfile
+!target/
+!target/release/
+!target/release/blind

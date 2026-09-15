@@ -135,11 +135,15 @@ pub fn target_primitives(mesh_count: usize) -> usize {
 }
 
 pub fn build(path: &Path, format: MeshFormat, target_primitives: usize) -> Result<LodAsset> {
+    build_bytes(&fs::read(path)?, format, target_primitives)
+}
+
+pub fn build_bytes(bytes: &[u8], format: MeshFormat, target_primitives: usize) -> Result<LodAsset> {
     let (raw_bytes, geometry) = if format == MeshFormat::Pts {
-        mesh::pts_raw_size_and_lod_geometry(&fs::read(path)?)?
+        mesh::pts_raw_size_and_lod_geometry(bytes)?
     } else {
-        let raw_bytes = fs::metadata(path)?.len() as usize;
-        (raw_bytes, Geometry::load(path, format)?)
+        let raw_bytes = bytes.len();
+        (raw_bytes, Geometry::from_bytes(bytes, format)?)
     };
     // Both feeds already reject non-finite coordinates: Geometry::load scans
     // PLY/STL/OBJ, and the PTS parser skips non-finite points per line.
@@ -339,7 +343,13 @@ mod tests {
 
     #[test]
     fn non_finite_vertices_are_rejected_before_simplification() {
-        let source = b"ply\nformat ascii 1.0\nelement vertex 3\nproperty float x\nproperty float y\nproperty float z\nelement face 1\nproperty list uchar uint vertex_indices\nend_header\n0 0 0\nnan 0 0\n0 1 0\n3 0 1 2\n";
+        // Binary NaN reaches geometry validation; the ASCII PLY grammar itself rejects "nan".
+        let source = Geometry {
+            positions: vec![[0., 0., 0.], [f32::NAN, 0., 0.], [0., 1., 0.]],
+            indices: vec![0, 1, 2],
+        }
+        .to_binary_ply()
+        .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("non-finite.ply");
         std::fs::write(&path, source).unwrap();

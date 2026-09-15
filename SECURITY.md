@@ -22,3 +22,24 @@ secrets with per-client invalid-code rate limiting and a seven-day absolute
 lifetime. They are intended for trusted private networks, not as a replacement
 for internet-facing authentication. Use `blind share --stateless` only when a
 long self-contained capability is preferable.
+
+## Remote sources
+
+The Server creates an independent SSH private key for each registered source;
+users never upload their personal private keys. The Client installs the public
+key under its current OS account, forced to `sftp-server -R` with `restrict`:
+no write operations, shell, PTY or forwarding. Registration pins the SSH host
+key, verifies a challenge file, and rejects writable access. Host-key changes
+cause temporary failures until registration is explicitly repaired.
+
+This grants the Server read access to files accessible to that OS account;
+it is not a directory sandbox. Use separate OS accounts and filesystem access
+controls when different users must have different read boundaries. A Client's
+API credential can register scenes only against its own source ID. Invitation
+tokens are one-use and expire after ten minutes. Source credentials are stored
+hashed on A; dedicated private keys are stored with restrictive permissions.
+
+Viewer metadata intentionally includes source host, OS user and display name.
+Absolute source paths still require the owner capability. Source bytes are
+processed in memory; reverse proxies must also disable response buffering to
+disk, as in `deploy/nginx.conf`.

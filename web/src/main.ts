@@ -115,7 +115,7 @@ async function start(): Promise<void> {
   try {
     startLongLoadHint();
     scene = await loadScene(token, owner);
-    title.textContent = scene.title;
+    title.textContent = scene.source ? `${scene.title}\n\n来源主机：${scene.source.host}\n用户：${scene.source.user} · ${scene.source.name}` : scene.title;
     startLongLoadHint();
     await meshViewer.load(scene);
     markup.load(scene.state.strokes ?? []);

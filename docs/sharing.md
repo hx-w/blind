@@ -17,6 +17,7 @@ The encrypted descriptor contains:
 
 - Schema version, title, and creation time.
 - Canonical source path, format, byte size, and SHA-256 revision for every Mesh.
+- Registered source ID, hostname, OS user and display name (optional for legacy local scenes).
 - Visibility, selected Mesh, color, and opacity.
 - An optional label per Mesh: `{"text":"供体 A","anchor":[0,1,2]}`.
   Text is limited to 120 characters; the optional anchor is a finite world-space
@@ -32,7 +33,7 @@ The registry payload never contains a PAT or Mesh bytes. XChaCha20-Poly1305 encr
 
 ## Public and owner capabilities
 
-The public scene code can read the exact source revisions and create another public snapshot with a changed camera or style. Public scene responses expose file names but not absolute paths.
+The public scene code can read the exact source revisions and create another public snapshot with a changed camera or style. Public scene responses expose file names and source host/user attribution, but not absolute paths or SSH/API credentials.
 
 An independent six-character owner secret is placed in the URL fragment of `owner_url`. The browser stores it only for the current session and removes it from the visible URL. Public links copied from the share sheet never contain this capability. It authorizes the Complete information option, which copies canonical source paths plus the view and image links.
 
@@ -60,10 +61,10 @@ snapshot; the original link is unchanged.
 
 ## Lifecycle
 
-1. `blind share` canonicalizes every source path and calculates SHA-256.
+1. The registered Client submits file paths. The Server canonicalizes and hashes the source through read-only SFTP, or the local filesystem for a same-user local registration.
 2. The daemon encrypts the compact descriptor and registers a random six-character public code plus an independent owner secret. It stores no Mesh copy.
 3. Every viewer, metadata, Mesh, reshare, and image request re-reads and verifies every source.
-4. If one Mesh is deleted, modified, replaced, moved, or unreadable, the whole scene returns `410 Gone`.
+4. A confirmed deletion, revision change or source revocation returns `410 Gone`. An offline host, timeout, host-key mismatch or denied access returns `503 Service Unavailable` without tombstoning the scene. Doctor retains temporarily unavailable scenes.
 5. A link expires absolutely seven days after its first registration. Registering an identical active scene reuses its code and does not extend that lifetime.
 6. The registry permits 10,000 active scenes and at most 12,000 total rows. Expired and invalid tombstones are pruned and SQLite reuses released pages.
 7. Restarting the server does not invalidate active links because the registry and scene key persist in the user configuration.
@@ -99,3 +100,7 @@ blind share crown.ply preparation.stl --format json
 ```
 
 An MCP adapter should call this contract rather than duplicate resource or lifecycle logic. A Skill can teach when to call it, but should not contain a separate sharing implementation.
+
+## Registration API
+
+See [Client/Server operation](client-server.md) for invitation onboarding, per-user authorization, address selection, and deployment. Registered scene creation uses `POST /api/v1/client/scenes` with its own bearer credential; the source always comes from that credential. The old PAT-protected local creation endpoint remains for compatibility. Existing descriptors without a source ID continue to refer to local server files.
