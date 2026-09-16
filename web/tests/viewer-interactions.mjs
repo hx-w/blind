@@ -42,8 +42,23 @@ before(async () => {
 });
 after(async () => { await browser?.close(); server?.closeAllConnections(); await new Promise(resolve => server ? server.close(resolve) : resolve()); });
 
-async function openPage(viewport) {
+async function openPage(viewport, markupResizeDelay = 0) {
   const page = await browser.newPage({viewport, deviceScaleFactor: 2});
+  if (markupResizeDelay) await page.addInitScript(delay => {
+    const NativeResizeObserver = window.ResizeObserver;
+    window.ResizeObserver = class extends NativeResizeObserver {
+      constructor(callback) {
+        super((entries, observer) => {
+          if (entries.some(entry => entry.target.id === 'viewer')) {
+            setTimeout(() => {
+              callback(entries, observer);
+              window.delayedMarkupResizeDelivered = true;
+            }, delay);
+          } else callback(entries, observer);
+        });
+      }
+    };
+  }, markupResizeDelay);
   await page.addInitScript(() => {
     window.paintEvents = []; window.paintFrame = 0;
     const frame = () => { window.paintFrame++; requestAnimationFrame(frame); }; requestAnimationFrame(frame);
@@ -69,6 +84,23 @@ async function eventsDuring(page, action) {
   await action(); await page.waitForTimeout(300);
   return page.evaluate(() => window.paintEvents);
 }
+async function viewportResizeEvents(page, viewport) {
+  return eventsDuring(page, async () => {
+    await page.setViewportSize(viewport);
+    // ResizeObserver and its scheduled paint can exceed a fixed delay on CI.
+    // Still fail on a missing resize; the assertions below check same-frame paint.
+    await page.waitForFunction(() => ['mesh','markup'].every(target =>
+      window.paintEvents.some(event => event.target === target && event.type === 'resize')
+    ), null, {timeout:10_000});
+  });
+}
+function assertViewportResized(events) {
+  for (const target of ['mesh','markup']) {
+    const resizes = events.filter(e=>e.type==='resize' && e.target===target);
+    assert.ok(resizes.length > 0, `real viewport resize must resize ${target}`);
+    for (const resize of resizes) assert.ok(events.some(e=>e.target===target && e.type==='render' && e.frame===resize.frame), `${target} buffer cleared without repainting in the same frame`);
+  }
+}
 
 for (const viewport of [{width:1280,height:800},{width:390,height:844},{width:320,height:700},{width:740,height:420}]) {
   test(`toolbars preserve the scene canvas at ${viewport.width}×${viewport.height}`, async () => {
@@ -85,15 +117,19 @@ for (const viewport of [{width:1280,height:800},{width:390,height:844},{width:32
         await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/${viewport.width}x${viewport.height}.png`});
         await page.locator('#close-panel').click();
       }
-      const events = await eventsDuring(page, () => page.setViewportSize({width:viewport.width+40,height:viewport.height+30}));
-      for (const target of ['mesh','markup']) {
-        const resizes = events.filter(e=>e.type==='resize' && e.target===target);
-        assert.ok(resizes.length > 0, `real viewport resize must resize ${target}`);
-        for (const resize of resizes) assert.ok(events.some(e=>e.target===target && e.type==='render' && e.frame===resize.frame), `${target} buffer cleared without repainting in the same frame`);
-      }
+      assertViewportResized(await viewportResizeEvents(page, {width:viewport.width+40,height:viewport.height+30}));
     } finally { await page.close(); }
   });
 }
+
+test('viewport resize waits for a delayed markup observer', async () => {
+  const page = await openPage({width:1280,height:800}, 500);
+  try {
+    // Let the delayed initial notification finish before measuring the resize.
+    await page.waitForFunction(() => window.delayedMarkupResizeDelivered);
+    assertViewportResized(await viewportResizeEvents(page, {width:1320,height:830}));
+  } finally { await page.close(); }
+});
 
 test('visibility beside opacity preserves opacity, selection and shared state', async () => {
   const page = await openPage({width:390,height:844});
