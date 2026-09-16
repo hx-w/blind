@@ -516,6 +516,7 @@ impl UpdateLock {
         {
             let file = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .mode(0o600)
