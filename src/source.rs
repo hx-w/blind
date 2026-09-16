@@ -8,7 +8,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -145,15 +145,37 @@ pub struct Observed {
     pub revision: String,
     pub bytes: Vec<u8>,
 }
+
+fn ensure_invitations_schema(db: &mut Connection) -> Result<()> {
+    let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let columns = {
+        let mut statement = transaction.prepare("PRAGMA table_info(invitations)")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    if columns != ["hash", "created"] {
+        transaction.execute_batch(
+            "DROP TABLE IF EXISTS invitations;
+             CREATE TABLE invitations (
+                 hash TEXT PRIMARY KEY,
+                 created INTEGER NOT NULL
+             );",
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 impl Sources {
     pub fn open(dir: &Path) -> Result<Self> {
         fs::create_dir_all(dir)?;
         private_dir(&dir.join("source-keys"))?;
         let path = dir.join("sources.sqlite3");
-        let db = Connection::open(&path)?;
+        let mut db = Connection::open(&path)?;
         db.busy_timeout(Duration::from_secs(5))?;
-        db.execute_batch("CREATE TABLE IF NOT EXISTS invitations (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
-            CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, record TEXT NOT NULL, challenge TEXT NOT NULL, expires INTEGER NOT NULL);")?;
+        ensure_invitations_schema(&mut db)?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, record TEXT NOT NULL, challenge TEXT NOT NULL, expires INTEGER NOT NULL);")?;
         private_file(&path)?;
         Ok(Self {
             pool: Default::default(),
@@ -168,16 +190,23 @@ impl Sources {
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("source registry poisoned"))?;
-        db.execute("DELETE FROM invitations WHERE expires < ?1", [now()])?;
         let count: i64 = db.query_row("SELECT count(*) FROM invitations", [], |r| r.get(0))?;
         if count >= 128 {
-            bail!("too many pending invitations");
+            bail!("too many active invitations; revoke unused invitations first");
         }
         db.execute(
             "INSERT INTO invitations VALUES (?1,?2)",
-            params![hash_bytes(token.as_bytes()), now() + 600],
+            params![hash_bytes(token.as_bytes()), now()],
         )?;
         Ok(Invitation { server, token })
+    }
+
+    pub fn revoke_invitations(&self) -> Result<usize> {
+        let db = self
+            .db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source registry poisoned"))?;
+        Ok(db.execute("DELETE FROM invitations", [])?)
     }
     pub fn begin(&self, invite: &str, req: JoinRequest) -> Result<JoinResponse> {
         validate_label(&req.name)?;
@@ -212,12 +241,13 @@ impl Sources {
             .lock()
             .map_err(|_| anyhow::anyhow!("source registry poisoned"))?;
         let tx = db.transaction()?;
-        if tx.execute(
-            "DELETE FROM invitations WHERE hash=?1 AND expires>=?2",
-            params![hash_bytes(invite.as_bytes()), now()],
-        )? != 1
-        {
-            bail!("invitation invalid, expired, or already used");
+        let valid: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM invitations WHERE hash=?1)",
+            [hash_bytes(invite.as_bytes())],
+            |row| row.get(0),
+        )?;
+        if !valid {
+            bail!("invitation invalid or revoked");
         }
         let count: i64 = tx.query_row("SELECT count(*) FROM sources", [], |r| r.get(0))?;
         if count >= 1024 {
@@ -829,7 +859,7 @@ mod tests {
         assert!(sources.get(&remote.id).is_ok());
     }
     #[test]
-    fn invitation_one_use_and_pending_credentials_cannot_share() {
+    fn invitation_is_permanent_reusable_and_pending_credentials_cannot_share() {
         let dir = tempfile::tempdir().unwrap();
         let sources = Sources::open(dir.path()).unwrap();
         let invite = sources.invite("http://server:7400".into()).unwrap();
@@ -842,9 +872,10 @@ mod tests {
             host_key: STANDARD.encode([0u8; 64]),
         };
         let receipt = sources.begin(&invite.token, req()).unwrap();
-        assert!(sources.begin(&invite.token, req()).is_err());
+        let second = sources.begin(&invite.token, req()).unwrap();
         assert!(sources.authenticate(&receipt.credential, false).is_err());
         assert!(sources.authenticate(&receipt.credential, true).is_ok());
+        assert!(sources.authenticate(&second.credential, true).is_ok());
         assert!(!receipt.public_key.contains("PRIVATE"));
         let stored = fs::read(dir.path().join("sources.sqlite3")).unwrap();
         assert!(
@@ -852,6 +883,44 @@ mod tests {
                 .windows(receipt.credential.len())
                 .any(|w| w == receipt.credential.as_bytes())
         );
+    }
+
+    #[test]
+    fn invitations_can_be_revoked_and_legacy_temporary_tokens_are_invalidated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sources.sqlite3");
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(
+            "CREATE TABLE invitations (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL);
+             INSERT INTO invitations VALUES ('legacy', 4102444800);",
+        )
+        .unwrap();
+        drop(db);
+
+        let sources = Sources::open(dir.path()).unwrap();
+        let columns: Vec<String> = sources
+            .db
+            .lock()
+            .unwrap()
+            .prepare("PRAGMA table_info(invitations)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(columns, ["hash", "created"]);
+
+        let invitation = sources.invite("http://server:7400".into()).unwrap();
+        assert_eq!(sources.revoke_invitations().unwrap(), 1);
+        let request = JoinRequest {
+            name: "user@B".into(),
+            host: "127.0.0.1".into(),
+            hostname: "B".into(),
+            port: 22,
+            user: "user".into(),
+            host_key: STANDARD.encode([0u8; 64]),
+        };
+        assert!(sources.begin(&invitation.token, request).is_err());
     }
     #[cfg(unix)]
     #[test]

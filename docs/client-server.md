@@ -17,7 +17,9 @@ on cache hits, so cached LODs cannot bypass revocation or source changes.
 ## Registration
 
 1. A runs `blind invite --host https://blind.example.com`. The result is
-   a one-use, ten-minute invitation. Deliver it privately to the intended user.
+   a permanent reusable invitation. Keep it inside the trusted team. Run
+   `blind invite --revoke-all` to invalidate every previously issued invitation
+   before distributing a replacement.
 2. On B, enable the OS SSH/SFTP service and allow the current OS account.
    Run `blind join --stdin --address b.example.com --name carol`, paste the
    invitation, then finish stdin. `--port` defaults to 22. Without `--address`,
@@ -56,9 +58,9 @@ and user identity are separate from the host's.
 ## Recovery and revocation
 
 - A pending registration can be resumed with `blind join`; an incorrect route
-  can be corrected with `blind join --address b.example.com --port 22` before
-  the ten-minute invitation window expires.
-- After expiry, run `blind leave`, request a fresh invitation and join again.
+  can be corrected with `blind join --address b.example.com --port 22`.
+- If the invitation was revoked, run `blind leave`, request the current
+  invitation and join again.
 - `blind status --json` reports this user's registration without credentials.
 - `blind leave` removes only this registration's managed authorized-key line,
   revokes the registration, and removes local Client state. If A is offline,
@@ -66,6 +68,8 @@ and user identity are separate from the host's.
 - A can list and revoke sources with `blind sources` and
   `blind sources --revoke SOURCE_ID`. Other registrations keep working.
   B can then run `blind leave` to remove its now-unused public-key line.
+- Revoking invitations does not revoke already registered sources or their
+  existing links. Revoke those sources separately when access must be removed.
 - To change an active registration's address or server, leave and join again;
   its old links are revoked. Prefer a stable, server-resolvable DNS name.
 - Temporarily offline hosts, authentication errors and permission failures

@@ -36,7 +36,9 @@ This grants the Server read access to files accessible to that OS account;
 it is not a directory sandbox. Use separate OS accounts and filesystem access
 controls when different users must have different read boundaries. A Client's
 API credential can register scenes only against its own source ID. Invitation
-tokens are one-use and expire after ten minutes. Source credentials are stored
+tokens are permanent and reusable, so they must stay inside the trusted team;
+`blind invite --revoke-all` invalidates every issued invitation without
+affecting registered sources. Invitation and source credentials are stored
 hashed on A; dedicated private keys are stored with restrictive permissions.
 
 Viewer metadata intentionally includes source host, OS user and display name.

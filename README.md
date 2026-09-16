@@ -56,8 +56,10 @@ x86_64 Linux servers. Docker remains optional; see the
 ```sh
 blind init --host https://blind.example.com
 blind serve
-# In another terminal, issue one invitation for each user (valid for 10 minutes).
+# In another terminal, issue one permanent reusable invitation for the team.
 blind invite --host https://blind.example.com
+# Revoke every issued invitation when rotating a shared invitation.
+blind invite --revoke-all
 ```
 
 Point your HTTPS reverse proxy at the server. Keep its configured public origin

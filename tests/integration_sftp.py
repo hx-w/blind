@@ -126,14 +126,14 @@ LogLevel VERBOSE
         if ssh.poll() is not None:
             raise AssertionError('isolated sshd could not start: '+(tmp/'sshd.log').read_text())
 
+        invitation = run([BIN/'blind', 'invite', '--host', origin], env).strip()
+        import base64
+        envelope = json.loads(base64.urlsafe_b64decode(invitation[7:]+'='*(-len(invitation[7:])%4)))
+
         def register(name):
-            invitation = run([BIN/'blind', 'invite', '--host', origin], env).strip()
-            import base64
-            envelope = json.loads(base64.urlsafe_b64decode(invitation[7:]+'='*(-len(invitation[7:])%4)))
             request = {'name': name, 'host':'127.0.0.1', 'port':ssh_port, 'user':username, 'host_key':(tmp/'host_key.pub').read_text().split()[1]}
             status, receipt = api('/api/v1/clients/join', envelope['token'], request)
             assert status == 200, receipt
-            assert api('/api/v1/clients/join', envelope['token'], request)[0] != 200
             assert api('/api/v1/client/scenes', receipt['credential'], {'paths':[str(mesh)]})[0] == 401
             return receipt
 
@@ -150,7 +150,11 @@ LogLevel VERBOSE
             probe.write_text(receipt['challenge'])
             status, result = api('/api/v1/client/activate', receipt['credential'], {'challenge_path':str(probe),'host':'127.0.0.1','port':ssh_port})
             assert status == 200, result
-        print('PASS: one-use invitations, independent identities, writable-key rejection, verified read-only SFTP')
+        revoked = run([BIN/'blind', 'invite', '--revoke-all'], env).strip()
+        assert revoked == 'revoked 1 invitation(s)', revoked
+        request = {'name':'Revoked', 'host':'127.0.0.1', 'port':ssh_port, 'user':username, 'host_key':(tmp/'host_key.pub').read_text().split()[1]}
+        assert api('/api/v1/clients/join', envelope['token'], request)[0] != 200
+        print('PASS: reusable and revocable invitations, independent identities, writable-key rejection, verified read-only SFTP')
 
         status, output = api('/api/v1/client/scenes', a['credential'], {'paths':[str(mesh)], 'source_id':b['source']['id']})
         assert status == 200, output

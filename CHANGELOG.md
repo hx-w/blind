@@ -3,6 +3,15 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-09-16
+
+### Changed
+
+- Server invitations are now permanent and reusable for trusted-team
+  onboarding. `blind invite --revoke-all` rotates access without revoking
+  existing registered sources. Upgrading invalidates legacy temporary
+  invitations.
+
 ## [0.7.1] - 2026-09-16
 
 ### Added

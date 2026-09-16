@@ -11,10 +11,12 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Issue a one-use invitation valid for ten minutes.
+    /// Issue or revoke permanent reusable invitations.
     Invite {
         #[arg(long)]
         host: Option<String>,
+        #[arg(long, conflicts_with = "host", help = "Revoke every issued invitation")]
+        revoke_all: bool,
     },
     /// List registered OS-user sources or revoke one source.
     Sources {
@@ -108,7 +110,14 @@ pub async fn run(command: Command) -> Result<()> {
         )
         .init();
     match command {
-        Command::Invite { host } => {
+        Command::Invite { host, revoke_all } => {
+            let sources = crate::source::Sources::open(
+                config_path()?.parent().context("config parent missing")?,
+            )?;
+            if revoke_all {
+                println!("revoked {} invitation(s)", sources.revoke_invitations()?);
+                return Ok(());
+            }
             let (config, _) = Config::load_or_create()?;
             let origin = host
                 .or(config.preferred_origin.clone())
@@ -120,9 +129,6 @@ pub async fn run(command: Command) -> Result<()> {
                 })
                 .context("no server origin")?;
             let origin = config.normalize_share_origin(&origin)?;
-            let sources = crate::source::Sources::open(
-                config_path()?.parent().context("config parent missing")?,
-            )?;
             println!("{}", sources.invite(origin)?.encode()?);
         }
         Command::Sources { revoke } => {

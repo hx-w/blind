@@ -358,7 +358,7 @@ async fn finish_join(
         Err(error) => {
             remove_authorization(c)?;
             cleanup_challenge(c);
-            Err(error.context("registration remains pending; check SSH/SFTP, then retry blind join --address HOST within 10 minutes. If expired, run blind leave and request a new invitation"))
+            Err(error.context("registration remains pending; check SSH/SFTP, then retry blind join --address HOST. If the invitation was revoked, run blind leave and request a new invitation"))
         }
     }
 }
