@@ -7,9 +7,12 @@ All notable changes to Blind are documented here. This project follows
 
 ### Added
 
-- GitHub releases now include a verified `x86_64-unknown-linux-gnu` archive for
+- GitHub releases now include a verified `blind-linux-x86_64.tar.gz` archive for
   native Linux servers, including NAS deployments that do not build Blind or
   run the Blind server in Docker.
+- The installer, managed user service, and `blind update` flow now support
+  x86_64 Linux with checksum verification, atomic replacement, restart health
+  checks, and rollback behavior matching macOS.
 
 ## [0.7.0] - 2026-09-15
 

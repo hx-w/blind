@@ -39,13 +39,15 @@ Install the same executable on A and B/C:
 curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | sh
 ```
 
-`blind update` updates that executable and reconciles its macOS LaunchAgent
-when one is installed. `BLIND_VERSION` and `BLIND_INSTALL_DIR` select a version
-and installation directory. The installer never invokes sudo. Client/Server
-registration is available starting with v0.7.0.
+`blind update` updates that executable and restarts its managed macOS
+LaunchAgent or Linux systemd user service when one is installed.
+`BLIND_VERSION` and `BLIND_INSTALL_DIR` select a version and installation
+directory. The installer never invokes sudo. Client/Server registration is
+available starting with v0.7.0.
 
-Prebuilt releases support macOS 14+ on Apple Silicon and Intel. Linux servers
-can be built and run with the [Docker instructions](docs/client-server.md).
+Prebuilt releases support macOS 14+ on Apple Silicon and Intel, plus native
+x86_64 Linux servers. Docker remains optional; see the
+[Client/Server guide](docs/client-server.md).
 
 ## Quick start
 
@@ -140,8 +142,8 @@ blind service status
 ```
 
 Install the service as the logged-in user. Do not use `sudo`: Blind installs a
-per-user LaunchAgent and will reject root rather than target the wrong GUI
-login domain.
+per-user LaunchAgent on macOS or a systemd user service on Linux and rejects
+root rather than target the wrong user session.
 
 Remove the background service with `blind service uninstall`.
 

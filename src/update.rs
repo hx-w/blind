@@ -1,15 +1,16 @@
 use std::{
-    ffi::CStr,
     fs::{self, DirBuilder, File, OpenOptions},
     io::{Read, Write},
-    os::unix::{
-        ffi::OsStringExt,
-        fs::{DirBuilderExt, PermissionsExt},
-    },
+    os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     time::Duration,
 };
+
+#[cfg(target_os = "linux")]
+use std::os::unix::{fs::OpenOptionsExt, io::AsRawFd};
+#[cfg(target_os = "macos")]
+use std::{ffi::CStr, os::unix::ffi::OsStringExt};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
@@ -191,9 +192,14 @@ fn reject_root(uid: libc::uid_t) -> Result<()> {
 }
 
 fn release_target() -> Result<&'static str> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
+    release_target_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn release_target_for(os: &str, arch: &str) -> Result<&'static str> {
+    match (os, arch) {
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("linux", "x86_64") => Ok("linux-x86_64"),
         (os, arch) => bail!("Blind updates are not available for {os}/{arch}"),
     }
 }
@@ -477,7 +483,10 @@ impl ReleaseVersion {
 
 struct UpdateLock {
     path: PathBuf,
+    #[cfg(target_os = "macos")]
     pid: u32,
+    #[cfg(target_os = "linux")]
+    file: File,
 }
 
 impl UpdateLock {
@@ -486,30 +495,62 @@ impl UpdateLock {
             .parent()
             .context("Blind executable has no parent directory")?;
         let path = parent.join(".blind.update.lock");
-        let pid = std::process::id();
-        let output = Command::new("/usr/bin/shlock")
-            .args([
-                "-f",
-                path.to_string_lossy().as_ref(),
-                "-p",
-                &pid.to_string(),
-            ])
-            .output()
-            .context("could not run the macOS update lock helper")?;
-        if !output.status.success() {
-            bail!("another Blind install or update is already running");
+        #[cfg(target_os = "macos")]
+        {
+            let pid = std::process::id();
+            let output = Command::new("/usr/bin/shlock")
+                .args([
+                    "-f",
+                    path.to_string_lossy().as_ref(),
+                    "-p",
+                    &pid.to_string(),
+                ])
+                .output()
+                .context("could not run the macOS update lock helper")?;
+            if !output.status.success() {
+                bail!("another Blind install or update is already running");
+            }
+            Ok(Self { path, pid })
         }
-        Ok(Self { path, pid })
+        #[cfg(target_os = "linux")]
+        {
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .open(&path)
+                .context("could not open the Blind update lock")?;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            if result != 0 {
+                bail!("another Blind install or update is already running");
+            }
+            file.set_len(0)?;
+            let mut lock_contents = &file;
+            lock_contents.write_all(std::process::id().to_string().as_bytes())?;
+            file.sync_all()?;
+            Ok(Self { path, file })
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        bail!("Blind updates are not available on this operating system")
     }
 }
 
 impl Drop for UpdateLock {
     fn drop(&mut self) {
-        let owned = fs::read_to_string(&self.path)
-            .ok()
-            .and_then(|value| value.trim().parse::<u32>().ok())
-            == Some(self.pid);
-        if owned {
+        #[cfg(target_os = "macos")]
+        {
+            let owned = fs::read_to_string(&self.path)
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                == Some(self.pid);
+            if owned {
+                let _ = fs::remove_file(&self.path);
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -543,7 +584,7 @@ impl UpdateTempDir {
 fn safe_temp_parent() -> Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
 
-    let parent = darwin_user_temp_dir()?;
+    let parent = platform_temp_dir()?;
     let metadata = fs::metadata(&parent)
         .with_context(|| format!("could not inspect temporary directory {}", parent.display()))?;
     let mode = metadata.mode();
@@ -557,7 +598,8 @@ fn safe_temp_parent() -> Result<PathBuf> {
     Ok(parent)
 }
 
-fn darwin_user_temp_dir() -> Result<PathBuf> {
+#[cfg(target_os = "macos")]
+fn platform_temp_dir() -> Result<PathBuf> {
     const CS_DARWIN_USER_TEMP_DIR: libc::c_int = 65_537;
     let required = unsafe { libc::confstr(CS_DARWIN_USER_TEMP_DIR, std::ptr::null_mut(), 0) };
     if required == 0 {
@@ -580,6 +622,13 @@ fn darwin_user_temp_dir() -> Result<PathBuf> {
         .to_bytes()
         .to_vec();
     Ok(PathBuf::from(std::ffi::OsString::from_vec(path)))
+}
+
+#[cfg(target_os = "linux")]
+fn platform_temp_dir() -> Result<PathBuf> {
+    Ok(std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir))
 }
 
 fn temp_parent_is_safe(uid: u32, owner: u32, mode: u32, is_dir: bool) -> bool {
@@ -639,6 +688,19 @@ mod tests {
             expected_checksum(&manifest, "blind-x86_64-apple-darwin.tar.gz"),
             None
         );
+    }
+
+    #[test]
+    fn release_targets_keep_platform_asset_names_stable() {
+        assert_eq!(
+            release_target_for("macos", "aarch64").unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            release_target_for("linux", "x86_64").unwrap(),
+            "linux-x86_64"
+        );
+        assert!(release_target_for("linux", "aarch64").is_err());
     }
 
     #[test]

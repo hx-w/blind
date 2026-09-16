@@ -18,10 +18,13 @@ jobs:
         include:
           - runner: macos-15
             target: aarch64-apple-darwin
+            asset: aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            asset: x86_64-apple-darwin
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -73,11 +76,11 @@ jobs:
           mkdir package
           cp target/release/blind package/blind
           chmod 0755 package/blind
-          tar -C package -czf "blind-${{ matrix.target }}.tar.gz" blind
+          tar -C package -czf "blind-${{ matrix.asset }}.tar.gz" blind
       - uses: actions/upload-artifact@v7
         with:
-          name: blind-${{ matrix.target }}
-          path: blind-${{ matrix.target }}.tar.gz
+          name: blind-${{ matrix.asset }}
+          path: blind-${{ matrix.asset }}.tar.gz
           if-no-files-found: error
 
   publish:

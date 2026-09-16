@@ -4,15 +4,13 @@ set -eu
 repo="hx-w/blind"
 version="${BLIND_VERSION:-latest}"
 
-if [ "$(/usr/bin/uname -s)" != "Darwin" ]; then
-  echo "blind: only macOS is supported by this release" >&2
-  exit 1
-fi
-
-case "$(/usr/bin/uname -m)" in
-  arm64) target="aarch64-apple-darwin" ;;
-  x86_64) target="x86_64-apple-darwin" ;;
-  *) echo "blind: unsupported architecture: $(/usr/bin/uname -m)" >&2; exit 1 ;;
+platform="$(/usr/bin/uname -s)"
+architecture="$(/usr/bin/uname -m)"
+case "$platform:$architecture" in
+  Darwin:arm64) target="aarch64-apple-darwin" ;;
+  Darwin:x86_64) target="x86_64-apple-darwin" ;;
+  Linux:x86_64) target="linux-x86_64" ;;
+  *) echo "blind: unsupported platform: $platform/$architecture" >&2; exit 1 ;;
 esac
 
 if [ "$version" = "latest" ]; then
@@ -83,13 +81,22 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 lock_file="$install_dir/.blind.update.lock"
-if ! /usr/bin/shlock -f "$lock_file" -p "$$"; then
-  echo "blind: another install or update is already running" >&2
-  exit 1
+if [ "$platform" = "Darwin" ]; then
+  if ! /usr/bin/shlock -f "$lock_file" -p "$$"; then
+    echo "blind: another install or update is already running" >&2
+    exit 1
+  fi
+  lock_owned=1
+  temp_parent="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)"
+else
+  exec 9>"$lock_file"
+  if ! /usr/bin/flock -n 9; then
+    echo "blind: another install or update is already running" >&2
+    exit 1
+  fi
+  lock_owned=1
+  temp_parent="${XDG_RUNTIME_DIR:-/tmp}"
 fi
-lock_owned=1
-
-temp_parent="$(/usr/bin/getconf DARWIN_USER_TEMP_DIR)"
 temp_dir="$(/usr/bin/mktemp -d "$temp_parent/blind-install.XXXXXX")"
 
 echo "blind: downloading $asset"
@@ -101,7 +108,11 @@ echo "blind: downloading $asset"
   "$base_url/SHA256SUMS" -o "$temp_dir/SHA256SUMS"
 
 expected="$(/usr/bin/awk -v name="$asset" '$2 == name { print $1 }' "$temp_dir/SHA256SUMS")"
-actual="$(/usr/bin/shasum -a 256 "$temp_dir/$asset" | /usr/bin/awk '{ print $1 }')"
+if [ "$platform" = "Darwin" ]; then
+  actual="$(/usr/bin/shasum -a 256 "$temp_dir/$asset" | /usr/bin/awk '{ print $1 }')"
+else
+  actual="$(/usr/bin/sha256sum "$temp_dir/$asset" | /usr/bin/awk '{ print $1 }')"
+fi
 if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
   echo "blind: checksum verification failed" >&2
   exit 1

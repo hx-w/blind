@@ -78,11 +78,12 @@ and Server SSH keys use mode 0600; credential directories use mode 0700.
 
 ## Linux Server
 
-GitHub releases include a native `blind-x86_64-unknown-linux-gnu.tar.gz`
-archive. A Linux NAS can download that archive and `SHA256SUMS`, verify the
-archive, install the single `blind` binary, and supervise `blind serve` with
-its native service manager. The Linux Server uses an OS file lock. Automatic
-`service install` remains a macOS LaunchAgent feature.
+GitHub releases include a native `blind-linux-x86_64.tar.gz`
+archive. The installer verifies `SHA256SUMS` and installs the single `blind`
+binary. `blind service install` creates a systemd user service, and
+`blind update` downloads, verifies, atomically replaces, restarts and health
+checks future releases. The Linux Server uses native file locks; no Docker or
+source checkout is required.
 
 The Docker recipe remains available when process isolation is preferred:
 
