@@ -48,10 +48,16 @@ export interface MeshLabel {
   anchor?: [number, number, number];
 }
 
+export interface MeshLabelGroup {
+  text: string;
+  meshes: number[];
+}
+
 export interface PublicScene {
   source?: { id: string; name: string; host: string; user: string } | null;
   title: string;
   meshes: PublicMesh[];
+  label_groups: MeshLabelGroup[];
   state: ViewState;
   owner: boolean;
 }

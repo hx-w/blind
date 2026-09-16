@@ -15,6 +15,9 @@ use crate::{
 };
 
 const CACHE_BYTES: usize = 256 * 1024 * 1024;
+const SCENE_TARGET_PRIMITIVES: usize = 150_000;
+const MIN_MESH_PRIMITIVES: usize = 1;
+const MAX_MESH_PRIMITIVES: usize = 50_000;
 const TARGET_ERROR: f32 = 0.002;
 
 #[derive(Debug, Clone)]
@@ -131,7 +134,9 @@ impl LodCache {
 }
 
 pub fn target_primitives(mesh_count: usize) -> usize {
-    (150_000 / mesh_count.max(1)).clamp(2_000, 50_000)
+    SCENE_TARGET_PRIMITIVES
+        .div_ceil(mesh_count.max(1))
+        .clamp(MIN_MESH_PRIMITIVES, MAX_MESH_PRIMITIVES)
 }
 
 pub fn build(path: &Path, format: MeshFormat, target_primitives: usize) -> Result<LodAsset> {
@@ -163,7 +168,11 @@ pub fn build_bytes(bytes: &[u8], format: MeshFormat, target_primitives: usize) -
 fn simplify_geometry(mut geometry: Geometry, target_primitives: usize) -> Geometry {
     if geometry.is_point_cloud() {
         let target_points = target_primitives.min(geometry.positions.len());
-        if target_points >= geometry.positions.len() || target_points < 2 {
+        if target_points >= geometry.positions.len() {
+            return geometry;
+        }
+        if target_points == 1 {
+            geometry.positions.truncate(1);
             return geometry;
         }
         let last = geometry.positions.len() - 1;
@@ -187,6 +196,15 @@ fn simplify_geometry(mut geometry: Geometry, target_primitives: usize) -> Geomet
         meshopt::SimplifyOptions::None,
         Some(&mut error),
     );
+    if indices.len() < 3 || indices.len() > target_count {
+        indices = meshopt::simplify_sloppy_decoder(
+            &geometry.indices,
+            &geometry.positions,
+            target_count,
+            1.0,
+            Some(&mut error),
+        );
+    }
     if indices.len() < 3 {
         return geometry;
     }
@@ -231,7 +249,7 @@ mod tests {
         let source_triangles = source.indices.len() / 3;
         let lod = simplify_geometry(source, 2_000);
         assert!(lod.indices.len() / 3 < source_triangles);
-        assert!(lod.indices.len() / 3 <= 2_100);
+        assert!(lod.indices.len() / 3 <= 2_000);
         assert!(
             lod.indices
                 .iter()
@@ -258,11 +276,14 @@ mod tests {
             positions: (0..10_000).map(|index| [index as f32, 0.0, 0.0]).collect(),
             indices: Vec::new(),
         };
-        let lod = simplify_geometry(source, 2_000);
+        let lod = simplify_geometry(source.clone(), 2_000);
         assert!(lod.is_point_cloud());
         assert_eq!(lod.positions.len(), 2_000);
         assert_eq!(lod.positions.first(), Some(&[0.0, 0.0, 0.0]));
         assert_eq!(lod.positions.last(), Some(&[9_999.0, 0.0, 0.0]));
+
+        let minimal = simplify_geometry(source, 1);
+        assert_eq!(minimal.positions, [[0.0, 0.0, 0.0]]);
     }
 
     #[test]
@@ -338,7 +359,10 @@ mod tests {
         assert_eq!(target_primitives(3), 50_000);
         assert_eq!(target_primitives(6), 25_000);
         assert_eq!(target_primitives(30), 5_000);
-        assert_eq!(target_primitives(100), 2_000);
+        assert_eq!(target_primitives(100), 1_500);
+        assert_eq!(target_primitives(1_000), 150);
+        assert_eq!(target_primitives(10_000), 15);
+        assert_eq!(target_primitives(1_000_000), 1);
     }
 
     #[test]

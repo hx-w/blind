@@ -76,9 +76,22 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         else:
             raise AssertionError('server startup timed out')
 
+        assert api('/api/v1/health')[1]['scene_schema'] >= 3
+
         mesh = tmp/'tetra.ply'
         shutil.copyfile(ROOT/'tests/fixtures/tetra.ply', mesh)
-        output = json.loads(run([BIN/'blind', 'share', mesh, '--label', '1=Test mesh', '--format', 'json'], env))
+        mesh_pair = tmp/'tetra-pair.ply'
+        shutil.copyfile(ROOT/'tests/fixtures/tetra.ply', mesh_pair)
+        manifest = tmp/'scene.json'
+        manifest.write_text(json.dumps({
+            'title': 'Manifest scene',
+            'resources': [
+                {'path': mesh.name, 'label': 'Test mesh'},
+                {'path': mesh_pair.name},
+            ],
+            'groups': [{'label': 'Reference pair', 'members': [1, 2]}],
+        }))
+        output = json.loads(run([BIN/'blind', 'share', '--config', manifest, '--format', 'json'], env))
         assert output['viewer_url'].startswith(origin+'/s/')
         assert output['image_url'].startswith(origin+'/i/')
         assert len(output['viewer_url'].rsplit('/', 1)[1]) == 6
@@ -92,6 +105,8 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         status, scene = api('/api/v1/scenes/'+token)
         assert status == 200 and scene['source']['user'] == pwd.getpwuid(os.getuid()).pw_name
         assert 'path' not in scene['meshes'][0]
+        assert scene['meshes'][0]['label']['text'] == 'Test mesh'
+        assert scene['label_groups'] == [{'text':'Reference pair','meshes':[0,1]}]
         assert api('/api/v1/scenes/'+token+'/meshes/0/lod')[0] == 200
         assert api('/api/v1/scenes/'+token+'/meshes/0')[1] == mesh.read_bytes()
         if api('/api/v1/health')[1]['image_renderer']:
@@ -197,6 +212,8 @@ LogLevel VERBOSE
         assert status == 200, changed
         changed_token = changed['viewer_url'].rsplit('/', 1)[1]
         with oversized.open('r+b') as f: f.truncate(512*1024*1024+1)
+        assert api('/api/v1/scenes/'+changed_token)[0] == 200
+        assert api('/api/v1/scenes/'+changed_token+'/meshes/0/lod')[0] == 410
         assert api('/api/v1/scenes/'+changed_token)[0] == 410
         assert api('/api/v1/client/scenes', b['credential'], {'paths':[str(oversized)]})[0] == 422
         shutil.copyfile(mesh, oversized)
@@ -206,6 +223,8 @@ LogLevel VERBOSE
         mesh.write_bytes(mesh.read_bytes().replace(b'ply',b'PLy',1))
         local_token = json.loads(run([BIN/'blind','share',mesh,'--format','json'],env))['viewer_url'].rsplit('/',1)[1]
         mesh.unlink()
+        assert api('/api/v1/scenes/'+local_token)[0] == 200
+        assert api('/api/v1/scenes/'+local_token+'/meshes/0/lod')[0] == 410
         assert api('/api/v1/scenes/'+local_token)[0] == 410
         print('PASS: confirmed source deletion invalidates links')
         db.close()

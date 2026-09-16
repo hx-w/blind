@@ -22,6 +22,9 @@ The encrypted descriptor contains:
 - An optional label per Mesh: `{"text":"供体 A","anchor":[0,1,2]}`.
   Text is limited to 120 characters; the optional anchor is a finite world-space
   point. Omitting it attaches the label to the Mesh bounds center.
+- Optional labels spanning multiple Meshes: `{"text":"参考牙","meshes":[0,1]}`.
+  Mesh indices are zero-based in the descriptor and must contain at least two
+  unique, valid members.
 - Camera position, target, up vector, field of view, zoom, projection, and orthographic height.
 - Captured frame dimensions.
 - Surface mode, axes, and gray background mode.
@@ -51,6 +54,8 @@ their anchors into screen space and lays out readable text with a leader and
 attachment dot. Hidden Meshes and anchors outside the camera view hide their
 labels. Label placement adapts to the viewport and available space; text and
 world-space anchors are preserved in both registry and stateless scene records.
+Labels spanning multiple Meshes draw a low-obstruction corner frame around the
+visible members. Their label is selectable and fits the camera to the group.
 PNG rendering currently does not draw Mesh labels.
 
 For API clients, scene creation accepts an optional `labels` array parallel to
@@ -58,12 +63,36 @@ For API clients, scene creation accepts an optional `labels` array parallel to
 `label` field. In a share update, omit `label` to preserve it, send a label object
 to replace it, or send `null` to remove it. Editing and sharing creates a new
 snapshot; the original link is unchanged.
+Scene creation also accepts `label_groups`, an array of `{text, meshes}` objects.
+The CLI exposes both cases through one repeatable option: `--label '1=牙冠'`
+for one Mesh and `--label '1,2=参考牙'` for a group.
+
+For large resource sets, `blind share --config FILE` reads this strict schema:
+
+```json
+{
+  "title": "optional scene title",
+  "resources": [
+    { "path": "required/path.ply", "label": "optional per-Mesh label" }
+  ],
+  "groups": [
+    { "label": "group label", "members": [1, 2] }
+  ]
+}
+```
+
+`resources` is required and non-empty. `groups` is optional; unlike the
+encrypted descriptor, its `members` are 1-based to match CLI indices. Relative
+paths resolve from the config file directory. Unknown fields are errors.
 
 ## Lifecycle
 
 1. The registered Client submits file paths. The Server canonicalizes and hashes the source through read-only SFTP, or the local filesystem for a same-user local registration.
 2. The daemon encrypts the compact descriptor and registers a random six-character public code plus an independent owner secret. It stores no Mesh copy.
-3. Every viewer, metadata, Mesh, reshare, and image request re-reads and verifies every source.
+3. Viewer metadata and reshare requests verify that the registered source is
+   still active. A Raw or cold-LOD request reads and hashes only its target
+   Mesh. A cached LOD request checks the target's canonical path, size, and
+   modification time instead of scanning the whole scene.
 4. A confirmed deletion, revision change or source revocation returns `410 Gone`. An offline host, timeout, host-key mismatch or denied access returns `503 Service Unavailable` without tombstoning the scene. Doctor retains temporarily unavailable scenes.
 5. A link expires absolutely seven days after its first registration. Registering an identical active scene reuses its code and does not extend that lifetime.
 6. The registry permits 10,000 active scenes and at most 12,000 total rows. Expired and invalid tombstones are pruned and SQLite reuses released pages.
@@ -72,7 +101,11 @@ snapshot; the original link is unchanged.
    links, and `--clear-all` removes every short link without stopping the
    server.
 
-Blind never partially restores a scene because a surviving subset could misrepresent the review state. Unknown short-code requests are rate limited per client. `blind share --stateless` remains available for a long, self-contained `/v/` link that writes no registry row.
+The interactive viewer reports unavailable Meshes and retains successfully
+loaded ones, so one failed source does not throw away a large review scene.
+Unknown short-code requests are rate limited per client. `blind share
+--stateless` remains available for a long, self-contained `/v/` link that
+writes no registry row.
 
 ## Instant image rendering
 
@@ -88,7 +121,7 @@ The image route:
    the same display widths used by the browser.
 6. Encodes PNG in memory and releases request resources.
 
-The response uses `Cache-Control: no-store, max-age=0`. Blind writes no rendered image to disk and bounds concurrent renders with a semaphore. Interactive WebGL and offscreen WebGPU consume the same material parameters and lighting formula, with target-specific shader adapters. Visible sources for one image request are limited to 512 MiB, 2,000,000 triangles, and 2,000,000 point-cloud points. These limits apply only to the server-side PNG renderer; the interactive browser viewer remains independent.
+The response uses `Cache-Control: no-store, max-age=0`. Blind writes no rendered image to disk and bounds concurrent renders with a semaphore. Interactive WebGL and offscreen WebGPU consume the same material parameters and lighting formula, with target-specific shader adapters. Visible sources for one image request are limited to 512 MiB, 2,000,000 triangles, and 2,000,000 point-cloud points. The byte limit is checked before any visible source is read; after rendering, Blind rechecks metadata only for the visible inputs. These limits apply only to the server-side PNG renderer; the interactive browser viewer remains independent.
 
 ## Agent boundary
 

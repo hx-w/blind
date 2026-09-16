@@ -142,8 +142,16 @@ pub struct Sources {
 pub struct Observed {
     pub path: String,
     pub size: u64,
+    pub modified_ns: Option<u64>,
     pub revision: String,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum AccessMode {
+    Metadata,
+    Hash,
+    Bytes,
 }
 
 fn ensure_invitations_schema(db: &mut Connection) -> Result<()> {
@@ -456,6 +464,30 @@ impl Sources {
         path: &str,
         bytes: bool,
     ) -> std::result::Result<Observed, SourceError> {
+        self.access(
+            source,
+            path,
+            if bytes {
+                AccessMode::Bytes
+            } else {
+                AccessMode::Hash
+            },
+        )
+        .await
+    }
+    pub async fn metadata(
+        &self,
+        source: Option<&SceneSource>,
+        path: &str,
+    ) -> std::result::Result<Observed, SourceError> {
+        self.access(source, path, AccessMode::Metadata).await
+    }
+    async fn access(
+        &self,
+        source: Option<&SceneSource>,
+        path: &str,
+        mode: AccessMode,
+    ) -> std::result::Result<Observed, SourceError> {
         let registered = source.map(|s| self.get(&s.id)).transpose()?;
         let path = path.to_owned();
         let key = registered.as_ref().map(|s| self.key_path(&s.id));
@@ -493,8 +525,17 @@ impl Sources {
                     if cached.is_none() {
                         *cached = Some((Instant::now(), connect(&s, key.as_ref().unwrap())?));
                     }
-                    let result =
-                        read_sftp(&cached.as_ref().unwrap().1, &path, bytes, MAX_SOURCE_BYTES);
+                    let result = match mode {
+                        AccessMode::Metadata => {
+                            stat_sftp(&cached.as_ref().unwrap().1, &path, MAX_SOURCE_BYTES)
+                        }
+                        AccessMode::Hash => {
+                            read_sftp(&cached.as_ref().unwrap().1, &path, false, MAX_SOURCE_BYTES)
+                        }
+                        AccessMode::Bytes => {
+                            read_sftp(&cached.as_ref().unwrap().1, &path, true, MAX_SOURCE_BYTES)
+                        }
+                    };
                     if result.is_err() {
                         *cached = None;
                     } else if let Some((t, _)) = &mut *cached {
@@ -502,7 +543,11 @@ impl Sources {
                     }
                     result
                 }
-                _ => read_local(&path, bytes),
+                _ => match mode {
+                    AccessMode::Metadata => stat_local(&path),
+                    AccessMode::Hash => read_local(&path, false),
+                    AccessMode::Bytes => read_local(&path, true),
+                },
             }
         })
         .await
@@ -515,6 +560,30 @@ impl Sources {
     pub async fn validate(&self, scene: &SceneDescriptor) -> std::result::Result<(), SourceError> {
         for mesh in &scene.meshes {
             self.read_mesh(scene, mesh, false).await?;
+        }
+        Ok(())
+    }
+    pub fn validate_source(&self, scene: &SceneDescriptor) -> std::result::Result<(), SourceError> {
+        if let Some(source) = &scene.source {
+            self.get(&source.id)?;
+        }
+        Ok(())
+    }
+    pub async fn validate_mesh_metadata(
+        &self,
+        scene: &SceneDescriptor,
+        mesh: &MeshRef,
+    ) -> std::result::Result<(), SourceError> {
+        if mesh.modified_ns.is_none() {
+            self.read_mesh(scene, mesh, false).await?;
+            return Ok(());
+        }
+        let result = self.metadata(scene.source.as_ref(), &mesh.path).await?;
+        if result.size != mesh.byte_size
+            || result.path != mesh.path
+            || result.modified_ns != mesh.modified_ns
+        {
+            return Err(SourceError::Gone);
         }
         Ok(())
     }
@@ -536,6 +605,9 @@ impl Sources {
         if result.size != mesh.byte_size
             || result.revision != mesh.revision
             || result.path != mesh.path
+            || mesh
+                .modified_ns
+                .is_some_and(|modified| result.modified_ns != Some(modified))
         {
             return Err(SourceError::Gone);
         }
@@ -617,6 +689,7 @@ fn read_sftp(
         &mut file,
         canonical.to_string_lossy().into_owned(),
         expected,
+        stat.mtime.and_then(seconds_to_nanos),
         keep,
         limit,
     )?;
@@ -627,6 +700,30 @@ fn read_sftp(
         ));
     }
     Ok(result)
+}
+fn stat_sftp(
+    sftp: &ssh2::Sftp,
+    path: &str,
+    limit: u64,
+) -> std::result::Result<Observed, SourceError> {
+    let canonical = sftp.realpath(Path::new(path)).map_err(SourceError::ssh)?;
+    let stat = sftp.stat(&canonical).map_err(SourceError::ssh)?;
+    if !stat.is_file() {
+        return Err(SourceError::Gone);
+    }
+    let size = stat
+        .size
+        .ok_or_else(|| SourceError::Unavailable("SFTP server omitted file size".into()))?;
+    if size > limit {
+        return Err(SourceError::TooLarge);
+    }
+    Ok(Observed {
+        path: canonical.to_string_lossy().into_owned(),
+        size,
+        modified_ns: stat.mtime.and_then(seconds_to_nanos),
+        revision: String::new(),
+        bytes: Vec::new(),
+    })
 }
 fn read_local(path: &str, keep: bool) -> std::result::Result<Observed, SourceError> {
     let canonical = fs::canonicalize(path).map_err(SourceError::io)?;
@@ -647,14 +744,33 @@ fn read_local(path: &str, keep: bool) -> std::result::Result<Observed, SourceErr
         &mut file,
         canonical.to_string_lossy().into_owned(),
         stat.len(),
+        modified_nanos(&stat),
         keep,
         MAX_SOURCE_BYTES,
     )
+}
+fn stat_local(path: &str) -> std::result::Result<Observed, SourceError> {
+    let canonical = fs::canonicalize(path).map_err(SourceError::io)?;
+    let stat = fs::metadata(&canonical).map_err(SourceError::io)?;
+    if !stat.is_file() {
+        return Err(SourceError::Gone);
+    }
+    if stat.len() > MAX_SOURCE_BYTES {
+        return Err(SourceError::TooLarge);
+    }
+    Ok(Observed {
+        path: canonical.to_string_lossy().into_owned(),
+        size: stat.len(),
+        modified_ns: modified_nanos(&stat),
+        revision: String::new(),
+        bytes: Vec::new(),
+    })
 }
 fn read_stream(
     r: &mut impl Read,
     path: String,
     size: u64,
+    modified_ns: Option<u64>,
     keep: bool,
     limit: u64,
 ) -> std::result::Result<Observed, SourceError> {
@@ -693,9 +809,17 @@ fn read_stream(
     Ok(Observed {
         path,
         size,
+        modified_ns,
         revision: format!("sha256:{}", hex::encode(hash.finalize())),
         bytes,
     })
+}
+fn seconds_to_nanos(seconds: u64) -> Option<u64> {
+    seconds.checked_mul(1_000_000_000)
+}
+fn modified_nanos(metadata: &fs::Metadata) -> Option<u64> {
+    let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(duration.as_nanos()).ok()
 }
 pub fn validate_path(path: &str) -> Result<()> {
     if !Path::new(path).is_absolute() || path.len() > 16_384 || path.contains('\0') {
@@ -823,9 +947,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(data.bytes, original);
+        sources
+            .validate_mesh_metadata(&scene, &scene.meshes[0])
+            .await
+            .unwrap();
         let mut changed = original.to_vec();
         changed[0] = b'x';
         fs::write(&file, changed).unwrap();
+        assert!(matches!(
+            sources
+                .validate_mesh_metadata(&scene, &scene.meshes[0])
+                .await,
+            Err(SourceError::Gone)
+        ));
         assert!(matches!(
             sources.validate(&scene).await,
             Err(SourceError::Gone)
@@ -1018,11 +1152,11 @@ mod tests {
     #[test]
     fn bounded_reader_rejects_growth_and_oversize() {
         assert!(matches!(
-            read_stream(&mut &b"abc"[..], "x".into(), 3, true, 2),
+            read_stream(&mut &b"abc"[..], "x".into(), 3, None, true, 2),
             Err(SourceError::TooLarge)
         ));
         assert!(matches!(
-            read_stream(&mut &b"abc"[..], "x".into(), 2, true, 10),
+            read_stream(&mut &b"abc"[..], "x".into(), 2, None, true, 10),
             Err(SourceError::Unavailable(_))
         ));
     }

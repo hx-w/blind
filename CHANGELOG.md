@@ -11,6 +11,25 @@ All notable changes to Blind are documented here. This project follows
   onboarding. `blind invite --revoke-all` rotates access without revoking
   existing registered sources. Upgrading invalidates legacy temporary
   invitations.
+- Scenes no longer have a 64-Mesh ceiling. LOD allocation now keeps a fixed
+  150,000-primitive scene target down to one primitive per Mesh, so scenes with
+  thousands of inputs do not grow the browser payload without bound.
+- Interactive loads issue at most four Mesh requests at once, cap automatic Raw
+  fallbacks to 64 MiB per scene, and keep successfully loaded Meshes visible
+  when an individual source is unavailable.
+- Cached LOD requests validate only the requested source metadata; cold LOD and
+  Raw requests hash only the requested Mesh. This removes the previous
+  whole-scene hash sweep before every Mesh request.
+- LOD builds share a 512 MiB weighted working-memory budget using a conservative
+  three-times-source-size estimate. PNG requests reject oversized visible input
+  before reading it and no longer re-hash hidden Meshes after rendering.
+- `blind share --config FILE` accepts a strict JSON manifest containing an
+  ordered resource list, per-resource labels, and group labels with 1-based
+  members. Relative resource paths resolve from the manifest directory, and
+  detailed CLI help documents the full schema and conflicts.
+- `--label` also accepts comma-separated indices such as
+  `--label '2,3=Reference'`. Group labels render as selectable corner frames
+  without per-vertex work, so they remain practical in large scenes.
 
 ## [0.7.1] - 2026-09-16
 
