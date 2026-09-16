@@ -120,12 +120,36 @@ directly from the toolbar.
 
 Attach labels with repeated `--label INDEX[,INDEX...]=TEXT` options. Indices
 start at 1 and follow the input file order. One index labels one Mesh; multiple
-indices automatically label the group, without a separate group mode:
+indices label a group:
 
 ```sh
 blind share crown.ply donor-a.ply donor-b.ply \
   --label '1=生成牙冠' --label '2,3=参考牙' --format json
 ```
+
+For a large or persistent resource list, put the scene definition in JSON and
+run `blind share --config scene.json`. Relative resource paths are resolved
+from the config file's directory; group members are 1-based resource indices:
+
+```json
+{
+  "title": "Case review",
+  "resources": [
+    { "path": "meshes/crown.ply", "label": "生成牙冠" },
+    { "path": "meshes/donor-a.ply" },
+    { "path": "meshes/donor-b.ply" }
+  ],
+  "groups": [
+    { "label": "参考牙", "members": [2, 3] }
+  ]
+}
+```
+
+`--config` is mutually exclusive with positional Meshes, `--title`, and
+`--label`; `--host`, `--stateless`, and `--format` still apply. Unknown JSON
+fields, empty resources, bad labels, duplicate group members, and out-of-range
+indices fail before any scene is registered. See `blind share --help` for the
+complete contract.
 
 In the interactive viewer, choose a Mesh in **详情** and edit **3D 标注**.
 Labels use a small leader and an attachment dot, follow the Mesh in 3D, and keep
@@ -135,9 +159,8 @@ During camera motion, each label retains its placement
 relative to its projected anchor so it does not jump between sides. Hidden
 Meshes hide their labels. Clear the text to remove a label; share the current
 view to save edits in a new link. Existing links keep their original labels.
-Labels spanning multiple Meshes use a quiet corner frame around the visible
-members. Select the group label to fit the whole group; per-Mesh labels remain
-visible inside the frame.
+Group labels draw a restrained corner frame around visible members and can be
+selected to fit the whole group. Per-Mesh labels can coexist with group labels.
 Each label accepts up to 120 characters. Labels appear in interactive links;
 server-rendered PNG links currently include geometry and screen strokes only.
 
@@ -208,7 +231,9 @@ this contract instead of reimplementing scene or lifecycle logic.
 - Shared view snapshots preserve the selected Raw or LOD quality for every
   Mesh. Legacy links without this state still open as LOD.
 - The first cold load shows completed Mesh count while the server generates
-  LODs. A single large Mesh remains indeterminate until meshoptimizer returns.
+  LODs. At most four Meshes are requested concurrently, and a single large Mesh
+  remains indeterminate until meshoptimizer returns. Individual failures are
+  reported without discarding Meshes that already loaded successfully.
 - Vertex-only or zero-face PLY files render as circular GPU point sprites with
   sphere-like lighting. They are not expanded into sphere triangle Meshes.
 - PTS rings render as a continuous tube with a sphere at every original point.
@@ -231,10 +256,13 @@ PTS previews preserve every ordered source point and reduce only the procedural
 tube and marker tessellation. Generated binary PLY bytes are cached in memory
 up to 256 MiB and disappear when the server exits; neither LODs nor Raw source
 copies are written to disk. Raw is fetched only after a client explicitly
-selects it. The fixed bandwidth-oriented profile targets 150,000 primitives per
-scene, clamps each resource to 2,000 through 50,000 triangles or points, and
-uses 0.002 relative simplification error for triangle Meshes. It is
-intentionally not exposed as a setting.
+selects it, except for a bounded compatibility fallback: at most 32 MiB for one
+Mesh and 64 MiB for the whole scene. The fixed bandwidth-oriented profile
+targets 150,000 primitives per scene, clamps each resource to 1 through 50,000
+triangles or points, and uses 0.002 relative simplification error for triangle
+Meshes. There is no explicit Mesh-count ceiling; request, encrypted-descriptor,
+and per-file limits remain practical bounds. The profile is intentionally not
+exposed as a setting.
 
 ## Doctor and link maintenance
 

@@ -19,7 +19,7 @@ use std::{
     name = "blind",
     version,
     about = "Share geometry through local or remote Blind sources",
-    after_help = "Run blind serve on A. Join once with blind join --stdin; then use blind share model.ply --label '1=Crown' --format json. Use comma-separated indices to label a group: --label '1,2=Reference'. The Client needs no background process."
+    after_help = "Run blind serve on A. Join once with blind join --stdin; then use blind share model.ply --label '1=Crown' --format json. For large resource sets, use blind share --config scene.json. Use comma-separated indices to label a group: --label '1,2=Reference'. The Client needs no background process."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -41,26 +41,39 @@ enum ClientCommand {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Create unchanged /s/ and /i/ links on the registered server.
+    /// Share Mesh resources from arguments or a JSON manifest.
     #[command(
-        after_help = "Examples:\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1=Donor A' --label '1,2=Reference pair'"
+        long_about = "Share Mesh resources through the registered Blind server. Pass files directly for small scenes, or use --config FILE for large, persistent resource lists. The config owns the title, resources, per-resource labels, and group labels. Relative resource paths are resolved from the config file's directory.",
+        after_help = "DIRECT EXAMPLES:\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1,2=Reference pair'\n\nCONFIG EXAMPLE (indices in groups.members are 1-based):\n  {\n    \"title\": \"Case review\",\n    \"resources\": [\n      {\"path\": \"meshes/crown.ply\", \"label\": \"Crown\"},\n      {\"path\": \"meshes/donor-a.ply\"},\n      {\"path\": \"meshes/donor-b.ply\"}\n    ],\n    \"groups\": [\n      {\"label\": \"Reference teeth\", \"members\": [2, 3]}\n    ]\n  }\n\nCONFIG CONTRACT:\n  - resources is required and must contain at least one {path,label?} object.\n  - paths may be absolute or relative to the config file; PLY, STL, OBJ, and PTS are supported.\n  - labels contain 1-120 characters. A group needs at least two unique in-range members.\n  - groups is optional and limited to 64 entries. The config file is limited to 4 MiB.\n  - unknown fields are errors, so misspelled keys never pass silently.\n\n--config conflicts with positional Meshes, --title, and --label. --host, --stateless, and --format still control delivery/output."
     )]
     Share {
-        #[arg(required = true)]
+        /// Mesh files in display order. Required unless --config is used.
+        #[arg(required_unless_present = "config", conflicts_with = "config")]
         meshes: Vec<PathBuf>,
-        #[arg(long)]
+        /// JSON manifest for a large resource set; relative paths use its directory.
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with_all = ["meshes", "title", "labels"]
+        )]
+        config: Option<PathBuf>,
+        /// Scene title. With --config, put title in the JSON file instead.
+        #[arg(long, conflicts_with = "config")]
         title: Option<String>,
         /// Label one Mesh (1=TEXT) or a group (1,2,3=TEXT). Repeat as needed.
         #[arg(
             long = "label",
             value_name = "INDEX[,INDEX...]=TEXT",
-            help = "Label one Mesh (1=TEXT) or a group (1,2,3=TEXT); repeat as needed"
+            conflicts_with = "config"
         )]
         labels: Vec<String>,
+        /// Public Blind origin used in generated links (for example https://blind.example.com).
         #[arg(long)]
         host: Option<String>,
+        /// Emit a long self-contained /v/ link instead of storing a short-link registry row.
         #[arg(long)]
         stateless: bool,
+        /// Select printed output: viewer URL, image URL, full text, or JSON.
         #[arg(long, value_enum, default_value = "full")]
         format: OutputFormat,
     },
@@ -155,7 +168,14 @@ async fn api(server: &str, path: &str, token: &str, body: Option<Value>) -> Resu
         http.post(&url).json(&body)
     } else {
         http.get(&url)
-    };
+    }
+    .timeout(
+        if matches!(path, "/api/v1/scenes" | "/api/v1/client/scenes") {
+            std::time::Duration::from_secs(30 * 60)
+        } else {
+            std::time::Duration::from_secs(180)
+        },
+    );
     let mut response = request
         .bearer_auth(token)
         .send()
@@ -201,12 +221,13 @@ pub async fn run() -> Result<()> {
         } => join(stdin, local, address, port, name).await?,
         ClientCommand::Share {
             meshes,
+            config,
             title,
             labels,
             host,
             stateless,
             format,
-        } => share(meshes, title, labels, host, stateless, format).await?,
+        } => share(meshes, config, title, labels, host, stateless, format).await?,
         ClientCommand::Status { json: as_json } => {
             let c =
                 load()?.context("not registered; run blind join --stdin or blind join --local")?;
@@ -482,19 +503,160 @@ fn remove_authorization(c: &ClientConfig) -> Result<()> {
         edit_authorization(c, false)
     }
 }
+const MAX_SHARE_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareConfig {
+    title: Option<String>,
+    resources: Vec<ShareResource>,
+    #[serde(default)]
+    groups: Vec<ShareGroup>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareResource {
+    path: PathBuf,
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShareGroup {
+    label: String,
+    members: Vec<usize>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedLabels {
+    pub meshes: Vec<Option<MeshLabel>>,
+    pub groups: Vec<MeshLabelGroup>,
+}
+
+struct ShareInput {
+    meshes: Vec<PathBuf>,
+    title: Option<String>,
+    labels: ParsedLabels,
+}
+
+fn read_share_config(path: &Path) -> Result<ShareInput> {
+    let config_path = fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve share config {}", path.display()))?;
+    let metadata = fs::metadata(&config_path)?;
+    if !metadata.is_file() {
+        bail!("share config {} is not a file", path.display());
+    }
+    if metadata.len() > MAX_SHARE_CONFIG_BYTES {
+        bail!("share config exceeds 4 MiB");
+    }
+    let config: ShareConfig = serde_json::from_slice(&fs::read(&config_path)?)
+        .with_context(|| format!("invalid share config {}", path.display()))?;
+    if config.resources.is_empty() {
+        bail!("share config resources must contain at least one item");
+    }
+    let base = config_path.parent().context("share config has no parent")?;
+    let mut meshes = Vec::with_capacity(config.resources.len());
+    let mut mesh_labels = Vec::with_capacity(config.resources.len());
+    for (index, resource) in config.resources.into_iter().enumerate() {
+        if resource.path.as_os_str().is_empty() {
+            bail!("resources[{}].path must not be empty", index + 1);
+        }
+        meshes.push(if resource.path.is_absolute() {
+            resource.path
+        } else {
+            base.join(resource.path)
+        });
+        let label = resource
+            .label
+            .map(|text| {
+                let label = MeshLabel {
+                    text: text.trim().into(),
+                    anchor: None,
+                };
+                label.validate()?;
+                Ok::<MeshLabel, anyhow::Error>(label)
+            })
+            .transpose()
+            .with_context(|| format!("invalid resources[{}].label", index + 1))?;
+        mesh_labels.push(label);
+    }
+    let mesh_count = meshes.len();
+    let groups = config
+        .groups
+        .into_iter()
+        .enumerate()
+        .map(|(group_index, group)| {
+            let meshes = group
+                .members
+                .into_iter()
+                .enumerate()
+                .map(|(member_index, member)| {
+                    member
+                        .checked_sub(1)
+                        .filter(|index| *index < mesh_count)
+                        .with_context(|| {
+                            format!(
+                                "groups[{}].members[{}] must be between 1 and {mesh_count}",
+                                group_index + 1,
+                                member_index + 1
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let group = MeshLabelGroup {
+                text: group.label.trim().into(),
+                meshes,
+            };
+            group
+                .validate(mesh_count)
+                .with_context(|| format!("invalid groups[{}]", group_index + 1))?;
+            Ok(group)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if groups.len() > crate::scene::MAX_LABEL_GROUPS {
+        bail!(
+            "share config has too many groups; maximum is {}",
+            crate::scene::MAX_LABEL_GROUPS
+        );
+    }
+    Ok(ShareInput {
+        meshes,
+        title: config.title,
+        labels: ParsedLabels {
+            meshes: mesh_labels,
+            groups,
+        },
+    })
+}
+
 async fn share(
     meshes: Vec<PathBuf>,
+    config: Option<PathBuf>,
     title: Option<String>,
     labels: Vec<String>,
     host: Option<String>,
     stateless: bool,
     format: OutputFormat,
 ) -> Result<()> {
+    let config_mode = config.is_some();
+    let input = match config {
+        Some(path) => read_share_config(&path)?,
+        None => {
+            let labels = parse_labels(&labels, meshes.len())?;
+            ShareInput {
+                meshes,
+                title,
+                labels,
+            }
+        }
+    };
     if load()?.is_none() {
         join(false, true, None, None, None).await?;
     }
     let c = load()?.context("not registered")?;
-    let paths = meshes
+    let paths = input
+        .meshes
         .iter()
         .map(|p| {
             fs::canonicalize(p)
@@ -502,8 +664,13 @@ async fn share(
                 .map(|p| p.to_string_lossy().into_owned())
         })
         .collect::<Result<Vec<_>>>()?;
-    let labels = parse_labels(&labels, paths.len())?;
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":paths,"title":title,"labels":labels.meshes,"label_groups":labels.groups,"origin":host,"stateless":stateless}))).await?;
+    if config_mode {
+        eprintln!(
+            "Blind: registering {} resources from the config; the first share hashes every source once and a multi-gigabyte scene may take several minutes.",
+            paths.len()
+        );
+    }
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":paths,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless}))).await?;
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&payload)?),
         OutputFormat::View => println!(
@@ -524,12 +691,6 @@ async fn share(
         ),
     }
     Ok(())
-}
-
-#[derive(Debug, PartialEq)]
-pub struct ParsedLabels {
-    pub meshes: Vec<Option<MeshLabel>>,
-    pub groups: Vec<MeshLabelGroup>,
 }
 
 pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {
@@ -621,6 +782,55 @@ mod tests {
         assert_eq!(labels.groups[0].meshes, [0, 1]);
         assert!(parse_labels(&["1,1=Duplicate".into()], 2).is_err());
         assert!(parse_labels(&["1,3=Range".into()], 2).is_err());
+    }
+
+    #[test]
+    fn share_config_resolves_relative_resources_and_group_members() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("scene.json");
+        fs::write(
+            &config_path,
+            r#"{
+              "title": "Large review",
+              "resources": [
+                {"path": "meshes/crown.ply", "label": " Crown "},
+                {"path": "/data/donor-a.ply"},
+                {"path": "meshes/donor-b.ply"}
+              ],
+              "groups": [{"label": " References ", "members": [2, 3]}]
+            }"#,
+        )
+        .unwrap();
+        let input = read_share_config(&config_path).unwrap();
+        assert_eq!(input.title.as_deref(), Some("Large review"));
+        assert_eq!(
+            input.meshes[0],
+            fs::canonicalize(directory.path())
+                .unwrap()
+                .join("meshes/crown.ply")
+        );
+        assert_eq!(input.meshes[1], PathBuf::from("/data/donor-a.ply"));
+        assert_eq!(input.labels.meshes[0].as_ref().unwrap().text, "Crown");
+        assert_eq!(input.labels.groups[0].text, "References");
+        assert_eq!(input.labels.groups[0].meshes, [1, 2]);
+    }
+
+    #[test]
+    fn share_config_rejects_unknown_fields_and_invalid_groups() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("scene.json");
+        fs::write(
+            &config_path,
+            r#"{"resources":[{"path":"a.ply","typo":"ignored"}]}"#,
+        )
+        .unwrap();
+        assert!(read_share_config(&config_path).is_err());
+        fs::write(
+            &config_path,
+            r#"{"resources":[{"path":"a.ply"},{"path":"b.ply"}],"groups":[{"label":"bad","members":[1,1]}]}"#,
+        )
+        .unwrap();
+        assert!(read_share_config(&config_path).is_err());
     }
 
     #[test]

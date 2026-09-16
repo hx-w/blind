@@ -81,7 +81,7 @@ let panelHeight = 0;
 let dragStart: { y: number; height: number } | null = null;
 let suppressHandleClick = false;
 let expanded = false;
-let loadProgress = { completed: 0, total: 0, rawFallbacks: 0 };
+let loadProgress = { completed: 0, total: 0, rawFallbacks: 0, failed: 0 };
 let longLoadTimer = 0;
 const meshViewer = new MeshViewer(root);
 const markup = new MarkupCanvas($('#markup-canvas') as HTMLCanvasElement);
@@ -132,14 +132,14 @@ async function start(): Promise<void> {
 }
 
 function renderLoadProgress(): void {
-  const { completed, total, rawFallbacks } = loadProgress;
+  const { completed, total, rawFallbacks, failed } = loadProgress;
   const percent = total > 0 ? Math.round(completed / total * 100) : 0;
   loadingMeter.hidden = total === 0;
   loadingMeter.setAttribute('aria-valuenow', String(percent));
   loadingBar.style.setProperty('--loading-progress', `${percent}%`);
   loadingTitle.textContent = completed >= total && total > 0 ? '正在打开场景' : '正在生成 LOD';
   loadingProgress.textContent = total > 0
-    ? `${completed} / ${total} Mesh${rawFallbacks > 0 ? ` · ${rawFallbacks} 个回退 Raw` : ''}`
+    ? `${completed} / ${total} Mesh${rawFallbacks > 0 ? ` · ${rawFallbacks} 个回退 Raw` : ''}${failed > 0 ? ` · ${failed} 个不可用` : ''}`
     : '正在验证源 Mesh';
 }
 

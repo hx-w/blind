@@ -37,6 +37,8 @@ pub struct MeshRef {
     pub format: MeshFormat,
     pub revision: String,
     pub byte_size: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modified_ns: Option<u64>,
     pub color: String,
     pub opacity: f32,
     pub visible: bool,
@@ -243,9 +245,6 @@ impl SceneDescriptor {
         if paths.is_empty() {
             bail!("at least one Mesh path is required");
         }
-        if paths.len() > 64 {
-            bail!("a scene can contain at most 64 Meshes");
-        }
         let mut meshes = Vec::with_capacity(paths.len());
         for (index, path) in paths.iter().enumerate() {
             let canonical = tokio::fs::canonicalize(path)
@@ -257,6 +256,11 @@ impl SceneDescriptor {
             }
             let format = MeshFormat::from_path(&canonical)?;
             let revision = hash_file(&canonical).await?;
+            let after = tokio::fs::metadata(&canonical).await?;
+            if metadata.len() != after.len() || modified_nanos(&metadata) != modified_nanos(&after)
+            {
+                bail!("{} changed while hashing; retry", path.display());
+            }
             let name = canonical
                 .file_name()
                 .and_then(|value| value.to_str())
@@ -267,7 +271,8 @@ impl SceneDescriptor {
                 name,
                 format,
                 revision,
-                byte_size: metadata.len(),
+                byte_size: after.len(),
+                modified_ns: modified_nanos(&after),
                 color: PALETTE[index % PALETTE.len()].to_string(),
                 opacity: 1.0,
                 visible: true,
@@ -376,6 +381,11 @@ impl SceneDescriptor {
             "Blind scene\n{source}\nMeshes:\n{paths}\n\nView:\n{viewer_url}\n\nImage:\n{image_url}"
         )
     }
+}
+
+fn modified_nanos(metadata: &std::fs::Metadata) -> Option<u64> {
+    let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    u64::try_from(duration.as_nanos()).ok()
 }
 
 fn validate_screen_strokes(strokes: &[ScreenStroke]) -> Result<()> {
@@ -599,6 +609,18 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(mesh.quality, MeshQuality::Lod);
+        assert_eq!(mesh.modified_ns, None);
+    }
+
+    #[tokio::test]
+    async fn scenes_accept_more_than_sixty_four_meshes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mesh.ply");
+        std::fs::write(&path, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let paths = vec![path; 65];
+        let scene = SceneDescriptor::create(&paths, None).await.unwrap();
+        assert_eq!(scene.meshes.len(), 65);
+        assert!(scene.meshes.iter().all(|mesh| mesh.modified_ns.is_some()));
     }
 
     #[tokio::test]
@@ -660,30 +682,16 @@ mod tests {
             .unwrap()
             .scene;
         assert_eq!(reopened.label_groups, [group]);
-        assert!(
-            MeshLabelGroup {
-                text: "单颗".into(),
-                meshes: vec![0]
-            }
-            .validate(2)
-            .is_err()
-        );
-        assert!(
-            MeshLabelGroup {
-                text: "重复".into(),
-                meshes: vec![0, 0]
-            }
-            .validate(2)
-            .is_err()
-        );
-        assert!(
-            MeshLabelGroup {
-                text: "越界".into(),
-                meshes: vec![0, 2]
-            }
-            .validate(2)
-            .is_err()
-        );
+        for invalid in [vec![0], vec![0, 0], vec![0, 2]] {
+            assert!(
+                MeshLabelGroup {
+                    text: "无效".into(),
+                    meshes: invalid,
+                }
+                .validate(2)
+                .is_err()
+            );
+        }
     }
 
     #[test]

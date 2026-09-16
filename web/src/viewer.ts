@@ -6,7 +6,12 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { apiError, type MeshLabelGroup, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
 import { createObjectMaterial, updateObjectMaterial } from './material';
 import { MeshLabels } from './labels';
+import { mapConcurrent } from './load-queue';
 import shader from '../../shaders/matte.json';
+
+const LOAD_CONCURRENCY = 4;
+const RAW_FALLBACK_BYTES = 32 * 1024 * 1024;
+const RAW_FALLBACK_SCENE_BYTES = 64 * 1024 * 1024;
 
 // The library class carries a target at runtime that its typings omit.
 declare module 'three/addons/controls/ArcballControls.js' {
@@ -38,6 +43,7 @@ export interface MeshLoadProgress {
   completed: number;
   total: number;
   rawFallbacks: number;
+  failed: number;
 }
 
 export class MeshViewer {
@@ -102,32 +108,46 @@ export class MeshViewer {
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
     let completed = 0;
     let rawFallbacks = 0;
-    this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks });
-    const loaded = await Promise.all(scene.meshes.map(async (info) => {
+    let rawFallbackBytes = 0;
+    let failed = 0;
+    this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
+    const loaded = await mapConcurrent(scene.meshes, LOAD_CONCURRENCY, async (info) => {
       let result;
       const requestedQuality = info.quality ?? 'lod';
       try {
         result = { quality: requestedQuality, asset: await loadObject(info, requestedQuality) };
       } catch (error) {
-        if (requestedQuality === 'raw') throw error;
-        rawFallbacks += 1;
-        result = {
-          quality: 'raw' as const,
-          asset: await loadObject(info, 'raw'),
-          lodError: error instanceof Error ? error.message : 'LOD 不可用',
-        };
+        const lodError = error instanceof Error ? error.message : 'Mesh 不可用';
+        if (
+          requestedQuality === 'lod'
+          && info.byte_size <= RAW_FALLBACK_BYTES
+          && rawFallbackBytes + info.byte_size <= RAW_FALLBACK_SCENE_BYTES
+        ) {
+          rawFallbackBytes += info.byte_size;
+          try {
+            result = { quality: 'raw' as const, asset: await loadObject(info, 'raw'), lodError };
+            rawFallbacks += 1;
+          } catch (rawError) {
+            failed += 1;
+            result = { quality: requestedQuality, lodError: rawError instanceof Error ? rawError.message : lodError };
+          }
+        } else {
+          failed += 1;
+          result = { quality: requestedQuality, lodError };
+        }
       }
       completed += 1;
-      this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks });
+      this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
       return result;
-    }));
+    });
     loaded.forEach(({ quality, asset, lodError }, index) => {
       const source = scene.meshes[index];
       const info: ViewerMesh = { ...source, raw_bytes: source.byte_size, loading: false, lod_error: lodError };
-      this.applyLoadedInfo(info, quality, asset);
-      this.prepareObject(asset.object, index, info);
-      this.models.push({ info, object: asset.object, bounds: new THREE.Box3().setFromObject(asset.object) });
-      this.scene.add(asset.object);
+      const object = asset?.object ?? new THREE.Group();
+      if (asset) this.applyLoadedInfo(info, quality, asset);
+      this.prepareObject(object, index, info);
+      this.models.push({ info, object, bounds: new THREE.Box3().setFromObject(object) });
+      this.scene.add(object);
     });
     this.applyState();
     this.refreshVisibleBounds();

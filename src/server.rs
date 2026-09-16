@@ -13,7 +13,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{ConnectInfo, FromRequestParts, Path as AxumPath, State},
+    extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path as AxumPath, State},
     http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header, request::Parts},
     response::IntoResponse,
     routing::{get, post},
@@ -53,12 +53,17 @@ pub struct AppState {
     pub renderer: Option<Arc<Renderer>>,
     pub image_slots: Arc<tokio::sync::Semaphore>,
     pub lod_slots: Arc<tokio::sync::Semaphore>,
+    pub lod_memory: Arc<tokio::sync::Semaphore>,
     join_slots: Arc<tokio::sync::Semaphore>,
     pub lod_cache: LodCache,
     pub shutdown: tokio::sync::mpsc::Sender<()>,
     doctor_lock: Arc<tokio::sync::Mutex<()>>,
     short_misses: Arc<Mutex<MissLimiter>>,
 }
+
+const LOD_MEMORY_MIB: u32 = 512;
+const LOD_MEMORY_EXPANSION: u64 = 3;
+const MIB: u64 = 1024 * 1024;
 
 #[derive(Default)]
 struct MissLimiter {
@@ -121,6 +126,7 @@ struct ReshareRequest {
 struct HealthResponse {
     status: &'static str,
     version: &'static str,
+    scene_schema: u8,
     image_renderer: bool,
 }
 
@@ -241,6 +247,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         renderer,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         lod_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        lod_memory: Arc::new(tokio::sync::Semaphore::new(LOD_MEMORY_MIB as usize)),
         join_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         lod_cache: LodCache::default(),
         shutdown: shutdown_tx,
@@ -261,12 +268,18 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             post(control_doctor_clear_all),
         )
         .route("/api/v1/hosts", get(hosts))
-        .route("/api/v1/scenes", post(create_scene))
+        .route(
+            "/api/v1/scenes",
+            post(create_scene).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/api/v1/clients/join", post(join_client))
         .route("/api/v1/client", get(client_info))
         .route("/api/v1/client/activate", post(activate_client))
         .route("/api/v1/client/revoke", post(revoke_client))
-        .route("/api/v1/client/scenes", post(client_scene))
+        .route(
+            "/api/v1/client/scenes",
+            post(client_scene).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/api/v1/control/sources/local", post(local_client))
         .route("/api/v1/scenes/{token}", get(get_scene))
         .route("/api/v1/scenes/{token}/meshes/{index}", get(get_mesh))
@@ -591,6 +604,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
+        scene_schema: 3,
         image_renderer: state.renderer.is_some(),
     })
 }
@@ -726,7 +740,12 @@ async fn get_scene(
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let opened = open_scene(&state, &token, peer.ip())?;
+    source_result(
+        &state,
+        &token,
+        state.registry.sources.validate_source(&opened.scene),
+    )?;
     let owner = owner_matches(&headers, &state, &opened);
     let scene = opened.scene;
     let meshes = scene
@@ -766,7 +785,7 @@ async fn get_mesh(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
-    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let opened = open_scene(&state, &token, peer.ip())?;
     let scene = opened.scene;
     let mesh = scene
         .meshes
@@ -799,7 +818,7 @@ async fn get_mesh_lod(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
-    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let opened = open_scene(&state, &token, peer.ip())?;
     let scene = opened.scene;
     let mesh = scene
         .meshes
@@ -808,6 +827,15 @@ async fn get_mesh_lod(
     let target_primitives = lod::target_primitives(scene.meshes.len());
     let key = lod::cache_key(&mesh.revision, mesh.format, target_primitives);
     if let Some(asset) = state.lod_cache.get(&key) {
+        source_result(
+            &state,
+            &token,
+            state
+                .registry
+                .sources
+                .validate_mesh_metadata(&scene, mesh)
+                .await,
+        )?;
         return lod_response(asset);
     }
 
@@ -817,8 +845,25 @@ async fn get_mesh_lod(
         .await
         .map_err(|error| AppError::unavailable(&error.to_string()))?;
     if let Some(asset) = state.lod_cache.get(&key) {
+        source_result(
+            &state,
+            &token,
+            state
+                .registry
+                .sources
+                .validate_mesh_metadata(&scene, mesh)
+                .await,
+        )?;
         return lod_response(asset);
     }
+
+    let memory_permits = lod_memory_permits(mesh.byte_size);
+    let _memory = state
+        .lod_memory
+        .clone()
+        .acquire_many_owned(memory_permits)
+        .await
+        .map_err(|error| AppError::unavailable(&error.to_string()))?;
 
     let bytes = source_result(
         &state,
@@ -846,6 +891,13 @@ fn lod_response(asset: Arc<LodAsset>) -> Result<Response<Body>, AppError> {
         .body(Body::from(asset.bytes.clone()))?)
 }
 
+fn lod_memory_permits(byte_size: u64) -> u32 {
+    byte_size
+        .saturating_mul(LOD_MEMORY_EXPANSION)
+        .div_ceil(MIB)
+        .clamp(1, u64::from(LOD_MEMORY_MIB)) as u32
+}
+
 async fn reshare(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -853,7 +905,12 @@ async fn reshare(
     headers: HeaderMap,
     Json(request): Json<ReshareRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let opened = resolved_scene(&state, &token, peer.ip()).await?;
+    let opened = open_scene(&state, &token, peer.ip())?;
+    source_result(
+        &state,
+        &token,
+        state.registry.sources.validate_source(&opened.scene),
+    )?;
     let owner = owner_matches(&headers, &state, &opened);
     let mut scene = opened.scene;
     scene
@@ -884,17 +941,23 @@ async fn render_image(
     let token = token.strip_suffix(".png").unwrap_or(&token);
     let opened = open_scene(&state, token, peer.ip())?;
     let scene = opened.scene;
-    source_result(&state, token, state.registry.sources.validate(&scene).await)?;
+    source_result(
+        &state,
+        token,
+        state.registry.sources.validate_source(&scene),
+    )?;
+    let source_bytes = scene
+        .meshes
+        .iter()
+        .filter(|mesh| mesh.visible)
+        .try_fold(0_u64, |total, mesh| total.checked_add(mesh.byte_size))
+        .ok_or_else(|| AppError::unprocessable("source size overflow"))?;
+    if source_bytes > crate::source::MAX_SOURCE_BYTES {
+        return Err(AppError::unprocessable("image sources exceed 512 MiB"));
+    }
     let mut sources = Vec::with_capacity(scene.meshes.len());
-    let mut source_bytes = 0u64;
     for mesh in &scene.meshes {
         if mesh.visible {
-            source_bytes = source_bytes
-                .checked_add(mesh.byte_size)
-                .ok_or_else(|| AppError::unprocessable("source size overflow"))?;
-            if source_bytes > crate::source::MAX_SOURCE_BYTES {
-                return Err(AppError::unprocessable("image sources exceed 512 MiB"));
-            }
             sources.push(Some(
                 source_result(
                     &state,
@@ -915,7 +978,17 @@ async fn render_image(
         tracing::warn!(%error, "image render failed");
         AppError::unprocessable("Image render failed")
     })?;
-    source_result(&state, token, state.registry.sources.validate(&scene).await)?;
+    for mesh in scene.meshes.iter().filter(|mesh| mesh.visible) {
+        source_result(
+            &state,
+            token,
+            state
+                .registry
+                .sources
+                .validate_mesh_metadata(&scene, mesh)
+                .await,
+        )?;
+    }
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "image/png")
@@ -952,7 +1025,12 @@ async fn view_scene(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
 ) -> Result<Response<Body>, AppError> {
-    resolved_scene(&state, &token, peer.ip()).await?;
+    let opened = open_scene(&state, &token, peer.ip())?;
+    source_result(
+        &state,
+        &token,
+        state.registry.sources.validate_source(&opened.scene),
+    )?;
     serve_index(state.config.base_path())
 }
 
@@ -1239,20 +1317,6 @@ fn open_scene(state: &AppState, token: &str, peer: IpAddr) -> Result<OpenedScene
         .map_err(|_| AppError::not_found("Scene not found"))
 }
 
-async fn resolved_scene(
-    state: &AppState,
-    token: &str,
-    peer: IpAddr,
-) -> Result<OpenedScene, AppError> {
-    let opened = open_scene(state, token, peer)?;
-    source_result(
-        state,
-        token,
-        state.registry.sources.validate(&opened.scene).await,
-    )?;
-    Ok(opened)
-}
-
 fn allow_short_miss(state: &AppState, peer: IpAddr) -> bool {
     const WINDOW: Duration = Duration::from_secs(60);
     const LIMIT: u16 = 30;
@@ -1348,6 +1412,16 @@ mod tests {
             config.listen = listen.into();
             assert_eq!(control_address(&config).unwrap().to_string(), expected);
         }
+    }
+
+    #[test]
+    fn lod_memory_is_weighted_by_source_size() {
+        assert_eq!(lod_memory_permits(0), 1);
+        assert_eq!(lod_memory_permits(MIB), 3);
+        assert_eq!(lod_memory_permits(MIB + 1), 4);
+        assert_eq!(lod_memory_permits(170 * MIB), 510);
+        assert_eq!(lod_memory_permits(171 * MIB), LOD_MEMORY_MIB);
+        assert_eq!(lod_memory_permits(u64::MAX), LOD_MEMORY_MIB);
     }
 
     #[test]
@@ -1524,8 +1598,8 @@ async fn client_scene(
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let source = client_auth(&state, &headers, false)?;
-    if request.paths.is_empty() || request.paths.len() > 64 {
-        return Err(AppError::bad_request("a scene needs 1–64 files"));
+    if request.paths.is_empty() {
+        return Err(AppError::bad_request("a scene needs at least one file"));
     }
     let source_ref = source.scene_source();
     let mut meshes = Vec::new();
@@ -1554,6 +1628,7 @@ async fn client_scene(
             format,
             revision: observed.revision,
             byte_size: observed.size,
+            modified_ns: observed.modified_ns,
             color: crate::scene::PALETTE[i % crate::scene::PALETTE.len()].into(),
             opacity: 1.0,
             visible: true,

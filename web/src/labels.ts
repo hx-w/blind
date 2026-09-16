@@ -2,11 +2,10 @@ import * as THREE from 'three';
 import type { MeshLabelGroup, PublicMesh } from './api';
 import { clamp, layoutLabel, type LabelOffset, type Rect } from './label-layout';
 
-interface LabelModel { info: PublicMesh; object: THREE.Object3D; bounds: THREE.Box3 }
+interface LabelModel { info: PublicMesh; bounds: THREE.Box3 }
 interface LabelView { text: HTMLSpanElement; line: SVGPathElement; dot: SVGCircleElement; offset?: LabelOffset; width: number; height: number }
 interface GroupView { text: HTMLButtonElement; frame: SVGPathElement; width: number; height: number }
 const svgNS = 'http://www.w3.org/2000/svg';
-const silhouetteSamples = new WeakMap<THREE.Object3D, THREE.Vector3[]>();
 
 /** Screen-sized labels attached to world-space Mesh bounds, independent of camera zoom. */
 export class MeshLabels {
@@ -27,6 +26,8 @@ export class MeshLabels {
     root.append(this.layer);
   }
 
+  // Label sizes and obstacle rects depend on the same layout state as the
+  // placement offsets, so they drop their caches here too.
   invalidateLayout(): void {
     for (const view of this.views.values()) { view.offset = undefined; view.width = 0; view.height = 0; }
     for (const view of this.groupViews.values()) { view.width = 0; view.height = 0; }
@@ -44,14 +45,9 @@ export class MeshLabels {
       this.invalidateLayout();
     }
     if (!this.obstacles) this.obstacles = this.measureObstacles();
+    // Placement mutates the occupied set; the cache stays untouched.
     const occupied = this.obstacles.slice();
-    const groupedMeshes = new Set(groups.flatMap(group => group.meshes));
-    const silhouettes = models.map((model, index) => {
-      if (!model.info.visible) return null;
-      return groupedMeshes.has(index)
-        ? projectModelBounds(model, camera, width, height)
-        : projectBounds(model.bounds, camera, width, height);
-    });
+    const silhouettes = models.map(model => model.info.visible && model.info.label ? projectBounds(model.bounds, camera, width, height) : null);
     const activeGroups = new Set<number>();
     const active = new Set<number>();
     for (const view of this.groupViews.values()) { view.text.hidden = true; view.frame.style.display = 'none'; }
@@ -59,20 +55,21 @@ export class MeshLabels {
       view.text.hidden = true; view.line.style.display = 'none'; view.dot.style.display = 'none';
     }
 
-    // Group frames establish the broad structure first. Individual labels are
-    // then placed around their text so both annotation levels can coexist.
     groups.forEach((group, index) => {
       if (!group.text.trim()) return;
       activeGroups.add(index);
-      const memberBounds = group.meshes.map(member => silhouettes[member]).filter((rect): rect is Rect => rect !== null && rect !== undefined);
-      if (memberBounds.length === 0) return;
-      const bounds = memberBounds.reduce(unionRects);
+      const worldBounds = new THREE.Box3();
+      for (const member of group.meshes) {
+        const model = models[member];
+        if (model?.info.visible) worldBounds.union(model.bounds);
+      }
+      const bounds = projectBounds(worldBounds, camera, width, height);
+      if (!bounds) return;
       const frame = insetViewport(expandRect(bounds, 10), width, height);
       let view = this.groupViews.get(index);
       if (!view) {
         const button = document.createElement('button');
         button.type = 'button'; button.className = 'mesh-group-label';
-        button.addEventListener('click', (event) => this.focusGroup(group.meshes, event.detail !== 0));
         const path = document.createElementNS(svgNS, 'path'); path.classList.add('mesh-group-frame');
         button.addEventListener('pointerenter', () => path.classList.add('hover'));
         button.addEventListener('pointerleave', () => path.classList.remove('hover'));
@@ -80,6 +77,7 @@ export class MeshLabels {
         view = { text: button, frame: path, width: 0, height: 0 };
         this.groupViews.set(index, view);
       }
+      view.text.onclick = (event) => this.focusGroup(group.meshes, event.detail !== 0);
       view.text.hidden = false; view.frame.style.display = '';
       const count = group.meshes.length;
       const signature = `${group.text}\u0000${count}`;
@@ -99,7 +97,6 @@ export class MeshLabels {
       view.text.style.transform = `translate(${placement.x}px, ${placement.y}px)`;
       view.frame.setAttribute('d', cornerFramePath(frame));
     });
-
     models.forEach(({ info, bounds }, index) => {
       if (!info.label?.text.trim()) return;
       active.add(index);
@@ -122,8 +119,12 @@ export class MeshLabels {
       view.text.hidden = false;
       view.line.style.display = ''; view.dot.style.display = '';
       if (view.text.textContent !== info.label.text) { view.text.textContent = info.label.text; view.offset = undefined; view.width = 0; }
+      // offsetWidth forces a synchronous reflow, so measure only when the
+      // text or the viewport changed rather than on every rendered frame.
       if (!view.width) {
         view.text.style.maxWidth = '';
+        // A side panel can leave a very narrow canvas on landscape phones.
+        // Widen long labels before placement so wrapping does not clip them.
         if (view.text.offsetHeight > height - 16) view.text.style.maxWidth = `${Math.max(1, width - 16)}px`;
         view.width = view.text.offsetWidth; view.height = view.text.offsetHeight;
       }
@@ -152,6 +153,7 @@ export class MeshLabels {
   }
 
   private measureObstacles(): Rect[] {
+    // Keep labels clear of the viewer's existing controls and message panel.
     const origin = this.root.getBoundingClientRect();
     const rects: Rect[] = [];
     document.querySelectorAll<HTMLElement>('[data-label-obstacle]').forEach((element) => {
@@ -166,58 +168,15 @@ export class MeshLabels {
 function projectBounds(bounds: THREE.Box3, camera: THREE.Camera, width: number, height: number): Rect | null {
   if (bounds.isEmpty()) return null;
   const point = new THREE.Vector3();
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, samples = 0;
   for (const x of [bounds.min.x, bounds.max.x]) for (const y of [bounds.min.y, bounds.max.y]) for (const z of [bounds.min.z, bounds.max.z]) {
     point.set(x, y, z).project(camera);
-    if (point.z < -1 || point.z > 1) return null;
-    const px = (point.x + 1) * width / 2, py = (1 - point.y) * height / 2;
-    minX = Math.min(minX, px); maxX = Math.max(maxX, px);
-    minY = Math.min(minY, py); maxY = Math.max(maxY, py);
-  }
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-}
-
-function projectModelBounds(model: LabelModel, camera: THREE.Camera, width: number, height: number): Rect | null {
-  const point = new THREE.Vector3();
-  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, samples = 0;
-  for (const sample of modelSilhouetteSamples(model)) {
-    point.copy(sample).project(camera);
     if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.z < -1 || point.z > 1) continue;
     const px = (point.x + 1) * width / 2, py = (1 - point.y) * height / 2;
     minX = Math.min(minX, px); maxX = Math.max(maxX, px);
     minY = Math.min(minY, py); maxY = Math.max(maxY, py); samples += 1;
   }
-  return samples > 0 ? { x: minX, y: minY, width: maxX - minX, height: maxY - minY } : projectBounds(model.bounds, camera, width, height);
-}
-
-function modelSilhouetteSamples(model: LabelModel): THREE.Vector3[] {
-  const cached = silhouetteSamples.get(model.object);
-  if (cached) return cached;
-  model.object.updateWorldMatrix(true, true);
-  const attributes: Array<{ position: THREE.BufferAttribute | THREE.InterleavedBufferAttribute; matrix: THREE.Matrix4 }> = [];
-  let total = 0;
-  model.object.traverse((child) => {
-    const position = (child as THREE.Mesh).geometry?.getAttribute('position');
-    if (!position) return;
-    attributes.push({ position, matrix: child.matrixWorld.clone() });
-    total += position.count;
-  });
-  const points: THREE.Vector3[] = [];
-  const stride = Math.max(1, Math.ceil(total / 1024));
-  let offset = 0;
-  for (const { position, matrix } of attributes) {
-    for (let index = (stride - offset % stride) % stride; index < position.count; index += stride) {
-      points.push(new THREE.Vector3(position.getX(index), position.getY(index), position.getZ(index)).applyMatrix4(matrix));
-    }
-    offset += position.count;
-  }
-  silhouetteSamples.set(model.object, points);
-  return points;
-}
-
-function unionRects(a: Rect, b: Rect): Rect {
-  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
-  return { x, y, width: Math.max(a.x + a.width, b.x + b.width) - x, height: Math.max(a.y + a.height, b.y + b.height) - y };
+  return samples > 0 ? { x: minX, y: minY, width: maxX - minX, height: maxY - minY } : null;
 }
 
 function expandRect(rect: Rect, amount: number): Rect {

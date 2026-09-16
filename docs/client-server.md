@@ -11,8 +11,11 @@
 Original geometry is read on demand and never written to Server storage. LODs
 are bounded to 256 MiB in memory; PNGs are generated per request. Individual
 source reads are capped at 512 MiB. Visible source bytes for a PNG are also
-capped at 512 MiB in total. Hash verification still reads the original source
-on cache hits, so cached LODs cannot bypass revocation or source changes.
+capped at 512 MiB in total. Cold LOD and Raw requests hash only the requested
+Mesh. Cached LODs check its canonical path, byte size, and modification time,
+so serving one Mesh never triggers a hash sweep over a multi-gigabyte scene.
+LOD generation admits at most two builds and shares a 512 MiB weighted working
+memory budget; the browser issues at most four Mesh requests concurrently.
 
 ## Registration
 
@@ -33,6 +36,12 @@ on cache hits, so cached LODs cannot bypass revocation or source changes.
 5. `blind share model.ply --format json` submits absolute paths using this
    Client's own credential. A hashes the files and returns its existing
    `/s/<code>` and `/i/<code>.png` URL forms.
+
+For a persistent large scene, `blind share --config scene.json` submits the
+manifest's ordered `resources` list. Each resource may have a per-Mesh label;
+`groups` may label two or more 1-based member indices. Relative paths resolve
+from the manifest directory. The first registration streams and hashes each
+source once; it does not buffer the aggregate scene on either host.
 
 No personal SSH private key leaves B. The CLI exits after each operation;
 only the existing OS SSH service remains available. The Server may pool its
