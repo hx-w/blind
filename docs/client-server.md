@@ -76,11 +76,15 @@ Client state defaults to the user's Blind configuration directory. Override
 it with `BLIND_CLIENT_DIR`. Server state uses `BLIND_CONFIG_DIR`. Client files
 and Server SSH keys use mode 0600; credential directories use mode 0700.
 
-## Linux / Docker Server
+## Linux Server
 
-The Linux Server uses an OS file lock. Automatic `service install` remains a
-macOS LaunchAgent feature; Docker handles Linux restart behavior. Linux binary
-self-update is not currently packaged: rebuild the container for upgrades.
+GitHub releases include a native `blind-x86_64-unknown-linux-gnu.tar.gz`
+archive. A Linux NAS can download that archive and `SHA256SUMS`, verify the
+archive, install the single `blind` binary, and supervise `blind serve` with
+its native service manager. The Linux Server uses an OS file lock. Automatic
+`service install` remains a macOS LaunchAgent feature.
+
+The Docker recipe remains available when process isolation is preferred:
 
 Build the viewer, then build the Linux binary (Rust 1.90 or newer):
 

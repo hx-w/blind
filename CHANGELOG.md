@@ -3,6 +3,14 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-09-16
+
+### Added
+
+- GitHub releases now include a verified `x86_64-unknown-linux-gnu` archive for
+  native Linux servers, including NAS deployments that do not build Blind or
+  run the Blind server in Docker.
+
 ## [0.7.0] - 2026-09-15
 
 ### Added

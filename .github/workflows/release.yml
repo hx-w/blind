@@ -20,6 +20,8 @@ jobs:
             target: aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
         with:
@@ -36,6 +38,11 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
           package-manager-cache: false
+      - name: Install Linux runtime and integration-test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libvulkan1 mesa-vulkan-drivers openssh-server
       - name: Build viewer
         run: |
           npm ci --prefix web
