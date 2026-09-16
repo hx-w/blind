@@ -1,7 +1,7 @@
 //! Short-lived CLI. Only the OS SSH service remains running on a remote source.
 use crate::{
     config::{Config, config_path},
-    scene::MeshLabel,
+    scene::{MeshLabel, MeshLabelGroup},
     source::{Invitation, JoinRequest, JoinResponse, Source, write_private},
 };
 use anyhow::{Context, Result, bail};
@@ -19,7 +19,7 @@ use std::{
     name = "blind",
     version,
     about = "Share geometry through local or remote Blind sources",
-    after_help = "Run blind serve on A. Join once with blind join --stdin; then use blind share model.ply --label '1=Crown' --format json. The Client needs no background process."
+    after_help = "Run blind serve on A. Join once with blind join --stdin; then use blind share model.ply --label '1=Crown' --format json. Use comma-separated indices to label a group: --label '1,2=Reference'. The Client needs no background process."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,12 +42,20 @@ enum ClientCommand {
         name: Option<String>,
     },
     /// Create unchanged /s/ and /i/ links on the registered server.
+    #[command(
+        after_help = "Examples:\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1=Donor A' --label '1,2=Reference pair'"
+    )]
     Share {
         #[arg(required = true)]
         meshes: Vec<PathBuf>,
         #[arg(long)]
         title: Option<String>,
-        #[arg(long = "label")]
+        /// Label one Mesh (1=TEXT) or a group (1,2,3=TEXT). Repeat as needed.
+        #[arg(
+            long = "label",
+            value_name = "INDEX[,INDEX...]=TEXT",
+            help = "Label one Mesh (1=TEXT) or a group (1,2,3=TEXT); repeat as needed"
+        )]
         labels: Vec<String>,
         #[arg(long)]
         host: Option<String>,
@@ -358,7 +366,7 @@ async fn finish_join(
         Err(error) => {
             remove_authorization(c)?;
             cleanup_challenge(c);
-            Err(error.context("registration remains pending; check SSH/SFTP, then retry blind join --address HOST. If the invitation was revoked, run blind leave and request a new invitation"))
+            Err(error.context("registration remains pending for 10 minutes; check SSH/SFTP, then retry blind join --address HOST. After 10 minutes, run blind leave and reuse the invitation; if it was revoked, request the current invitation"))
         }
     }
 }
@@ -495,7 +503,7 @@ async fn share(
         })
         .collect::<Result<Vec<_>>>()?;
     let labels = parse_labels(&labels, paths.len())?;
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":paths,"title":title,"labels":labels,"origin":host,"stateless":stateless}))).await?;
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":paths,"title":title,"labels":labels.meshes,"label_groups":labels.groups,"origin":host,"stateless":stateless}))).await?;
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&payload)?),
         OutputFormat::View => println!(
@@ -517,26 +525,55 @@ async fn share(
     }
     Ok(())
 }
-pub fn parse_labels(labels: &[String], count: usize) -> Result<Vec<Option<MeshLabel>>> {
-    let mut result = vec![None; count];
+
+#[derive(Debug, PartialEq)]
+pub struct ParsedLabels {
+    pub meshes: Vec<Option<MeshLabel>>,
+    pub groups: Vec<MeshLabelGroup>,
+}
+
+pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {
+    let mut meshes = vec![None; count];
+    let mut groups = Vec::new();
     for label in labels {
-        let (index, text) = label.split_once('=').context("use --label INDEX=TEXT")?;
-        let index = index
-            .parse::<usize>()?
-            .checked_sub(1)
-            .filter(|i| *i < count)
-            .context("label index out of range")?;
-        if result[index].is_some() {
-            bail!("duplicate label index");
+        let (selectors, text) = label
+            .split_once('=')
+            .context("use --label INDEX[,INDEX...]=TEXT")?;
+        let indices = selectors
+            .split(',')
+            .map(|value| {
+                value
+                    .trim()
+                    .parse::<usize>()?
+                    .checked_sub(1)
+                    .filter(|index| *index < count)
+                    .context("label index out of range")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if indices.is_empty() {
+            bail!("a label needs at least one Mesh index");
         }
-        let label = MeshLabel {
+        let mesh_label = MeshLabel {
             text: text.trim().into(),
             anchor: None,
         };
-        label.validate()?;
-        result[index] = Some(label);
+        mesh_label.validate()?;
+        if indices.len() == 1 {
+            let index = indices[0];
+            if meshes[index].is_some() {
+                bail!("duplicate label index");
+            }
+            meshes[index] = Some(mesh_label);
+        } else {
+            let group = MeshLabelGroup {
+                text: mesh_label.text,
+                meshes: indices,
+            };
+            group.validate(count)?;
+            groups.push(group);
+        }
     }
-    Ok(result)
+    Ok(ParsedLabels { meshes, groups })
 }
 
 #[cfg(test)]
@@ -570,10 +607,22 @@ mod tests {
     #[test]
     fn labels_preserve_one_based_indices_and_reject_duplicates() {
         let labels = parse_labels(&["2= Preparation ".into()], 2).unwrap();
-        assert!(labels[0].is_none());
-        assert_eq!(labels[1].as_ref().unwrap().text, "Preparation");
+        assert!(labels.meshes[0].is_none());
+        assert_eq!(labels.meshes[1].as_ref().unwrap().text, "Preparation");
         assert!(parse_labels(&["1=A".into(), "1=B".into()], 2).is_err());
     }
+
+    #[test]
+    fn one_label_can_target_a_group_and_coexist_with_mesh_labels() {
+        let labels = parse_labels(&["1= Crown ".into(), "1, 2=Reference".into()], 2).unwrap();
+        assert_eq!(labels.meshes[0].as_ref().unwrap().text, "Crown");
+        assert_eq!(labels.groups.len(), 1);
+        assert_eq!(labels.groups[0].text, "Reference");
+        assert_eq!(labels.groups[0].meshes, [0, 1]);
+        assert!(parse_labels(&["1,1=Duplicate".into()], 2).is_err());
+        assert!(parse_labels(&["1,3=Range".into()], 2).is_err());
+    }
+
     #[test]
     fn server_urls_preserve_base_path_and_reject_embedded_secrets() {
         assert_eq!(

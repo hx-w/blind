@@ -53,6 +53,7 @@ pub struct AppState {
     pub renderer: Option<Arc<Renderer>>,
     pub image_slots: Arc<tokio::sync::Semaphore>,
     pub lod_slots: Arc<tokio::sync::Semaphore>,
+    join_slots: Arc<tokio::sync::Semaphore>,
     pub lod_cache: LodCache,
     pub shutdown: tokio::sync::mpsc::Sender<()>,
     doctor_lock: Arc<tokio::sync::Mutex<()>>,
@@ -103,6 +104,8 @@ struct CreateSceneRequest {
     title: Option<String>,
     origin: Option<String>,
     labels: Option<Vec<Option<crate::scene::MeshLabel>>>,
+    #[serde(default)]
+    label_groups: Vec<crate::scene::MeshLabelGroup>,
     #[serde(default)]
     stateless: bool,
 }
@@ -198,6 +201,7 @@ struct PublicScene {
     source: Option<crate::source::SceneSource>,
     title: String,
     meshes: Vec<PublicMesh>,
+    label_groups: Vec<crate::scene::MeshLabelGroup>,
     state: crate::scene::ViewState,
     owner: bool,
 }
@@ -237,6 +241,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         renderer,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         lod_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        join_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         lod_cache: LodCache::default(),
         shutdown: shutdown_tx,
         doctor_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -692,6 +697,9 @@ async fn create_scene(
             .set_labels(labels)
             .map_err(|error| AppError::bad_request(&error.to_string()))?;
     }
+    scene
+        .set_label_groups(request.label_groups)
+        .map_err(|error| AppError::bad_request(&error.to_string()))?;
     let origin = match request.origin {
         Some(origin) => state.config.normalize_share_origin(&origin)?,
         None => request_origin(&headers, &state.config)?,
@@ -746,6 +754,7 @@ async fn get_scene(
             source: scene.source.clone(),
             title: scene.title,
             meshes,
+            label_groups: scene.label_groups,
             state: scene.state,
             owner,
         }),
@@ -1434,11 +1443,19 @@ async fn join_client(
     if request.host.is_empty() {
         request.host = peer.ip().to_string();
     }
+    let permit = state
+        .join_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::too_many_requests("Too many registrations in progress"))?;
     let sources = state.registry.sources.clone();
-    let result = tokio::task::spawn_blocking(move || sources.begin(&token, request))
-        .await
-        .map_err(|e| AppError::internal(&e.to_string()))?
-        .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        sources.begin(&token, request)
+    })
+    .await
+    .map_err(|e| AppError::internal(&e.to_string()))?
+    .map_err(|e| AppError::bad_request(&e.to_string()))?;
     Ok((no_store(), Json(result)))
 }
 async fn client_info(
@@ -1553,10 +1570,11 @@ async fn client_scene(
     });
     let mut scene = SceneDescriptor {
         source: Some(source_ref),
-        schema: 2,
+        schema: 3,
         title,
         created_at: crate::source::now() as u64,
         meshes,
+        label_groups: Vec::new(),
         state: Default::default(),
     };
     if let Some(labels) = request.labels {
@@ -1564,6 +1582,9 @@ async fn client_scene(
             .set_labels(labels)
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
     }
+    scene
+        .set_label_groups(request.label_groups)
+        .map_err(|e| AppError::bad_request(&e.to_string()))?;
     // Server configuration/request origin selects the public endpoint; source addresses never form URLs.
     let origin = match request.origin {
         Some(origin) => state.config.normalize_share_origin(&origin)?,

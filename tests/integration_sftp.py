@@ -78,7 +78,9 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
 
         mesh = tmp/'tetra.ply'
         shutil.copyfile(ROOT/'tests/fixtures/tetra.ply', mesh)
-        output = json.loads(run([BIN/'blind', 'share', mesh, '--label', '1=Test mesh', '--format', 'json'], env))
+        mesh_pair = tmp/'tetra-pair.ply'
+        shutil.copyfile(ROOT/'tests/fixtures/tetra.ply', mesh_pair)
+        output = json.loads(run([BIN/'blind', 'share', mesh, mesh_pair, '--label', '1=Test mesh', '--label', '1,2=Reference pair', '--format', 'json'], env))
         assert output['viewer_url'].startswith(origin+'/s/')
         assert output['image_url'].startswith(origin+'/i/')
         assert len(output['viewer_url'].rsplit('/', 1)[1]) == 6
@@ -92,8 +94,14 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         status, scene = api('/api/v1/scenes/'+token)
         assert status == 200 and scene['source']['user'] == pwd.getpwuid(os.getuid()).pw_name
         assert 'path' not in scene['meshes'][0]
+        assert scene['meshes'][0]['label']['text'] == 'Test mesh'
+        assert scene['label_groups'] == [{'text':'Reference pair','meshes':[0,1]}]
         assert api('/api/v1/scenes/'+token+'/meshes/0/lod')[0] == 200
         assert api('/api/v1/scenes/'+token+'/meshes/0')[1] == mesh.read_bytes()
+        status, legacy = api('/api/v1/scenes', server_config['pat'], {'paths':[str(mesh),str(mesh_pair)], 'label_groups':[{'text':'PAT pair','meshes':[0,1]}]})
+        assert status == 200, legacy
+        legacy_token = legacy['viewer_url'].rsplit('/', 1)[1]
+        assert api('/api/v1/scenes/'+legacy_token)[1]['label_groups'] == [{'text':'PAT pair','meshes':[0,1]}]
         if api('/api/v1/health')[1]['image_renderer']:
             status, png = api('/i/'+token+'.png')
             assert status == 200 and png.startswith(b'\x89PNG')
@@ -150,8 +158,10 @@ LogLevel VERBOSE
             probe.write_text(receipt['challenge'])
             status, result = api('/api/v1/client/activate', receipt['credential'], {'challenge_path':str(probe),'host':'127.0.0.1','port':ssh_port})
             assert status == 200, result
+        pending = register('Pending')
         revoked = run([BIN/'blind', 'invite', '--revoke-all'], env).strip()
         assert revoked == 'revoked 1 invitation(s)', revoked
+        assert api('/api/v1/client', pending['credential'])[0] == 401
         request = {'name':'Revoked', 'host':'127.0.0.1', 'port':ssh_port, 'user':username, 'host_key':(tmp/'host_key.pub').read_text().split()[1]}
         assert api('/api/v1/clients/join', envelope['token'], request)[0] != 200
         print('PASS: reusable and revocable invitations, independent identities, writable-key rejection, verified read-only SFTP')

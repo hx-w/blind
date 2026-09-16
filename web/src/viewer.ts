@@ -3,7 +3,7 @@ import { ArcballControls } from 'three/addons/controls/ArcballControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { apiError, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
+import { apiError, type MeshLabelGroup, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
 import { createObjectMaterial, updateObjectMaterial } from './material';
 import { MeshLabels } from './labels';
 import shader from '../../shaders/matte.json';
@@ -55,6 +55,7 @@ export class MeshViewer {
   private readonly rendererSize = new THREE.Vector2();
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   private models: Model[] = [];
+  private labelGroups: MeshLabelGroup[] = [];
   private state!: ViewState;
   private selected = 0;
   private dirty = true;
@@ -71,7 +72,7 @@ export class MeshViewer {
     this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.root.append(this.renderer.domElement);
-    this.labels = new MeshLabels(this.root);
+    this.labels = new MeshLabels(this.root, (meshes, animate) => this.focusLabelGroup(meshes, animate));
     this.camera = this.perspective;
     this.controls = new ArcballControls(this.camera, this.renderer.domElement, this.scene);
     this.controls.enableAnimations = false;
@@ -95,6 +96,7 @@ export class MeshViewer {
 
   async load(scene: PublicScene): Promise<void> {
     this.disposeModels();
+    this.labelGroups = scene.label_groups ?? [];
     this.state = structuredClone(scene.state);
     this.state.strokes ??= [];
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
@@ -239,6 +241,15 @@ export class MeshViewer {
     const model = this.models[this.selected];
     if (!model) return;
     this.fitBox(model.bounds, true);
+  }
+
+  focusLabelGroup(indices: number[], animate = true): void {
+    const bounds = new THREE.Box3();
+    for (const index of indices) {
+      const model = this.models[index];
+      if (model?.info.visible) bounds.union(model.bounds);
+    }
+    if (!bounds.isEmpty()) this.fitBox(bounds, animate);
   }
 
   setCanonicalView(code: string): void {
@@ -461,7 +472,7 @@ export class MeshViewer {
       // when needed, immediately before rendering, never in ResizeObserver.
       if (this.rendererSize.x !== width || this.rendererSize.y !== height) this.renderer.setSize(width, height, false);
       this.renderer.render(this.scene, this.camera);
-      this.labels.render(this.models, this.camera, this.selected);
+      this.labels.render(this.models, this.labelGroups, this.camera, this.selected);
       this.dirty = false;
     }
   };

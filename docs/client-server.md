@@ -57,8 +57,10 @@ and user identity are separate from the host's.
 
 ## Recovery and revocation
 
-- A pending registration can be resumed with `blind join`; an incorrect route
-  can be corrected with `blind join --address b.example.com --port 22`.
+- A pending registration remains resumable for ten minutes with `blind join`;
+  an incorrect route can be corrected with
+  `blind join --address b.example.com --port 22`. After ten minutes, run
+  `blind leave` and reuse the same permanent invitation to start again.
 - If the invitation was revoked, run `blind leave`, request the current
   invitation and join again.
 - `blind status --json` reports this user's registration without credentials.
@@ -69,7 +71,8 @@ and user identity are separate from the host's.
   `blind sources --revoke SOURCE_ID`. Other registrations keep working.
   B can then run `blind leave` to remove its now-unused public-key line.
 - Revoking invitations does not revoke already registered sources or their
-  existing links. Revoke those sources separately when access must be removed.
+  existing links. It does cancel every pending registration that has not yet
+  completed. Revoke active sources separately when access must be removed.
 - To change an active registration's address or server, leave and join again;
   its old links are revoked. Prefer a stable, server-resolvable DNS name.
 - Temporarily offline hosts, authentication errors and permission failures

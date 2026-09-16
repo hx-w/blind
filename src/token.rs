@@ -95,6 +95,7 @@ mod tests {
             title: "review".into(),
             created_at: 1,
             meshes: Vec::new(),
+            label_groups: Vec::new(),
             state: ViewState::default(),
         }
     }

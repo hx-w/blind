@@ -202,11 +202,26 @@ impl Sources {
     }
 
     pub fn revoke_invitations(&self) -> Result<usize> {
-        let db = self
+        let mut db = self
             .db
             .lock()
             .map_err(|_| anyhow::anyhow!("source registry poisoned"))?;
-        Ok(db.execute("DELETE FROM invitations", [])?)
+        let transaction = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let pending = transaction
+            .prepare("SELECT id FROM sources WHERE expires>0")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let revoked = transaction.execute("DELETE FROM invitations", [])?;
+        transaction.execute("DELETE FROM sources WHERE expires>0", [])?;
+        transaction.commit()?;
+        drop(db);
+        for id in pending {
+            if valid_id(&id) {
+                let _ = fs::remove_file(self.key_path(&id));
+                let _ = fs::remove_file(self.key_path(&id).with_extension("pub"));
+            }
+        }
+        Ok(revoked)
     }
     pub fn begin(&self, invite: &str, req: JoinRequest) -> Result<JoinResponse> {
         validate_label(&req.name)?;
@@ -252,6 +267,13 @@ impl Sources {
         let count: i64 = tx.query_row("SELECT count(*) FROM sources", [], |r| r.get(0))?;
         if count >= 1024 {
             bail!("source registry is full");
+        }
+        let pending: i64 =
+            tx.query_row("SELECT count(*) FROM sources WHERE expires>0", [], |row| {
+                row.get(0)
+            })?;
+        if pending >= 32 {
+            bail!("too many pending registrations; complete or revoke them first");
         }
         let key_path = self.key_path(&id);
         let output = std::process::Command::new("ssh-keygen")
@@ -911,8 +933,7 @@ mod tests {
         assert_eq!(columns, ["hash", "created"]);
 
         let invitation = sources.invite("http://server:7400".into()).unwrap();
-        assert_eq!(sources.revoke_invitations().unwrap(), 1);
-        let request = JoinRequest {
+        let request = || JoinRequest {
             name: "user@B".into(),
             host: "127.0.0.1".into(),
             hostname: "B".into(),
@@ -920,7 +941,12 @@ mod tests {
             user: "user".into(),
             host_key: STANDARD.encode([0u8; 64]),
         };
-        assert!(sources.begin(&invitation.token, request).is_err());
+        let pending = sources.begin(&invitation.token, request()).unwrap();
+        assert!(sources.key_path(&pending.source.id).is_file());
+        assert_eq!(sources.revoke_invitations().unwrap(), 1);
+        assert!(sources.begin(&invitation.token, request()).is_err());
+        assert!(sources.authenticate(&pending.credential, true).is_err());
+        assert!(!sources.key_path(&pending.source.id).exists());
     }
     #[cfg(unix)]
     #[test]

@@ -15,6 +15,7 @@ pub const MAX_SCREEN_STROKES: usize = 64;
 pub const MAX_SCREEN_STROKE_POINTS: usize = 512;
 pub const MAX_SCREEN_POINTS: usize = 4_096;
 pub const MAX_MESH_LABEL_CHARS: usize = 120;
+pub const MAX_LABEL_GROUPS: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneDescriptor {
@@ -24,6 +25,8 @@ pub struct SceneDescriptor {
     pub title: String,
     pub created_at: u64,
     pub meshes: Vec<MeshRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub label_groups: Vec<MeshLabelGroup>,
     pub state: ViewState,
 }
 
@@ -61,6 +64,34 @@ impl MeshLabel {
             .is_some_and(|point| point.iter().any(|v| !v.is_finite()))
         {
             bail!("Mesh label anchor must contain finite coordinates");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MeshLabelGroup {
+    pub text: String,
+    /// Zero-based Mesh indices. A group always contains at least two Meshes.
+    pub meshes: Vec<usize>,
+}
+
+impl MeshLabelGroup {
+    pub fn validate(&self, mesh_count: usize) -> Result<()> {
+        if self.text.trim().is_empty() || self.text.chars().count() > MAX_MESH_LABEL_CHARS {
+            bail!("Mesh label must contain 1 to {MAX_MESH_LABEL_CHARS} characters");
+        }
+        if self.meshes.len() < 2 {
+            bail!("A grouped label must contain at least two Meshes");
+        }
+        let mut unique = self.meshes.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.len() != self.meshes.len() {
+            bail!("A grouped label cannot contain the same Mesh twice");
+        }
+        if self.meshes.iter().any(|index| *index >= mesh_count) {
+            bail!("label index out of range");
         }
         Ok(())
     }
@@ -197,6 +228,17 @@ impl SceneDescriptor {
         Ok(())
     }
 
+    pub fn set_label_groups(&mut self, groups: Vec<MeshLabelGroup>) -> Result<()> {
+        if groups.len() > MAX_LABEL_GROUPS {
+            bail!("A scene can contain at most {MAX_LABEL_GROUPS} grouped labels");
+        }
+        for group in &groups {
+            group.validate(self.meshes.len())?;
+        }
+        self.label_groups = groups;
+        Ok(())
+    }
+
     pub async fn create(paths: &[PathBuf], title: Option<String>) -> Result<Self> {
         if paths.is_empty() {
             bail!("at least one Mesh path is required");
@@ -242,13 +284,14 @@ impl SceneDescriptor {
         });
         Ok(Self {
             source: None,
-            schema: 2,
+            schema: 3,
             title,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
             meshes,
+            label_groups: Vec::new(),
             state: ViewState::default(),
         })
     }
@@ -309,7 +352,10 @@ impl SceneDescriptor {
             camera.orthographic_height = camera.orthographic_height.clamp(0.0001, 1_000_000.0);
         }
         validate_screen_strokes(&state.strokes)?;
-        self.schema = self.schema.max(2);
+        for group in &self.label_groups {
+            group.validate(self.meshes.len())?;
+        }
+        self.schema = self.schema.max(3);
         self.state = state;
         Ok(())
     }
@@ -513,7 +559,7 @@ mod tests {
                 state,
             })
             .unwrap();
-        assert_eq!(scene.schema, 2);
+        assert_eq!(scene.schema, 3);
         assert_eq!(scene.state.strokes.len(), 1);
         assert_eq!(scene.meshes[0].quality, MeshQuality::Raw);
 
@@ -590,6 +636,67 @@ mod tests {
             .unwrap();
         assert_eq!(reopened.meshes[0].label.as_ref().unwrap().text, "生成结果");
         assert_eq!(reopened.meshes[0].label.as_ref().unwrap().anchor, None);
+    }
+
+    #[tokio::test]
+    async fn grouped_labels_survive_sharing_and_validate_members() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.ply");
+        let second = directory.path().join("second.ply");
+        std::fs::write(&first, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        std::fs::write(&second, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let mut scene = SceneDescriptor::create(&[first, second], None)
+            .await
+            .unwrap();
+        let group = MeshLabelGroup {
+            text: "参考牙".into(),
+            meshes: vec![0, 1],
+        };
+        scene.set_label_groups(vec![group.clone()]).unwrap();
+
+        let codec = crate::token::TokenCodec::new([19; 32]);
+        let reopened = codec
+            .open(&codec.seal(crate::token::Scope::Public, &scene).unwrap())
+            .unwrap()
+            .scene;
+        assert_eq!(reopened.label_groups, [group]);
+        assert!(
+            MeshLabelGroup {
+                text: "单颗".into(),
+                meshes: vec![0]
+            }
+            .validate(2)
+            .is_err()
+        );
+        assert!(
+            MeshLabelGroup {
+                text: "重复".into(),
+                meshes: vec![0, 0]
+            }
+            .validate(2)
+            .is_err()
+        );
+        assert!(
+            MeshLabelGroup {
+                text: "越界".into(),
+                meshes: vec![0, 2]
+            }
+            .validate(2)
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_scenes_default_to_no_grouped_labels() {
+        let value = serde_json::json!({
+            "schema": 2,
+            "title": "legacy",
+            "created_at": 1,
+            "meshes": [],
+            "state": ViewState::default()
+        });
+        let scene: SceneDescriptor = serde_json::from_value(value).unwrap();
+        assert!(scene.label_groups.is_empty());
     }
 
     #[test]

@@ -22,6 +22,9 @@ The encrypted descriptor contains:
 - An optional label per Mesh: `{"text":"供体 A","anchor":[0,1,2]}`.
   Text is limited to 120 characters; the optional anchor is a finite world-space
   point. Omitting it attaches the label to the Mesh bounds center.
+- Optional labels spanning multiple Meshes: `{"text":"参考牙","meshes":[0,1]}`.
+  Mesh indices are zero-based in the descriptor and must contain at least two
+  unique, valid members.
 - Camera position, target, up vector, field of view, zoom, projection, and orthographic height.
 - Captured frame dimensions.
 - Surface mode, axes, and gray background mode.
@@ -51,6 +54,9 @@ their anchors into screen space and lays out readable text with a leader and
 attachment dot. Hidden Meshes and anchors outside the camera view hide their
 labels. Label placement adapts to the viewport and available space; text and
 world-space anchors are preserved in both registry and stateless scene records.
+Labels spanning multiple Meshes draw a low-obstruction corner frame around the
+visible members. Their label is selectable and fits the camera to the group.
+Individual labels remain visible and take part in the same collision avoidance.
 PNG rendering currently does not draw Mesh labels.
 
 For API clients, scene creation accepts an optional `labels` array parallel to
@@ -58,6 +64,9 @@ For API clients, scene creation accepts an optional `labels` array parallel to
 `label` field. In a share update, omit `label` to preserve it, send a label object
 to replace it, or send `null` to remove it. Editing and sharing creates a new
 snapshot; the original link is unchanged.
+Scene creation also accepts `label_groups`, an array of `{text, meshes}` objects.
+The CLI intentionally exposes both cases through one repeatable option:
+`--label '1=牙冠'` for one Mesh and `--label '1,2=参考牙'` for a group.
 
 ## Lifecycle
 

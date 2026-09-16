@@ -9,8 +9,11 @@ All notable changes to Blind are documented here. This project follows
 
 - Server invitations are now permanent and reusable for trusted-team
   onboarding. `blind invite --revoke-all` rotates access without revoking
-  existing registered sources. Upgrading invalidates legacy temporary
-  invitations.
+  existing registered sources, while cancelling pending registrations.
+  Upgrading invalidates legacy temporary invitations.
+- The existing repeatable `--label` option now accepts comma-separated Mesh
+  indices. Labels spanning multiple Meshes render as selectable corner frames,
+  while individual labels continue to coexist inside the same scene.
 
 ## [0.7.1] - 2026-09-16
 

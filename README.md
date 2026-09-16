@@ -118,11 +118,13 @@ truncation, while the close control and Mesh statistics remain visible. The
 information panel and Mesh details share the same space and can be switched
 directly from the toolbar.
 
-Attach labels to individual Meshes with repeated `--label INDEX=TEXT` options
-(indices start at 1 and follow the input file order):
+Attach labels with repeated `--label INDEX[,INDEX...]=TEXT` options. Indices
+start at 1 and follow the input file order. One index labels one Mesh; multiple
+indices automatically label the group, without a separate group mode:
 
 ```sh
-blind share donor-a.ply donor-b.ply --label '1=供体 A' --label '2=供体 B' --format json
+blind share crown.ply donor-a.ply donor-b.ply \
+  --label '1=生成牙冠' --label '2,3=参考牙' --format json
 ```
 
 In the interactive viewer, choose a Mesh in **详情** and edit **3D 标注**.
@@ -133,6 +135,9 @@ During camera motion, each label retains its placement
 relative to its projected anchor so it does not jump between sides. Hidden
 Meshes hide their labels. Clear the text to remove a label; share the current
 view to save edits in a new link. Existing links keep their original labels.
+Labels spanning multiple Meshes use a quiet corner frame around the visible
+members. Select the group label to fit the whole group; per-Mesh labels remain
+visible inside the frame.
 Each label accepts up to 120 characters. Labels appear in interactive links;
 server-rendered PNG links currently include geometry and screen strokes only.
 

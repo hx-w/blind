@@ -33,6 +33,11 @@ button. It shares the details panel with Mesh controls. On phones, the four dock
 actions stack their icon above their label to fit narrow screens. Scene messages
 wrap and scroll inside the panel, with the close control and statistics visible.
 
+Labels share one visual grammar. A one-Mesh label uses a leader and attachment
+dot. A label spanning multiple Meshes uses four restrained corner marks around
+their projected union, with the label clipped onto an edge. The frame never
+fills or tints the geometry, and selecting its label fits the whole group.
+
 ## 6. Depth
 
 Depth comes from background lightness steps and restrained shadows. No blur glass, decorative gradients, or hard card outlines.

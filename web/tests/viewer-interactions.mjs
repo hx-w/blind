@@ -10,7 +10,9 @@ const html = (await readFile(new URL('index.html', dist), 'utf8')).replace('<hea
 const scene = {
   title: 'Viewer interaction regression', owner: false,
   meshes: [0, 1].map(i => ({ name: `Mesh ${i + 1}`, format: 'ply', revision: 'fixture', byte_size: fixture.length,
-    color: i ? '#5fb4ff' : '#ffc857', opacity: 1, visible: true, quality: 'raw', source_url: `/mesh/${i}` })),
+    color: i ? '#5fb4ff' : '#ffc857', opacity: 1, visible: true, quality: 'raw', source_url: `/mesh/${i}`,
+    ...(i === 0 ? {label:{text:'Mesh one'}} : {}) })),
+  label_groups: [{text:'Reference pair',meshes:[0,1]}],
   state: { selected: 0, shading: 'flat', projection: 'perspective', background: 'dark', axes: false,
     frame: { width: 1280, height: 800 }, camera: null, strokes: [{color:'#ff6b5e',aspect:1.6,points:[[0.2,0.2],[0.4,0.3]]}] },
 };
@@ -161,5 +163,22 @@ test('visibility beside opacity preserves opacity, selection and shared state', 
     assert.equal(shared.meshes[0].visible,false);
     assert.equal(shared.meshes[0].opacity,0.37);
     assert.equal(shared.meshes[1].visible,true);
+  } finally { await page.close(); }
+});
+
+test('a label spanning multiple Meshes draws a focusable frame beside individual labels', async () => {
+  const page = await openPage({width:390,height:844});
+  try {
+    const group = page.locator('.mesh-group-label');
+    assert.equal(await group.getAttribute('aria-label'),'聚焦标注 Reference pair，2 个 Mesh');
+    assert.equal(await page.locator('.mesh-label').getByText('Mesh one').isVisible(),true);
+    const geometry = await page.evaluate(() => {
+      const label=document.querySelector('.mesh-group-label').getBoundingClientRect();
+      return {path:document.querySelector('.mesh-group-frame').getAttribute('d'),left:label.left,right:label.right,width:innerWidth};
+    });
+    assert.ok(geometry.path.length > 20,'group frame must contain visible corner segments');
+    assert.ok(geometry.left >= 0 && geometry.right <= geometry.width,'group label must stay inside the viewport');
+    await group.click();
+    assert.equal(await group.isVisible(),true);
   } finally { await page.close(); }
 });
