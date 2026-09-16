@@ -1629,6 +1629,7 @@ async fn client_scene(
             revision: observed.revision,
             byte_size: observed.size,
             modified_ns: observed.modified_ns,
+            change_ns: observed.change_ns,
             color: crate::scene::PALETTE[i % crate::scene::PALETTE.len()].into(),
             opacity: 1.0,
             visible: true,

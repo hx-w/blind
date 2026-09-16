@@ -143,6 +143,7 @@ pub struct Observed {
     pub path: String,
     pub size: u64,
     pub modified_ns: Option<u64>,
+    pub change_ns: Option<u64>,
     pub revision: String,
     pub bytes: Vec<u8>,
 }
@@ -604,6 +605,9 @@ impl Sources {
         if result.size != mesh.byte_size
             || result.path != mesh.path
             || result.modified_ns != mesh.modified_ns
+            || mesh
+                .change_ns
+                .is_some_and(|changed| result.change_ns != Some(changed))
         {
             return Err(SourceError::Gone);
         }
@@ -630,6 +634,9 @@ impl Sources {
             || mesh
                 .modified_ns
                 .is_some_and(|modified| result.modified_ns != Some(modified))
+            || mesh
+                .change_ns
+                .is_some_and(|changed| result.change_ns != Some(changed))
         {
             return Err(SourceError::Gone);
         }
@@ -712,6 +719,7 @@ fn read_sftp(
         canonical.to_string_lossy().into_owned(),
         expected,
         stat.mtime.and_then(seconds_to_nanos),
+        None,
         keep,
         limit,
     )?;
@@ -743,6 +751,7 @@ fn stat_sftp(
         path: canonical.to_string_lossy().into_owned(),
         size,
         modified_ns: stat.mtime.and_then(seconds_to_nanos),
+        change_ns: None,
         revision: String::new(),
         bytes: Vec::new(),
     })
@@ -767,6 +776,7 @@ fn read_local(path: &str, keep: bool) -> std::result::Result<Observed, SourceErr
         canonical.to_string_lossy().into_owned(),
         stat.len(),
         modified_nanos(&stat),
+        change_nanos(&stat),
         keep,
         MAX_SOURCE_BYTES,
     )
@@ -784,6 +794,7 @@ fn stat_local(path: &str) -> std::result::Result<Observed, SourceError> {
         path: canonical.to_string_lossy().into_owned(),
         size: stat.len(),
         modified_ns: modified_nanos(&stat),
+        change_ns: change_nanos(&stat),
         revision: String::new(),
         bytes: Vec::new(),
     })
@@ -793,6 +804,7 @@ fn read_stream(
     path: String,
     size: u64,
     modified_ns: Option<u64>,
+    change_ns: Option<u64>,
     keep: bool,
     limit: u64,
 ) -> std::result::Result<Observed, SourceError> {
@@ -832,6 +844,7 @@ fn read_stream(
         path,
         size,
         modified_ns,
+        change_ns,
         revision: format!("sha256:{}", hex::encode(hash.finalize())),
         bytes,
     })
@@ -842,6 +855,19 @@ fn seconds_to_nanos(seconds: u64) -> Option<u64> {
 fn modified_nanos(metadata: &fs::Metadata) -> Option<u64> {
     let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(duration.as_nanos()).ok()
+}
+
+#[cfg(unix)]
+fn change_nanos(metadata: &fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let seconds = u64::try_from(metadata.ctime()).ok()?;
+    let nanos = u64::try_from(metadata.ctime_nsec()).ok()?;
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
+#[cfg(not(unix))]
+fn change_nanos(_metadata: &fs::Metadata) -> Option<u64> {
+    None
 }
 pub fn validate_path(path: &str) -> Result<()> {
     if !Path::new(path).is_absolute() || path.len() > 16_384 || path.contains('\0') {
@@ -1178,11 +1204,11 @@ mod tests {
     #[test]
     fn bounded_reader_rejects_growth_and_oversize() {
         assert!(matches!(
-            read_stream(&mut &b"abc"[..], "x".into(), 3, None, true, 2),
+            read_stream(&mut &b"abc"[..], "x".into(), 3, None, None, true, 2),
             Err(SourceError::TooLarge)
         ));
         assert!(matches!(
-            read_stream(&mut &b"abc"[..], "x".into(), 2, None, true, 10),
+            read_stream(&mut &b"abc"[..], "x".into(), 2, None, None, true, 10),
             Err(SourceError::Unavailable(_))
         ));
     }

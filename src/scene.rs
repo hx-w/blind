@@ -39,6 +39,8 @@ pub struct MeshRef {
     pub byte_size: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modified_ns: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_ns: Option<u64>,
     pub color: String,
     pub opacity: f32,
     pub visible: bool,
@@ -257,7 +259,9 @@ impl SceneDescriptor {
             let format = MeshFormat::from_path(&canonical)?;
             let revision = hash_file(&canonical).await?;
             let after = tokio::fs::metadata(&canonical).await?;
-            if metadata.len() != after.len() || modified_nanos(&metadata) != modified_nanos(&after)
+            if metadata.len() != after.len()
+                || modified_nanos(&metadata) != modified_nanos(&after)
+                || change_nanos(&metadata) != change_nanos(&after)
             {
                 bail!("{} changed while hashing; retry", path.display());
             }
@@ -273,6 +277,7 @@ impl SceneDescriptor {
                 revision,
                 byte_size: after.len(),
                 modified_ns: modified_nanos(&after),
+                change_ns: change_nanos(&after),
                 color: PALETTE[index % PALETTE.len()].to_string(),
                 opacity: 1.0,
                 visible: true,
@@ -386,6 +391,19 @@ impl SceneDescriptor {
 fn modified_nanos(metadata: &std::fs::Metadata) -> Option<u64> {
     let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(duration.as_nanos()).ok()
+}
+
+#[cfg(unix)]
+fn change_nanos(metadata: &std::fs::Metadata) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let seconds = u64::try_from(metadata.ctime()).ok()?;
+    let nanos = u64::try_from(metadata.ctime_nsec()).ok()?;
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
+}
+
+#[cfg(not(unix))]
+fn change_nanos(_metadata: &std::fs::Metadata) -> Option<u64> {
+    None
 }
 
 fn validate_screen_strokes(strokes: &[ScreenStroke]) -> Result<()> {
@@ -610,6 +628,7 @@ mod tests {
         .unwrap();
         assert_eq!(mesh.quality, MeshQuality::Lod);
         assert_eq!(mesh.modified_ns, None);
+        assert_eq!(mesh.change_ns, None);
     }
 
     #[tokio::test]
@@ -621,6 +640,8 @@ mod tests {
         let scene = SceneDescriptor::create(&paths, None).await.unwrap();
         assert_eq!(scene.meshes.len(), 65);
         assert!(scene.meshes.iter().all(|mesh| mesh.modified_ns.is_some()));
+        #[cfg(unix)]
+        assert!(scene.meshes.iter().all(|mesh| mesh.change_ns.is_some()));
     }
 
     #[tokio::test]
