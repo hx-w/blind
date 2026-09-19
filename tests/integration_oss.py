@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Read-only S3 + real Blind CLI/HTTP contract test; no cloud credentials needed."""
+import base64
 import hashlib
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -33,24 +34,36 @@ class Storage(BaseHTTPRequestHandler):
 
     def do_GET(self):
         try:
-            auth = self.headers['Authorization']
-            assert auth.startswith('AWS4-HMAC-SHA256 ')
-            fields = dict(x.split('=', 1) for x in auth.removeprefix('AWS4-HMAC-SHA256 ').split(', '))
-            access, date, region, service, suffix = fields['Credential'].split('/')
-            assert region == 'test-region' and service == 's3' and suffix == 'aws4_request'
-            names = fields['SignedHeaders'].split(';')
-            headers = ''.join(f'{name}:{" ".join(self.headers[name].split())}\n' for name in names)
-            path = urllib.parse.urlsplit(self.path)
-            canonical = '\n'.join(['GET', path.path, path.query, headers, fields['SignedHeaders'], self.headers['x-amz-content-sha256']])
-            scope = '/'.join([date, region, service, suffix])
-            signing = '\n'.join(['AWS4-HMAC-SHA256', self.headers['x-amz-date'], scope, hashlib.sha256(canonical.encode()).hexdigest()])
-            key = ('AWS4' + ACCOUNTS[access]).encode()
-            for part in [date, region, service, suffix]:
-                key = hmac.new(key, part.encode(), hashlib.sha256).digest()
-            assert hmac.compare_digest(fields['Signature'], hmac.new(key, signing.encode(), hashlib.sha256).hexdigest())
-            bucket, key_path = urllib.parse.unquote(path.path).lstrip('/').split('/', 1)
-            assert (access, bucket) in [('key-a', 'bucket-a'), ('key-b', 'bucket-b')]
-            assert key_path == KEY
+            if self.headers.get('Authorization'):
+                auth = self.headers['Authorization']
+                assert auth.startswith('AWS4-HMAC-SHA256 ')
+                fields = dict(x.split('=', 1) for x in auth.removeprefix('AWS4-HMAC-SHA256 ').split(', '))
+                access, date, region, service, suffix = fields['Credential'].split('/')
+                assert region == 'test-region' and service == 's3' and suffix == 'aws4_request'
+                names = fields['SignedHeaders'].split(';')
+                headers = ''.join(f'{name}:{" ".join(self.headers[name].split())}\n' for name in names)
+                path = urllib.parse.urlsplit(self.path)
+                canonical = '\n'.join(['GET', path.path, path.query, headers, fields['SignedHeaders'], self.headers['x-amz-content-sha256']])
+                scope = '/'.join([date, region, service, suffix])
+                signing = '\n'.join(['AWS4-HMAC-SHA256', self.headers['x-amz-date'], scope, hashlib.sha256(canonical.encode()).hexdigest()])
+                key = ('AWS4' + ACCOUNTS[access]).encode()
+                for part in [date, region, service, suffix]:
+                    key = hmac.new(key, part.encode(), hashlib.sha256).digest()
+                assert hmac.compare_digest(fields['Signature'], hmac.new(key, signing.encode(), hashlib.sha256).hexdigest())
+                bucket, key_path = urllib.parse.unquote(path.path).lstrip('/').split('/', 1)
+                assert (access, bucket) in [('key-a', 'bucket-a'), ('key-b', 'bucket-b')]
+                assert key_path == KEY
+            else:
+                path = urllib.parse.urlsplit(self.path)
+                query = urllib.parse.parse_qs(path.query)
+                assert set(query) == {'e', 'token'}
+                assert time.time() < int(query['e'][0]) <= time.time() + 310
+                access, signature = query['token'][0].split(':', 1)
+                unsigned = f'http://{self.headers["Host"]}' + self.path.split('&token=', 1)[0]
+                expected = base64.urlsafe_b64encode(hmac.new(ACCOUNTS[access].encode(), unsigned.encode(), hashlib.sha1).digest()).decode()
+                assert hmac.compare_digest(signature, expected)
+                bucket, key_path = 'bucket-a', urllib.parse.unquote(path.path).lstrip('/')
+                assert access == 'key-a' and key_path == KEY
         except (AssertionError, KeyError, ValueError, AttributeError):
             self.send_error(403)
             return
@@ -68,7 +81,8 @@ class Storage(BaseHTTPRequestHandler):
             self.end_headers()
             return
         self.send_response(200)
-        self.send_header('Content-Length', str(513 * 1024 * 1024 if state['mode'] == 'oversize' else len(state['payload'])))
+        if state['mode'] != 'no-length':
+            self.send_header('Content-Length', str(513 * 1024 * 1024 if state['mode'] == 'oversize' else len(state['payload'])))
         self.send_header('ETag', '"' + hashlib.md5(state['payload']).hexdigest() + '"')
         self.send_header('Last-Modified', 'Sat, 19 Sep 2026 00:00:00 GMT')
         self.end_headers()
@@ -189,25 +203,54 @@ with tempfile.TemporaryDirectory(prefix='blind-oss-test-') as temp:
         assert api('/api/v1/client/oss')[0] == 401
         catalog = json.loads(api('/api/v1/client/oss', client['credential'])[1])
         assert catalog['can_share'] and len(catalog['stores']) == 2
-        assert all(set(x) == {'alias', 'endpoint', 'region'} for x in catalog['stores'])
+        assert all(set(x) == {'alias', 'endpoint', 'region', 'signing'} for x in catalog['stores'])
         with sqlite3.connect(tmp/'server/sources.sqlite3') as db:
             record = json.loads(db.execute('SELECT record FROM sources WHERE id=?', (client['source']['id'],)).fetchone()[0])
             record['local'] = False
             db.execute('UPDATE sources SET record=? WHERE id=?', (json.dumps(record), record['id']))
         before = len(state['requests'])
-        status, _ = api('/api/v1/client/scenes', client['credential'], {'paths': [first]})
-        assert status == 401 and before == len(state['requests'])
+        status, payload = api('/api/v1/client/scenes', client['credential'], {'paths': [first]})
+        assert status == 200 and before < len(state['requests'])
+        remote_token = json.loads(payload)['viewer_url'].rsplit('/', 1)[1]
+        assert api(f'/api/v1/scenes/{remote_token}/meshes/0') == (200, PAYLOAD)
         catalog = json.loads(api('/api/v1/client/oss', client['credential'])[1])
-        assert not catalog['can_share'] and len(catalog['stores']) == 2
+        assert catalog['can_share'] and len(catalog['stores']) == 2
         client['source']['local'] = False
         (tmp/'client/client.json').write_text(json.dumps(client))
         assert 'prod' in run('oss', 'list')
+        assert share(first)
+        with sqlite3.connect(tmp/'server/sources.sqlite3') as db:
+            record['active'] = False
+            db.execute('UPDATE sources SET record=? WHERE id=?', (json.dumps(record), record['id']))
+        assert api('/api/v1/client/oss', client['credential'])[0] == 401
+        assert api('/api/v1/client/scenes', client['credential'], {'paths': [first]})[0] == 401
+        assert api(f'/api/v1/scenes/{remote_token}/meshes/0')[0] == 410
+        with sqlite3.connect(tmp/'server/sources.sqlite3') as db:
+            record['active'] = True
+            db.execute('UPDATE sources SET record=? WHERE id=?', (json.dumps(record), record['id']))
         client['source']['local'] = True
         (tmp/'client/client.json').write_text(json.dumps(client))
         with sqlite3.connect(tmp/'server/sources.sqlite3') as db:
             record['local'] = True
             db.execute('UPDATE sources SET record=? WHERE id=?', (json.dumps(record), record['id']))
-        print('PASS: remote Clients cannot use Server OSS credentials')
+        print('PASS: registered remote Clients discover and share Server OSS without receiving credentials')
+
+        run('oss', 'set', 'prod', '--signing', 'hmac-sha1-url', '--bucket', 'bucket-a', stdin='\n'.join([endpoint, 'key-a', ACCOUNTS['key-a']])+'\n')
+        assert api(mesh_url) == (200, PAYLOAD)
+        assert api(mesh_url+'/lod')[0] == 200
+        assert 'bucket:bucket-a' in run('oss', 'list')
+        assert api('/api/v1/client/scenes', client['credential'], {'paths': [first.replace('/bucket-a/', '/wrong-bucket/')]})[0] == 503
+        state['mode'] = 'redirect'
+        before = len(state['requests'])
+        assert api(mesh_url)[0] == 503 and len(state['requests']) == before+1
+        state['mode'] = '403'
+        assert api(mesh_url)[0] == 503
+        state['mode'] = 'ok'
+        assert api(mesh_url)[0] == 200
+        state['mode'] = 'no-length'
+        assert api(mesh_url) == (200, PAYLOAD)
+        state['mode'] = 'ok'
+        print('PASS: signed CDN URL, domain bucket binding, encoded keys, no redirects, transient failure recovery')
 
         blocked_token = share(first, title='revocation-during-read')
         state['mode'] = 'blocked'

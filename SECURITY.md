@@ -27,8 +27,12 @@ long self-contained capability is preferable.
 
 Named OSS credentials live only in the Server's private `oss.json` (mode 0600).
 Use read-only object-store credentials for the intended buckets/prefixes.
-Only the Server owner PAT or Server-local Clients may create OSS scenes;
-remote SFTP Clients do not inherit this authority. Public scene metadata and
+All active registered Clients and the Server owner PAT may create scenes from
+Server-configured OSS aliases. Register only Clients trusted to read those
+configured stores; bucket/prefix restrictions belong in the storage credentials.
+A download-domain alias is also bound to its configured bucket. Revoked or
+unactivated Clients cannot create scenes, and revocation invalidates existing
+scenes owned by that Client. Public scene metadata and
 capability URLs never include these credentials. OSS reads use HTTPS, reject
 redirects, and redact upstream errors. HTTP is allowed only on loopback for
 local storage/testing. The OSS alias is a locator, not an authorization token.

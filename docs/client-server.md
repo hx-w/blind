@@ -17,10 +17,12 @@ so serving one Mesh never triggers a hash sweep over a multi-gigabyte scene.
 LOD generation admits at most two builds and shares a 512 MiB weighted working
 memory budget; the browser issues at most four Mesh requests concurrently.
 
-For OSS resources, the Server stores named S3 credentials in private `oss.json`.
+For OSS resources, the Server stores named storage credentials in private `oss.json`.
 `blind oss list` on a remote Client discovers the connected Server's aliases;
 proxies with explicit Client-route allowlists must allow `GET /api/v1/client/oss`.
-Only the Server-local Client or owner PAT can create OSS scenes. Cached OSS
+Any active registered Client or the owner PAT can create OSS scenes. OSS-only
+shares do not need a live SFTP connection to the Client. Revoking that Client
+invalidates its OSS scenes. Keys and signed download URLs stay on the Server. Cached OSS
 LODs verify the source SHA-256 with a bounded GET because an S3 ETag is not
 necessarily a content hash. A temporary storage failure remains recoverable.
 

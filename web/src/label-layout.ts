@@ -2,32 +2,37 @@ export interface Rect { x: number; y: number; width: number; height: number }
 export interface LabelOffset { x: number; y: number }
 interface LayoutInput {
   width: number; height: number; labelWidth: number; labelHeight: number;
-  x: number; y: number; silhouette: Rect | null; silhouettes: (Rect | null)[]; occupied: Rect[];
+  x: number; y: number; occupied: Rect[];
 }
 
+export const MAX_LEADER_LENGTH = 72;
+
 export function layoutLabel(input: LayoutInput, previous?: LabelOffset): { rect: Rect; offset: LabelOffset } {
-  const { width, height, labelWidth: w, labelHeight: h, x, y, silhouette, silhouettes, occupied } = input;
+  const { width, height, labelWidth: w, labelHeight: h, x, y, occupied } = input;
   const place = (left: number, top: number): Rect => ({ x: clamp(left, 8, width - w - 8), y: clamp(top, 8, height - h - 8), width: w, height: h });
+  const distance = (r: Rect): number => Math.hypot(x - clamp(x, r.x, r.x + w), y - clamp(y, r.y, r.y + h));
   // Camera motion only reprojects the anchor. Re-scoring symmetric candidates
   // on every frame makes tiny floating-point changes flip labels across a Mesh.
-  if (previous) return { rect: place(x + previous.x, y + previous.y), offset: previous };
+  if (previous) {
+    const rect = place(x + previous.x, y + previous.y);
+    if (distance(rect) <= MAX_LEADER_LENGTH) return { rect, offset: previous };
+  }
   const side = x < width / 2 ? -1 : 1;
   const candidates: Rect[] = [];
   for (const direction of [side, -side]) {
-    const inside = x + (direction > 0 ? 36 : -36 - w);
-    const lefts = silhouette
-      ? [direction > 0 ? silhouette.x + silhouette.width + 12 : silhouette.x - w - 12, inside]
-      : [inside];
-    for (const dy of [-36 - h, 24, -h / 2, -80 - h, 68, -124 - h, 112]) {
-      for (const left of lefts) candidates.push(place(left, y + dy));
+    // Meshes cover ordinary labels. Do not chase a projected bounding box
+    // across the viewport just to keep a label clear of geometry.
+    for (const gap of [18, 36]) {
+      const left = x + (direction > 0 ? gap : -gap - w);
+      for (const dy of [-h / 2, -h - 12, 12, -h - 36, 36]) candidates.push(place(left, y + dy));
     }
   }
   const score = (r: Rect): number => occupied.reduce((sum, other) => sum + overlap(r, other), 0) * 100
-    + silhouettes.reduce((sum, other) => sum + (other ? overlap(r, other) : 0), 0)
-    + Math.hypot(r.x + w / 2 - x, r.y + h / 2 - y);
+    + distance(r);
   let rect = candidates[0];
   let best = score(rect);
   for (const candidate of candidates) {
+    if (distance(candidate) > MAX_LEADER_LENGTH) continue;
     const next = score(candidate);
     if (next < best) { rect = candidate; best = next; }
   }

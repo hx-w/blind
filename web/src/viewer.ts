@@ -73,7 +73,7 @@ export class MeshViewer {
   onViewChangeStart?: () => void;
 
   constructor(private readonly root: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -227,7 +227,9 @@ export class MeshViewer {
   setBackground(background: ViewState['background']): void {
     this.state.background = background;
     const theme = background === 'light' ? shader.background_light : shader.background_dark;
-    this.scene.background = new THREE.Color(theme);
+    this.scene.background = null;
+    this.renderer.setClearColor(theme, 0);
+    this.root.style.backgroundColor = theme;
     document.documentElement.dataset.theme = background;
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme);
     this.dirty = true;
@@ -475,10 +477,22 @@ export class MeshViewer {
   private pointerUp = (event: PointerEvent): void => {
     if (!this.pointerStart || Math.hypot(event.clientX - this.pointerStart.x, event.clientY - this.pointerStart.y) > 6) return;
     const rect = this.renderer.domElement.getBoundingClientRect();
+    if (this.labels.focusAt(event.clientX, event.clientY, () => {
+      // Picking triangles cannot distinguish a wireframe hole from a surface.
+      // Read one freshly rendered pixel only when a group label was hit.
+      this.renderer.render(this.scene, this.camera);
+      const gl = this.renderer.getContext();
+      const pixel = new Uint8Array(4);
+      const x = Math.floor((event.clientX - rect.left) * gl.drawingBufferWidth / rect.width);
+      const y = gl.drawingBufferHeight - 1 - Math.floor((event.clientY - rect.top) * gl.drawingBufferHeight / rect.height);
+      gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      return pixel[3] > 0;
+    })) return;
     this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hit = this.raycaster.intersectObjects(this.models.map((model) => model.object), true)[0];
-    const index = hit?.object.userData.modelIndex as number | undefined; if (index === undefined) return;
+    const hit = this.raycaster.intersectObjects(this.models.filter(model => model.info.visible && model.info.opacity > 0).map(model => model.object), true)[0];
+    const index = hit?.object.userData.modelIndex as number | undefined;
+    if (index === undefined) return;
     const now = performance.now(); if (this.lastTap.index === index && now - this.lastTap.time < 320) this.focusSelected();
     this.lastTap = { index, time: now }; this.select(index);
   };

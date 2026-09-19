@@ -44,8 +44,9 @@ before(async () => {
 });
 after(async () => { await browser?.close(); server?.closeAllConnections(); await new Promise(resolve => server ? server.close(resolve) : resolve()); });
 
-async function openPage(viewport, markupResizeDelay = 0) {
+async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null) {
   const page = await browser.newPage({viewport, deviceScaleFactor: 2});
+  if (sceneOverride) await page.route('**/api/v1/scenes/**', route => route.fulfill({json:sceneOverride}));
   if (markupResizeDelay) await page.addInitScript(delay => {
     const NativeResizeObserver = window.ResizeObserver;
     window.ResizeObserver = class extends NativeResizeObserver {
@@ -180,5 +181,63 @@ test('a label spanning multiple Meshes draws a focusable frame beside individual
     assert.ok(geometry.left >= 0 && geometry.right <= geometry.width,'group label must stay inside the viewport');
     await group.click();
     assert.equal(await group.isVisible(),true);
+  } finally { await page.close(); }
+});
+
+test('opaque geometry covers ordinary labels but the selected label stays in front', async () => {
+  const page = await openPage({width:1280,height:800});
+  try {
+    await page.locator('.panel-trigger').click();
+    await page.locator('#detail-mesh-select').selectOption('1');
+    await page.locator('#close-panel').click();
+    await page.waitForTimeout(350);
+    const placeInsideMesh = () => page.evaluate(() => {
+      const dot = document.querySelector('.mesh-label-anchor');
+      const root = document.querySelector('.canvas-root').getBoundingClientRect();
+      const x = Number(dot.getAttribute('cx')), y = Number(dot.getAttribute('cy'));
+      const label = document.querySelector('.mesh-label');
+      Object.assign(label.style, {transform:`translate(${x-10}px, ${y-10}px)`,width:'20px',height:'20px',padding:'0',background:'rgb(255, 0, 0)',boxShadow:'none'});
+      label.textContent = '';
+      return {x:root.x+x-2,y:root.y+y-2,width:4,height:4};
+    });
+    const label = page.locator('.mesh-label');
+    let clip = await placeInsideMesh();
+    const ordinary = await page.screenshot({clip});
+    await label.evaluate(element => {element.style.visibility='hidden';});
+    const geometry = await page.screenshot({clip});
+    assert.deepEqual(ordinary, geometry, 'an ordinary label must not paint over opaque geometry');
+    await label.evaluate(element => {element.style.visibility='';});
+    await page.locator('.panel-trigger').click();
+    await page.locator('#detail-mesh-select').selectOption('0');
+    await page.locator('#close-panel').click();
+    await page.waitForTimeout(350);
+    clip = await placeInsideMesh();
+    const selected = await page.screenshot({clip});
+    await label.evaluate(element => {element.style.visibility='hidden';});
+    const selectedHidden = await page.screenshot({clip});
+    assert.notDeepEqual(selected, selectedHidden, 'the selected label must paint in front of geometry');
+  } finally { await page.close(); }
+});
+
+test('an ordinary group label remains pointer-accessible through wireframe openings', async () => {
+  const fixtureScene = structuredClone(scene);
+  fixtureScene.meshes.push({...fixtureScene.meshes[1],name:'Third Mesh'});
+  fixtureScene.state.selected = 2;
+  fixtureScene.state.shading = 'wire';
+  const page = await openPage({width:1280,height:800},0,fixtureScene);
+  try {
+    const point = await page.evaluate(() => {
+      const group = document.querySelector('.mesh-group-label');
+      const dot = document.querySelector('.mesh-label-anchor');
+      const root = document.querySelector('.canvas-root').getBoundingClientRect();
+      const x = Number(dot.getAttribute('cx'))+8, y = Number(dot.getAttribute('cy'))+8;
+      group.style.transform=`translate(${x-group.offsetWidth/2}px, ${y-group.offsetHeight/2}px)`;
+      window.groupClicks=[];
+      group.addEventListener('click',event => window.groupClicks.push(event.detail));
+      return {x:root.x+x,y:root.y+y};
+    });
+    assert.equal(await page.locator('.mesh-group-label').evaluate(el=>el.classList.contains('selected')),false);
+    await page.mouse.click(point.x,point.y);
+    assert.deepEqual(await page.evaluate(()=>window.groupClicks),[1], 'visible group labels must retain animated pointer activation');
   } finally { await page.close(); }
 });

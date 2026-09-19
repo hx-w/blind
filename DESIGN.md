@@ -34,7 +34,9 @@ actions stack their icon above their label to fit narrow screens. Scene messages
 wrap and scroll inside the panel, with the close control and statistics visible.
 
 Labels share one visual grammar. A one-Mesh label uses a leader and attachment
-dot. A label spanning multiple Meshes uses four restrained corner marks around
+dot, with short leaders placed near their attachments instead of beyond Mesh
+bounding boxes. Ordinary labels and their leaders sit behind geometry; only
+labels for the selected Mesh sit in front. A label spanning multiple Meshes uses four restrained corner marks around
 their projected union, with the label clipped onto an edge. The frame never
 fills or tints the geometry, and selecting its label fits the whole group.
 

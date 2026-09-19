@@ -11,6 +11,8 @@ const svgNS = 'http://www.w3.org/2000/svg';
 export class MeshLabels {
   private readonly layer = document.createElement('div');
   private readonly leaders = document.createElementNS(svgNS, 'svg');
+  private readonly foreground = document.createElement('div');
+  private readonly frontLeaders = document.createElementNS(svgNS, 'svg');
   private readonly views = new Map<number, LabelView>();
   private readonly groupViews = new Map<number, GroupView>();
   private viewport = '';
@@ -23,7 +25,10 @@ export class MeshLabels {
     this.layer.setAttribute('aria-label', 'Mesh 标注');
     this.leaders.setAttribute('aria-hidden', 'true');
     this.layer.append(this.leaders);
-    root.append(this.layer);
+    this.foreground.className = 'mesh-label-layer mesh-label-foreground';
+    this.frontLeaders.setAttribute('aria-hidden', 'true');
+    this.foreground.append(this.frontLeaders);
+    root.append(this.layer, this.foreground);
   }
 
   // Label sizes and obstacle rects depend on the same layout state as the
@@ -42,12 +47,12 @@ export class MeshLabels {
     if (viewport !== this.viewport) {
       this.viewport = viewport;
       this.leaders.setAttribute('viewBox', `0 0 ${width} ${height}`);
+      this.frontLeaders.setAttribute('viewBox', `0 0 ${width} ${height}`);
       this.invalidateLayout();
     }
     if (!this.obstacles) this.obstacles = this.measureObstacles();
     // Placement mutates the occupied set; the cache stays untouched.
     const occupied = this.obstacles.slice();
-    const silhouettes = models.map(model => model.info.visible && model.info.label ? projectBounds(model.bounds, camera, width, height) : null);
     const activeGroups = new Set<number>();
     const active = new Set<number>();
     for (const view of this.groupViews.values()) { view.text.hidden = true; view.frame.style.display = 'none'; }
@@ -90,6 +95,7 @@ export class MeshLabels {
       if (!view.width) { view.width = view.text.offsetWidth; view.height = view.text.offsetHeight; }
       const color = averageColor(group.meshes.map(member => models[member]?.info.color).filter((value): value is string => Boolean(value)));
       const isSelected = group.meshes.includes(selected);
+      this.setLayer(isSelected, view.text, view.frame);
       view.text.classList.toggle('selected', isSelected); view.frame.classList.toggle('selected', isSelected);
       view.text.style.setProperty('--group-color', color); view.frame.style.setProperty('--group-color', color);
       const placement = placeGroupLabel(frame, view.width, view.height, occupied, width, height);
@@ -97,7 +103,9 @@ export class MeshLabels {
       view.text.style.transform = `translate(${placement.x}px, ${placement.y}px)`;
       view.frame.setAttribute('d', cornerFramePath(frame));
     });
-    models.forEach(({ info, bounds }, index) => {
+    const order = models.map((_, index) => index).sort((a, b) => Number(b === selected) - Number(a === selected));
+    order.forEach(index => {
+      const { info, bounds } = models[index];
       if (!info.label?.text.trim()) return;
       active.add(index);
       if (!info.visible || bounds.isEmpty()) return;
@@ -130,10 +138,11 @@ export class MeshLabels {
       }
       const w = view.width, h = view.height;
       view.text.classList.toggle('selected', index === selected);
+      this.setLayer(index === selected, view.text, view.line, view.dot);
       view.text.style.setProperty('--mesh-color', info.color);
       view.dot.style.setProperty('--mesh-color', info.color);
       const x = (point.x + 1) * width / 2, y = (1 - point.y) * height / 2;
-      const { rect: placement, offset } = layoutLabel({ width, height, labelWidth: w, labelHeight: h, x, y, silhouette: silhouettes[index], silhouettes, occupied }, view.offset);
+      const { rect: placement, offset } = layoutLabel({ width, height, labelWidth: w, labelHeight: h, x, y, occupied }, view.offset);
       view.offset = offset;
       occupied.push({ x: placement.x - 6, y: placement.y - 6, width: w + 12, height: h + 12 });
       view.text.style.transform = `translate(${placement.x}px, ${placement.y}px)`;
@@ -150,6 +159,28 @@ export class MeshLabels {
       if (active.has(index)) continue;
       view.text.remove(); view.line.remove(); view.dot.remove(); this.views.delete(index);
     }
+  }
+
+  private setLayer(selected: boolean, text: HTMLElement, ...marks: SVGElement[]): void {
+    const layer = selected ? this.foreground : this.layer;
+    const leaders = selected ? this.frontLeaders : this.leaders;
+    if (text.parentElement !== layer) layer.append(text);
+    for (const mark of marks) if (mark.parentNode !== leaders) leaders.append(mark);
+  }
+
+  // The transparent canvas receives pointer input above ordinary labels.
+  // Delegate only where rendered geometry leaves the group label visible.
+  focusAt(x: number, y: number, covered: () => boolean): boolean {
+    for (const view of this.groupViews.values()) {
+      if (view.text.hidden) continue;
+      const rect = view.text.getBoundingClientRect();
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        if (covered()) return false;
+        view.text.dispatchEvent(new MouseEvent('click', { detail: 1 }));
+        return true;
+      }
+    }
+    return false;
   }
 
   private measureObstacles(): Rect[] {

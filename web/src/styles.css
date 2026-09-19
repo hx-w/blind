@@ -70,9 +70,10 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 
 .viewer { position: absolute; z-index: 1; inset: 0; overflow: hidden; background: var(--canvas); }
 .canvas-root, .canvas-root canvas { position: absolute; inset: 0; width: 100%; height: 100%; }.canvas-root { contain: strict; }
-.canvas-root canvas { display: block; cursor: grab; touch-action: none; }
+.canvas-root canvas { z-index: 1; display: block; cursor: grab; touch-action: none; }
 .canvas-root canvas:active { cursor: grabbing; }
-.mesh-label-layer { position: absolute; z-index: 2; inset: 0; pointer-events: none; }
+.mesh-label-layer { position: absolute; z-index: 0; inset: 0; pointer-events: none; }
+.mesh-label-foreground { z-index: 2; }
 .mesh-label-layer > svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
 .mesh-label-leader { fill: none; stroke: var(--text-secondary); stroke-width: 1; opacity: .65; }
 .mesh-label-anchor { fill: var(--mesh-color); stroke: var(--surface-2); stroke-width: 1.5; }

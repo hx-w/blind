@@ -3,6 +3,26 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-09-19
+
+### Added
+
+- Private download domains using `--signing hmac-sha1-url --bucket BUCKET`.
+  Credentials and signed URLs stay on the Server; aliases can switch between
+  S3 APIs and download domains without changing scene addresses.
+
+### Changed
+
+- Every active registered Client can discover and share Server OSS aliases.
+  OSS-only scenes do not depend on Client SFTP availability. Client revocation
+  still invalidates its scenes.
+
+### Fixed
+
+- Mesh labels stay near their anchors with short leaders. Geometry covers
+  ordinary labels; only the selected Mesh's labels render in front. Group
+  labels remain clickable through empty canvas and wireframe openings.
+
 ## [0.9.0] - 2026-09-19
 
 ### Added

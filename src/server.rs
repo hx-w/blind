@@ -1544,12 +1544,12 @@ async fn client_oss(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    let source = client_auth(&state, &headers, false)?;
+    client_auth(&state, &headers, false)?;
     let config = config_path()?;
     let stores = crate::oss::list(config.parent().context("missing config directory")?)?;
     Ok((
         no_store(),
-        Json(serde_json::json!({"stores": stores, "can_share": source.local})),
+        Json(serde_json::json!({"stores": stores, "can_share": true})),
     ))
 }
 
@@ -1695,11 +1695,6 @@ async fn client_scene(
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let source = client_auth(&state, &headers, false)?;
-    if !source.local && request.paths.iter().any(|p| crate::oss::is_oss(p)) {
-        return Err(AppError::unauthorized(
-            "OSS sharing requires a Server-local Client",
-        ));
-    }
     let mut scene = scene_from_sources(
         &state,
         &request.paths,

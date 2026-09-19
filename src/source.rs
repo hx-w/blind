@@ -513,13 +513,8 @@ impl Sources {
     ) -> std::result::Result<Observed, SourceError> {
         let registered = source.map(|s| self.get(&s.id)).transpose()?;
         if crate::oss::is_oss(path) {
-            // A remote Client's registration only grants access to its own SFTP
-            // source, never to the Server's object-store credentials.
-            if registered.as_ref().is_some_and(|s| !s.local) {
-                return Err(SourceError::Unavailable(
-                    "OSS sharing requires a Server-local Client".into(),
-                ));
-            }
+            // Any active registered Client can reference the Server's OSS aliases.
+            // Credentials stay here; no connection to the Client's SFTP is needed.
             let _permit = self
                 .slots
                 .clone()
