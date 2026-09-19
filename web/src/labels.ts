@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import type { MeshLabelGroup, PublicMesh } from './api';
-import { clamp, layoutLabel, type LabelOffset, type Rect } from './label-layout';
+import { clamp, layoutLabel, type LabelOffset, overlapArea, type Rect } from './label-layout';
 
 interface LabelModel { info: PublicMesh; bounds: THREE.Box3 }
 interface LabelView { text: HTMLSpanElement; line: SVGPathElement; dot: SVGCircleElement; offset?: LabelOffset; width: number; height: number }
@@ -60,13 +60,73 @@ export class MeshLabels {
       view.text.hidden = true; view.line.style.display = 'none'; view.dot.style.display = 'none';
     }
 
-    groups.forEach((group, index) => {
+    const grouped = new Set(groups.filter(group => group.text.trim()).flatMap(group => group.meshes));
+    const renderMesh = (index: number): void => {
+      const { info, bounds } = models[index];
+      if (!info.label?.text.trim()) return;
+      active.add(index);
+      if (!info.visible || info.opacity <= 0 || bounds.isEmpty()) return;
+      // A group caption already identifies its members. Expand only the selection.
+      if (index !== selected && grouped.has(index)) return;
+      const point = info.label.anchor
+        ? new THREE.Vector3(...info.label.anchor)
+        : bounds.getCenter(new THREE.Vector3());
+      point.project(camera);
+      if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)
+        || point.z < -1 || point.z > 1 || Math.abs(point.x) > 1 || Math.abs(point.y) > 1) return;
+      let view = this.views.get(index);
+      if (!view) {
+        view = { text: document.createElement('span'), line: document.createElementNS(svgNS, 'path'), dot: document.createElementNS(svgNS, 'circle'), width: 0, height: 0 };
+        view.text.className = 'mesh-label'; view.line.classList.add('mesh-label-leader'); view.dot.classList.add('mesh-label-anchor');
+        view.dot.setAttribute('r', '3');
+        this.layer.append(view.text);
+        this.leaders.append(view.line, view.dot);
+        this.views.set(index, view);
+      }
+      view.text.hidden = false;
+      view.line.style.display = ''; view.dot.style.display = '';
+      const group = groups.find(group => group.meshes.includes(index));
+      const text = memberCaption(info.label.text, group?.text);
+      view.text.title = info.label.text;
+      if (view.text.textContent !== text) { view.text.textContent = text; view.offset = undefined; view.width = 0; }
+      // offsetWidth forces a synchronous reflow, so measure only when the
+      // text or the viewport changed rather than on every rendered frame.
+      if (!view.width) {
+        view.text.style.maxWidth = '';
+        // A side panel can leave a very narrow canvas on landscape phones.
+        // Widen long labels before placement so wrapping does not clip them.
+        if (view.text.offsetHeight > height - 16) view.text.style.maxWidth = `${Math.max(1, width - 16)}px`;
+        view.width = view.text.offsetWidth; view.height = view.text.offsetHeight;
+      }
+      const w = view.width, h = view.height;
+      view.text.classList.toggle('selected', index === selected);
+      this.setLayer(index === selected, view.text, view.line, view.dot);
+      view.text.style.setProperty('--mesh-color', info.color);
+      view.dot.style.setProperty('--mesh-color', info.color);
+      const x = (point.x + 1) * width / 2, y = (1 - point.y) * height / 2;
+      const { rect: placement, offset } = layoutLabel({ width, height, labelWidth: w, labelHeight: h, x, y, occupied }, view.offset);
+      view.offset = offset;
+      if (index !== selected && occupied.some(other => overlapArea(placement, other) > 0)) {
+        view.text.hidden = true; view.line.style.display = 'none'; view.dot.style.display = 'none';
+        return;
+      }
+      occupied.push({ x: placement.x - 6, y: placement.y - 6, width: w + 12, height: h + 12 });
+      view.text.style.transform = `translate(${placement.x}px, ${placement.y}px)`;
+      const endX = clamp(x, placement.x, placement.x + w);
+      const endY = clamp(y, placement.y, placement.y + h);
+      view.line.setAttribute('d', `M ${x} ${y} L ${endX} ${endY}`);
+      view.dot.setAttribute('cx', String(x)); view.dot.setAttribute('cy', String(y));
+    };
+    if (models[selected]) renderMesh(selected);
+    const groupOrder = groups.map((_, index) => index).sort((a, b) => Number(groups[b].meshes.includes(selected)) - Number(groups[a].meshes.includes(selected)));
+    groupOrder.forEach(index => {
+      const group = groups[index];
       if (!group.text.trim()) return;
       activeGroups.add(index);
       const worldBounds = new THREE.Box3();
       for (const member of group.meshes) {
         const model = models[member];
-        if (model?.info.visible) worldBounds.union(model.bounds);
+        if (model?.info.visible && model.info.opacity > 0) worldBounds.union(model.bounds);
       }
       const bounds = projectBounds(worldBounds, camera, width, height);
       if (!bounds) return;
@@ -92,6 +152,8 @@ export class MeshLabels {
         view.text.replaceChildren(name, total); view.text.dataset.signature = signature; view.width = 0; view.height = 0;
       }
       view.text.setAttribute('aria-label', `聚焦标注 ${group.text}，${count} 个 Mesh`);
+      const maxWidth = `${Math.min(240, width - 16, Math.max(88, frame.width - 16))}px`;
+      if (view.text.style.maxWidth !== maxWidth) { view.text.style.maxWidth = maxWidth; view.width = 0; }
       if (!view.width) { view.width = view.text.offsetWidth; view.height = view.text.offsetHeight; }
       const color = averageColor(group.meshes.map(member => models[member]?.info.color).filter((value): value is string => Boolean(value)));
       const isSelected = group.meshes.includes(selected);
@@ -99,58 +161,14 @@ export class MeshLabels {
       view.text.classList.toggle('selected', isSelected); view.frame.classList.toggle('selected', isSelected);
       view.text.style.setProperty('--group-color', color); view.frame.style.setProperty('--group-color', color);
       const placement = placeGroupLabel(frame, view.width, view.height, occupied, width, height);
+      if (occupied.some(other => overlapArea(placement, other) > 0)) {
+        view.text.hidden = true; view.frame.style.display = 'none'; return;
+      }
       occupied.push({ x: placement.x - 5, y: placement.y - 5, width: view.width + 10, height: view.height + 10 });
       view.text.style.transform = `translate(${placement.x}px, ${placement.y}px)`;
-      view.frame.setAttribute('d', cornerFramePath(frame));
+      view.frame.setAttribute('d', captionFramePath(frame, placement));
     });
-    const order = models.map((_, index) => index).sort((a, b) => Number(b === selected) - Number(a === selected));
-    order.forEach(index => {
-      const { info, bounds } = models[index];
-      if (!info.label?.text.trim()) return;
-      active.add(index);
-      if (!info.visible || bounds.isEmpty()) return;
-      const point = info.label.anchor
-        ? new THREE.Vector3(...info.label.anchor)
-        : bounds.getCenter(new THREE.Vector3());
-      point.project(camera);
-      if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || !Number.isFinite(point.z)
-        || point.z < -1 || point.z > 1 || Math.abs(point.x) > 1 || Math.abs(point.y) > 1) return;
-      let view = this.views.get(index);
-      if (!view) {
-        view = { text: document.createElement('span'), line: document.createElementNS(svgNS, 'path'), dot: document.createElementNS(svgNS, 'circle'), width: 0, height: 0 };
-        view.text.className = 'mesh-label'; view.line.classList.add('mesh-label-leader'); view.dot.classList.add('mesh-label-anchor');
-        view.dot.setAttribute('r', '3');
-        this.layer.append(view.text);
-        this.leaders.append(view.line, view.dot);
-        this.views.set(index, view);
-      }
-      view.text.hidden = false;
-      view.line.style.display = ''; view.dot.style.display = '';
-      if (view.text.textContent !== info.label.text) { view.text.textContent = info.label.text; view.offset = undefined; view.width = 0; }
-      // offsetWidth forces a synchronous reflow, so measure only when the
-      // text or the viewport changed rather than on every rendered frame.
-      if (!view.width) {
-        view.text.style.maxWidth = '';
-        // A side panel can leave a very narrow canvas on landscape phones.
-        // Widen long labels before placement so wrapping does not clip them.
-        if (view.text.offsetHeight > height - 16) view.text.style.maxWidth = `${Math.max(1, width - 16)}px`;
-        view.width = view.text.offsetWidth; view.height = view.text.offsetHeight;
-      }
-      const w = view.width, h = view.height;
-      view.text.classList.toggle('selected', index === selected);
-      this.setLayer(index === selected, view.text, view.line, view.dot);
-      view.text.style.setProperty('--mesh-color', info.color);
-      view.dot.style.setProperty('--mesh-color', info.color);
-      const x = (point.x + 1) * width / 2, y = (1 - point.y) * height / 2;
-      const { rect: placement, offset } = layoutLabel({ width, height, labelWidth: w, labelHeight: h, x, y, occupied }, view.offset);
-      view.offset = offset;
-      occupied.push({ x: placement.x - 6, y: placement.y - 6, width: w + 12, height: h + 12 });
-      view.text.style.transform = `translate(${placement.x}px, ${placement.y}px)`;
-      const endX = clamp(x, placement.x, placement.x + w);
-      const endY = clamp(y, placement.y, placement.y + h);
-      view.line.setAttribute('d', `M ${x} ${y} L ${endX} ${endY}`);
-      view.dot.setAttribute('cx', String(x)); view.dot.setAttribute('cy', String(y));
-    });
+    models.forEach((_, index) => { if (index !== selected) renderMesh(index); });
     for (const [index, view] of this.groupViews) {
       if (activeGroups.has(index)) continue;
       view.text.remove(); view.frame.remove(); this.groupViews.delete(index);
@@ -221,10 +239,10 @@ function insetViewport(rect: Rect, width: number, height: number): Rect {
 
 function placeGroupLabel(frame: Rect, width: number, height: number, occupied: Rect[], viewportWidth: number, viewportHeight: number): Rect {
   const candidates = [
-    { x: frame.x + 10, y: frame.y - height / 2 },
-    { x: frame.x + frame.width - width - 10, y: frame.y - height / 2 },
-    { x: frame.x + 10, y: frame.y + frame.height - height / 2 },
-    { x: frame.x + frame.width - width - 10, y: frame.y + frame.height - height / 2 },
+    { x: frame.x + 4, y: frame.y - height / 2 },
+    { x: frame.x + frame.width - width - 4, y: frame.y - height / 2 },
+    { x: frame.x + 4, y: frame.y + frame.height - height / 2 },
+    { x: frame.x + frame.width - width - 4, y: frame.y + frame.height - height / 2 },
   ].map(point => ({ x: clamp(point.x, 8, viewportWidth - width - 8), y: clamp(point.y, 8, viewportHeight - height - 8), width, height }));
   return candidates.reduce((best, candidate) => scoreOverlap(candidate, occupied) < scoreOverlap(best, occupied) ? candidate : best);
 }
@@ -234,10 +252,23 @@ function scoreOverlap(rect: Rect, occupied: Rect[]): number {
     * Math.max(0, Math.min(rect.y + rect.height, other.y + other.height) - Math.max(rect.y, other.y)), 0);
 }
 
-function cornerFramePath(rect: Rect): string {
+function captionFramePath(rect: Rect, caption: Rect): string {
   const x2 = rect.x + rect.width, y2 = rect.y + rect.height;
-  const length = Math.min(22, Math.max(8, Math.min(rect.width, rect.height) * 0.22));
-  return `M ${rect.x + length} ${rect.y} H ${rect.x} V ${rect.y + length} M ${x2 - length} ${rect.y} H ${x2} V ${rect.y + length} M ${rect.x} ${y2 - length} V ${y2} H ${rect.x + length} M ${x2} ${y2 - length} V ${y2} H ${x2 - length}`;
+  const length = Math.min(14, rect.width / 4, rect.height / 4);
+  const bottom = Math.abs(caption.y + caption.height / 2 - y2) < Math.abs(caption.y + caption.height / 2 - rect.y);
+  const y = bottom ? y2 : rect.y, direction = bottom ? -1 : 1;
+  const left = clamp(caption.x - 4, rect.x, x2), right = clamp(caption.x + caption.width + 4, rect.x, x2);
+  // The caption interrupts the frame edge itself; there is no detached callout.
+  return `M ${rect.x} ${y + direction * length} V ${y} H ${left} M ${right} ${y} H ${x2} V ${y + direction * length}`
+    + (bottom
+      ? ` M ${rect.x} ${rect.y + length} V ${rect.y} H ${rect.x + length} M ${x2 - length} ${rect.y} H ${x2} V ${rect.y + length}`
+      : ` M ${rect.x} ${y2 - length} V ${y2} H ${rect.x + length} M ${x2 - length} ${y2} H ${x2} V ${y2 - length}`);
+}
+
+function memberCaption(text: string, group?: string): string {
+  if (!group || !text.startsWith(group)) return text;
+  const suffix = text.slice(group.length);
+  return /^\s*[/·:|]\s*\S/.test(suffix) ? suffix.replace(/^\s*[/·:|]\s*/, '') : text;
 }
 
 function averageColor(colors: string[]): string {

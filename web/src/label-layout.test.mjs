@@ -38,3 +38,12 @@ test('large projected meshes and stale offsets cannot pull a leader across the v
     assert.ok(Math.hypot(dx, dy) <= 72, 'a label must remain near its attachment, even when geometry overlaps it');
   }
 });
+
+test('a retained offset is reconsidered when another label moves into it', () => {
+  const first = layoutLabel(input);
+  const blocker = {...first.rect};
+  const next = layoutLabel({...input,occupied:[blocker]},first.offset);
+  const overlap = Math.max(0,Math.min(next.rect.x+next.rect.width,blocker.x+blocker.width)-Math.max(next.rect.x,blocker.x))
+    * Math.max(0,Math.min(next.rect.y+next.rect.height,blocker.y+blocker.height)-Math.max(next.rect.y,blocker.y));
+  assert.equal(overlap,0,'camera movement must not retain a colliding label position');
+});

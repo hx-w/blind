@@ -185,7 +185,8 @@ test('a label spanning multiple Meshes draws a focusable frame beside individual
 });
 
 test('opaque geometry covers ordinary labels but the selected label stays in front', async () => {
-  const page = await openPage({width:1280,height:800});
+  const ungrouped = {...scene,label_groups:[]};
+  const page = await openPage({width:1280,height:800},0,ungrouped);
   try {
     await page.locator('.panel-trigger').click();
     await page.locator('#detail-mesh-select').selectOption('1');
@@ -221,7 +222,7 @@ test('opaque geometry covers ordinary labels but the selected label stays in fro
 
 test('an ordinary group label remains pointer-accessible through wireframe openings', async () => {
   const fixtureScene = structuredClone(scene);
-  fixtureScene.meshes.push({...fixtureScene.meshes[1],name:'Third Mesh'});
+  fixtureScene.meshes.push({...fixtureScene.meshes[1],name:'Third Mesh',label:{text:'Third Mesh'}});
   fixtureScene.state.selected = 2;
   fixtureScene.state.shading = 'wire';
   const page = await openPage({width:1280,height:800},0,fixtureScene);
@@ -247,4 +248,88 @@ test('an ordinary group label remains pointer-accessible through wireframe openi
     await page.mouse.up();
     assert.deepEqual(await page.evaluate(()=>window.groupClicks),[1], 'visible group labels must retain animated pointer activation');
   } finally { await page.close(); }
+});
+
+for (const viewport of [{width:390,height:844},{width:320,height:700},{width:740,height:420},{width:1280,height:800}]) {
+  test(`dense grouped labels keep one detail and compact frame captions at ${viewport.width}×${viewport.height}`, async () => {
+    const names = ['1. deformr / FDI 15 / ok','2. deformr / FDI 25 / partial','3. es-v24 / FDI 15 / partial','4. es-v24 / FDI 25 / partial'];
+    const dense = structuredClone(scene);
+    dense.state.strokes=[];
+    dense.meshes = names.flatMap((name,group) => ['扫描','交付冠'].map((role,member) => ({...scene.meshes[member],
+      name:`${name} / ${role}`,label:{text:`${name} / ${role}`},source_url:`/dense-mesh/${group*2+member}`})));
+    dense.label_groups=names.map((text,index)=>({text,meshes:[index*2,index*2+1]}));
+    const page = await browser.newPage({viewport,deviceScaleFactor:2});
+    await page.route('**/api/v1/scenes/**',route=>route.fulfill({json:dense}));
+    await page.route('**/dense-mesh/*',route=>{
+      const index=Number(route.request().url().split('/').at(-1)), group=Math.floor(index/2);
+      const lines=fixture.toString().trim().split('\n'), start=lines.indexOf('end_header')+1;
+      const scale=index%2 ? .45 : 1;
+      for(let i=start;i<start+4;i++) {
+        const p=lines[i].split(' ').map(Number);
+        lines[i]=[p[0]*scale+(group%2)*2.2,p[1]*scale+Math.floor(group/2)*2.2,p[2]*scale+(index%2?.6:0)].join(' ');
+      }
+      return route.fulfill({body:lines.join('\n')+'\n',contentType:'application/ply'});
+    });
+    try {
+      await page.goto(`${origin}/s/dense`);
+      await page.locator('#loading-state').waitFor({state:'hidden'});
+      await page.waitForTimeout(400);
+      assert.equal(await page.locator('.mesh-label:visible').count(),1,'group members must not repeat every group title');
+      assert.equal(await page.locator('.mesh-label:visible').textContent(),'扫描');
+      const captions=await page.locator('.mesh-group-label:visible').evaluateAll(elements=>elements.map(el=>{
+        const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,font:parseFloat(getComputedStyle(el).fontSize)};
+      }));
+      if(process.env.BLIND_TEST_SCREENSHOTS) {
+        await mkdir(process.env.BLIND_TEST_SCREENSHOTS,{recursive:true});
+        await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/dense-${viewport.width}.png`});
+      }
+      assert.equal(captions.length,4,'separated groups should retain their captions');
+      for(const a of captions) {
+        assert.ok(a.font<=12,'group captions must use the explicit compact type scale');
+        assert.ok(a.x>=0 && a.x+a.width<=viewport.width && a.y>=0 && a.y+a.height<=viewport.height,'caption clipped by viewport');
+      }
+      for(let i=0;i<captions.length;i++) for(let j=i+1;j<captions.length;j++) {
+        const a=captions[i],b=captions[j];
+        assert.ok(Math.min(a.x+a.width,b.x+b.width)<=Math.max(a.x,b.x) || Math.min(a.y+a.height,b.y+b.height)<=Math.max(a.y,b.y),'group captions overlap');
+      }
+      await page.locator('.panel-trigger').click();
+      await page.locator('#detail-mesh-select').selectOption('3');
+      await page.locator('#close-panel').click();
+      await page.waitForTimeout(350);
+      assert.equal(await page.locator('.mesh-label:visible').count(),1);
+      assert.equal(await page.locator('.mesh-label:visible').textContent(),'交付冠');
+    } finally {await page.close();}
+  });
+}
+
+test('ungrouped crowding keeps the selection and suppresses colliding secondary labels', async () => {
+  const crowded = structuredClone(scene);
+  crowded.label_groups=[];
+  crowded.meshes=Array.from({length:10},(_,index)=>({...scene.meshes[index%2],label:{text:`独立网格 ${index+1} / 扫描参考`}}));
+  const page=await openPage({width:390,height:844},0,crowded);
+  try {
+    const labels=await page.locator('.mesh-label:visible').evaluateAll(elements=>elements.map(el=>{
+      const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height,selected:el.classList.contains('selected')};
+    }));
+    assert.ok(labels.length>0 && labels.length<10,'crowded labels must be reduced, not merely repositioned');
+    assert.equal(labels.filter(label=>label.selected).length,1);
+    for(let i=0;i<labels.length;i++) for(let j=i+1;j<labels.length;j++) {
+      const a=labels[i],b=labels[j];
+      assert.ok(Math.min(a.x+a.width,b.x+b.width)<=Math.max(a.x,b.x) || Math.min(a.y+a.height,b.y+b.height)<=Math.max(a.y,b.y),'secondary labels overlap');
+    }
+  } finally {await page.close();}
+});
+
+test('overlapping selected groups do not stack their captions', async () => {
+  const overlapping={...scene,label_groups:Array.from({length:6},(_,i)=>({text:`参考组 ${i+1}`,meshes:[0,1]}))};
+  const page=await openPage({width:390,height:844},0,overlapping);
+  try {
+    const rects=await page.locator('.mesh-group-label:visible, .mesh-label:visible').evaluateAll(elements=>elements.map(el=>{
+      const r=el.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};
+    }));
+    assert.ok(rects.length>1 && rects.length<7);
+    for(let i=0;i<rects.length;i++) for(let j=i+1;j<rects.length;j++) {
+      const a=rects[i],b=rects[j];assert.ok(a.right<=b.x || b.right<=a.x || a.bottom<=b.y || b.bottom<=a.y,'selected groups must respect other captions');
+    }
+  } finally {await page.close();}
 });

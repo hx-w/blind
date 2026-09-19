@@ -15,7 +15,7 @@ export function layoutLabel(input: LayoutInput, previous?: LabelOffset): { rect:
   // on every frame makes tiny floating-point changes flip labels across a Mesh.
   if (previous) {
     const rect = place(x + previous.x, y + previous.y);
-    if (distance(rect) <= MAX_LEADER_LENGTH) return { rect, offset: previous };
+    if (distance(rect) <= MAX_LEADER_LENGTH && occupied.every(other => overlapArea(rect, other) === 0)) return { rect, offset: previous };
   }
   const side = x < width / 2 ? -1 : 1;
   const candidates: Rect[] = [];
@@ -27,7 +27,7 @@ export function layoutLabel(input: LayoutInput, previous?: LabelOffset): { rect:
       for (const dy of [-h / 2, -h - 12, 12, -h - 36, 36]) candidates.push(place(left, y + dy));
     }
   }
-  const score = (r: Rect): number => occupied.reduce((sum, other) => sum + overlap(r, other), 0) * 100
+  const score = (r: Rect): number => occupied.reduce((sum, other) => sum + overlapArea(r, other), 0) * 100
     + distance(r);
   let rect = candidates[0];
   let best = score(rect);
@@ -40,7 +40,7 @@ export function layoutLabel(input: LayoutInput, previous?: LabelOffset): { rect:
 }
 
 export function clamp(value: number, min: number, max: number): number { return Math.max(min, Math.min(max, value)); }
-function overlap(a: Rect, b: Rect): number {
+export function overlapArea(a: Rect, b: Rect): number {
   return Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x))
     * Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
 }

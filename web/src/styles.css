@@ -79,9 +79,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .mesh-label-anchor { fill: var(--mesh-color); stroke: var(--surface-2); stroke-width: 1.5; }
 .mesh-group-frame { fill: none; stroke: var(--group-color); stroke-width: 1.25; stroke-linecap: round; stroke-linejoin: round; opacity: .58; vector-effect: non-scaling-stroke; transition: opacity 150ms, stroke-width 150ms; }
 .mesh-group-frame.hover, .mesh-group-frame.selected { stroke-width: 1.65; opacity: .9; }
-.mesh-group-label { position: absolute; top: 0; left: 0; min-height: 30px; max-width: min(240px, 52%); display: flex; align-items: center; gap: 7px; padding: 5px 6px 5px 9px; border: 0; border-radius: var(--radius-xs); background: color-mix(in oklch, var(--surface-2) 94%, var(--group-color)); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--group-color) 48%, var(--line)), 0 2px 8px oklch(0.08 0.006 255 / .12); color: var(--text-secondary); font: 620 11px/1.45 inherit; pointer-events: auto; cursor: pointer; scale: 1; transition: scale 130ms cubic-bezier(.16,1,.3,1), background-color 150ms, color 150ms; }
-.mesh-group-label span { min-width: 0; overflow-wrap: anywhere; }
-.mesh-group-label small { min-width: 20px; height: 20px; display: grid; place-items: center; padding: 0 5px; border-radius: var(--radius-pill); background: color-mix(in oklch, var(--group-color) 18%, transparent); color: var(--text); font-size: 9px; font-variant-numeric: tabular-nums; }
+.mesh-group-label { position: absolute; top: 0; left: 0; min-height: 28px; display: flex; align-items: center; gap: 6px; padding: 3px 6px; border: 0; border-radius: 2px; background: transparent; color: var(--text-secondary); font-family: inherit; font-size: 11px; font-weight: 600; line-height: 1.4; text-align: left; pointer-events: auto; cursor: pointer; scale: 1; transition: scale 130ms cubic-bezier(.16,1,.3,1), color 150ms; }
+.mesh-group-label span { min-width: 0; overflow-wrap: anywhere; text-wrap: balance; }
+.mesh-group-label small { flex: 0 0 auto; color: var(--text-tertiary); font-size: 9px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .mesh-group-label.selected { color: var(--text); }
 .mesh-group-label:active { scale: .96; }
 .mesh-group-label:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

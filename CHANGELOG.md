@@ -3,6 +3,15 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.3] - 2026-09-19
+
+### Fixed
+
+- Dense scenes use compact group captions embedded in frame edges. Only the
+  selected group member expands its individual label, without repeating the
+  group name. Secondary labels yield when space is crowded, and camera motion
+  rechecks label collisions on both mobile and desktop.
+
 ## [0.10.2] - 2026-09-19
 
 ### Fixed

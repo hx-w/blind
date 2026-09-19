@@ -36,9 +36,15 @@ wrap and scroll inside the panel, with the close control and statistics visible.
 Labels share one visual grammar. A one-Mesh label uses a leader and attachment
 dot, with short leaders placed near their attachments instead of beyond Mesh
 bounding boxes. Ordinary labels and their leaders sit behind geometry; only
-labels for the selected Mesh sit in front. A label spanning multiple Meshes uses four restrained corner marks around
-their projected union, with the label clipped onto an edge. The frame never
-fills or tints the geometry, and selecting its label fits the whole group.
+labels for the selected Mesh sit in front. A group caption interrupts the edge
+of a restrained corner frame around its projected union, without a separate
+card or leader. Its type stays at 11px even on narrow screens. The frame never
+fills or tints the geometry, and selecting its caption fits the whole group.
+Group captions identify their members; only the selected member expands its
+individual label, omitting an exact repeated group prefix. The selected Mesh
+gets placement priority. Other captions appear only where they fit without
+overlapping labels or controls; camera movement rechecks cached placements.
+Full Mesh names remain available in the detail panel.
 
 ## 6. Depth
 
