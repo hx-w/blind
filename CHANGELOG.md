@@ -3,6 +3,13 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.1] - 2026-09-19
+
+### Fixed
+
+- Make the same-size file replacement test independent of filesystem timestamp
+  resolution so release validation is deterministic on Linux runners.
+
 ## [0.10.0] - 2026-09-19
 
 ### Added

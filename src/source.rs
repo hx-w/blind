@@ -1003,6 +1003,12 @@ mod tests {
         let file = dir.path().join("tetra.ply");
         let original = include_bytes!("../tests/fixtures/tetra.ply");
         fs::write(&file, original).unwrap();
+        // Filesystems may give consecutive writes the same timestamp.
+        let initial_modified = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        fs::File::open(&file)
+            .unwrap()
+            .set_modified(initial_modified)
+            .unwrap();
         let scene = SceneDescriptor::create(std::slice::from_ref(&file), None)
             .await
             .unwrap();
@@ -1018,6 +1024,10 @@ mod tests {
         let mut changed = original.to_vec();
         changed[0] = b'x';
         fs::write(&file, changed).unwrap();
+        fs::File::open(&file)
+            .unwrap()
+            .set_modified(initial_modified + Duration::from_secs(2))
+            .unwrap();
         assert!(matches!(
             sources
                 .validate_mesh_metadata(&scene, &scene.meshes[0])
