@@ -3,6 +3,13 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.2] - 2026-09-19
+
+### Fixed
+
+- Keep the wireframe label interaction fixture in place across pointer-triggered
+  renders, verifying clicks with an intervening frame on slower CI machines.
+
 ## [0.10.1] - 2026-09-19
 
 ### Fixed

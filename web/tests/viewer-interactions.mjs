@@ -231,13 +231,20 @@ test('an ordinary group label remains pointer-accessible through wireframe openi
       const dot = document.querySelector('.mesh-label-anchor');
       const root = document.querySelector('.canvas-root').getBoundingClientRect();
       const x = Number(dot.getAttribute('cx'))+8, y = Number(dot.getAttribute('cy'))+8;
-      group.style.transform=`translate(${x-group.offsetWidth/2}px, ${y-group.offsetHeight/2}px)`;
+      // Pointer-down triggers a render. Keep this synthetic test position fixed
+      // while the normal label layout recomputes its inline transform.
+      const style = document.createElement('style');
+      style.textContent = `.mesh-group-label { transform: translate(${x-group.offsetWidth/2}px, ${y-group.offsetHeight/2}px) !important; }`;
+      document.head.append(style);
       window.groupClicks=[];
       group.addEventListener('click',event => window.groupClicks.push(event.detail));
       return {x:root.x+x,y:root.y+y};
     });
     assert.equal(await page.locator('.mesh-group-label').evaluate(el=>el.classList.contains('selected')),false);
-    await page.mouse.click(point.x,point.y);
+    await page.mouse.move(point.x,point.y);
+    await page.mouse.down();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await page.mouse.up();
     assert.deepEqual(await page.evaluate(()=>window.groupClicks),[1], 'visible group labels must retain animated pointer activation');
   } finally { await page.close(); }
 });
