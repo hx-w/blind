@@ -1,6 +1,6 @@
 [package]
 name = "blind"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Instant local geometry review from any device"
@@ -39,6 +39,7 @@ chacha20poly1305 = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 directories = "6.0"
 flate2 = "1.1"
+futures-util = "0.3"
 glam = { version = "0.29", features = ["bytemuck"] }
 hex = "0.4"
 http-body-util = "0.1"
@@ -48,9 +49,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 libc = "0.2"
 mime_guess = "2.0"
 meshopt = "0.6.2"
+object_store = { version = "0.12.4", default-features = false, features = ["aws", "tls-webpki-roots"] }
 ply-rs = "0.1"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rpassword = "7.4"
 ssh2 = { version = "0.9.6", features = ["vendored-openssl"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rust-embed = "8.5"

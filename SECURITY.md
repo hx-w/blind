@@ -25,6 +25,14 @@ long self-contained capability is preferable.
 
 ## Remote sources
 
+Named OSS credentials live only in the Server's private `oss.json` (mode 0600).
+Use read-only object-store credentials for the intended buckets/prefixes.
+Only the Server owner PAT or Server-local Clients may create OSS scenes;
+remote SFTP Clients do not inherit this authority. Public scene metadata and
+capability URLs never include these credentials. OSS reads use HTTPS, reject
+redirects, and redact upstream errors. HTTP is allowed only on loopback for
+local storage/testing. The OSS alias is a locator, not an authorization token.
+
 The Server creates an independent SSH private key for each registered source;
 users never upload their personal private keys. The Client installs the public
 key under its current OS account, forced to `sftp-server -R` with `restrict`:

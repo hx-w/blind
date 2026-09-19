@@ -67,6 +67,8 @@ jobs:
         run: cargo build --locked --release
       - name: Verify Client and read-only SFTP
         run: python3 tests/integration_sftp.py target/release
+      - name: Verify read-only OSS sources
+        run: python3 tests/integration_oss.py target/release
       - name: Package
         run: |
           test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"

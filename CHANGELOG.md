@@ -3,6 +3,16 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-09-19
+
+### Added
+
+- `blind oss set/list/remove` manages private Server-side S3-compatible stores.
+  `blind share` and scene configs accept `oss://ALIAS/BUCKET/KEY` alongside local
+  meshes. Each resource selects its credentials by alias; Raw, LOD and PNG use
+  bounded, signed reads without persisting geometry. Only the Server owner or
+  a Server-local Client may create OSS shares.
+
 ## [0.8.0] - 2026-09-16
 
 ### Changed

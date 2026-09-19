@@ -11,6 +11,11 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Configure named OSS stores on this Server.
+    Oss {
+        #[command(subcommand)]
+        command: crate::oss::Command,
+    },
     /// Issue or revoke permanent reusable invitations.
     Invite {
         #[arg(long)]
@@ -110,6 +115,13 @@ pub async fn run(command: Command) -> Result<()> {
         )
         .init();
     match command {
+        Command::Oss { command } => {
+            if !matches!(command, crate::oss::Command::List)
+                || !crate::client::list_remote_oss().await?
+            {
+                crate::oss::run(command)?;
+            }
+        }
         Command::Invite { host, revoke_all } => {
             let sources = crate::source::Sources::open(
                 config_path()?.parent().context("config parent missing")?,

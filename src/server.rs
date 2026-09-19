@@ -274,6 +274,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .route("/api/v1/clients/join", post(join_client))
         .route("/api/v1/client", get(client_info))
+        .route("/api/v1/client/oss", get(client_oss))
         .route("/api/v1/client/activate", post(activate_client))
         .route("/api/v1/client/revoke", post(revoke_client))
         .route(
@@ -700,12 +701,19 @@ async fn create_scene(
     headers: HeaderMap,
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let paths = request
-        .paths
-        .into_iter()
-        .map(Into::into)
-        .collect::<Vec<_>>();
-    let mut scene = SceneDescriptor::create(&paths, request.title).await?;
+    let mut paths = Vec::with_capacity(request.paths.len());
+    for path in request.paths {
+        paths.push(if crate::oss::is_oss(&path) {
+            path
+        } else {
+            tokio::fs::canonicalize(&path)
+                .await
+                .context("cannot resolve source file")?
+                .to_string_lossy()
+                .into_owned()
+        });
+    }
+    let mut scene = scene_from_sources(&state, &paths, None, request.title).await?;
     if let Some(labels) = request.labels {
         scene
             .set_labels(labels)
@@ -1532,6 +1540,19 @@ async fn join_client(
     .map_err(|e| AppError::bad_request(&e.to_string()))?;
     Ok((no_store(), Json(result)))
 }
+async fn client_oss(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    let source = client_auth(&state, &headers, false)?;
+    let config = config_path()?;
+    let stores = crate::oss::list(config.parent().context("missing config directory")?)?;
+    Ok((
+        no_store(),
+        Json(serde_json::json!({"stores": stores, "can_share": source.local})),
+    ))
+}
+
 async fn client_info(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1592,31 +1613,44 @@ async fn local_client(
         .local(request.name, request.host, request.user)?;
     Ok((no_store(), Json(result)))
 }
-async fn client_scene(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<CreateSceneRequest>,
-) -> Result<impl IntoResponse, AppError> {
-    let source = client_auth(&state, &headers, false)?;
-    if request.paths.is_empty() {
+async fn scene_from_sources(
+    state: &AppState,
+    paths: &[String],
+    source: Option<crate::source::SceneSource>,
+    title: Option<String>,
+) -> Result<SceneDescriptor, AppError> {
+    if paths.is_empty() {
         return Err(AppError::bad_request("a scene needs at least one file"));
     }
-    let source_ref = source.scene_source();
     let mut meshes = Vec::new();
-    for (i, path) in request.paths.iter().enumerate() {
+    for (i, path) in paths.iter().enumerate() {
+        if crate::oss::is_oss(path) {
+            let input_path = PathBuf::from(
+                crate::oss::Location::parse(path)
+                    .map_err(|_| AppError::bad_request("invalid OSS resource address"))?
+                    .key
+                    .as_ref(),
+            );
+            MeshFormat::from_path(&input_path)
+                .map_err(|_| AppError::bad_request("unsupported mesh format"))?;
+        }
         let observed = state
             .registry
             .sources
-            .observe(Some(&source_ref), path, false)
+            .observe(source.as_ref(), path, false)
             .await
             .map_err(|e| match e {
-                SourceError::Gone => AppError::bad_request("Source file not found"),
+                SourceError::Gone => AppError::bad_request("Source file or OSS alias not found"),
                 SourceError::TooLarge => AppError::unprocessable("Source exceeds 512 MiB"),
                 SourceError::Unavailable(_) => AppError::unavailable(
-                    "Could not read source; check address, SSH permissions and host identity",
+                    "Could not read source; check source configuration, credentials and permissions",
                 ),
             })?;
-        let path = PathBuf::from(&observed.path);
+        let path = if crate::oss::is_oss(&observed.path) {
+            PathBuf::from(crate::oss::Location::parse(&observed.path)?.key.as_ref())
+        } else {
+            PathBuf::from(&observed.path)
+        };
         let format = MeshFormat::from_path(&path)?;
         meshes.push(crate::scene::MeshRef {
             path: observed.path.clone(),
@@ -1637,22 +1671,42 @@ async fn client_scene(
             label: None,
         });
     }
-    let title = request.title.unwrap_or_else(|| {
+    let title = title.unwrap_or_else(|| {
         if meshes.len() == 1 {
             meshes[0].name.clone()
         } else {
             format!("{} Meshes", meshes.len())
         }
     });
-    let mut scene = SceneDescriptor {
-        source: Some(source_ref),
+    Ok(SceneDescriptor {
+        source,
         schema: 3,
         title,
         created_at: crate::source::now() as u64,
         meshes,
         label_groups: Vec::new(),
         state: Default::default(),
-    };
+    })
+}
+
+async fn client_scene(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSceneRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let source = client_auth(&state, &headers, false)?;
+    if !source.local && request.paths.iter().any(|p| crate::oss::is_oss(p)) {
+        return Err(AppError::unauthorized(
+            "OSS sharing requires a Server-local Client",
+        ));
+    }
+    let mut scene = scene_from_sources(
+        &state,
+        &request.paths,
+        Some(source.scene_source()),
+        request.title,
+    )
+    .await?;
     if let Some(labels) = request.labels {
         scene
             .set_labels(labels)

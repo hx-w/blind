@@ -554,7 +554,7 @@ async fn scene_sources_are_valid(
     cache: &mut SourceCache,
     sources: &crate::source::Sources,
 ) -> Result<bool, crate::source::SourceError> {
-    if scene.source.is_some() {
+    if scene.source.is_some() || scene.meshes.iter().any(|m| crate::oss::is_oss(&m.path)) {
         return match sources.validate(scene).await {
             Ok(()) => Ok(true),
             Err(crate::source::SourceError::Gone) => Ok(false),

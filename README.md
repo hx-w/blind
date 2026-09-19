@@ -13,11 +13,54 @@ renderer. On B/C, `blind join` and `blind share` are short-lived Client commands
 they do not start a background service. Supported files are PLY meshes and
 point clouds, STL, OBJ, and Denta PTS.
 
-Original files stay on their owning host. The server reads remote files through
+Original files stay on their owning host or object store. The server reads remote files through
 **read-only SFTP**, or reads directly when Client and Server share the same OS
 user and filesystem. It never persists original geometry or rendered images;
 only encrypted scene descriptors, registration metadata, and dedicated SSH keys
 are stored. Derived LODs use a bounded memory cache.
+
+### OSS sources
+
+Blind reads private meshes directly from S3-compatible stores, including Qiniu.
+On the **Server machine**, configure one alias per endpoint/credential pair:
+
+```sh
+blind oss set prod     # prompts: endpoint, region, Access Key, Secret Key
+blind oss list        # aliases, endpoints and regions only; no credentials
+blind oss remove prod
+```
+
+Use an HTTPS S3 API endpoint (not a CDN/download domain) and its region.
+`set` also replaces an existing alias; terminal credential input is hidden.
+Automation can pipe the four values as four lines on stdin. Credentials are
+stored only in the Server's `oss.json`, next to `config.json`, with mode 0600.
+The next read picks up changes without a restart.
+
+On a remote Client, `blind oss list` queries its connected Server and shows
+whether this Client can create OSS shares. Discovery requires an active Client
+registration and never returns Access Keys or Secret Keys. `set` and `remove`
+always edit the local Server configuration, not the remote Server.
+
+```sh
+blind share oss://prod/my-bucket/orders/123/crown.ply --format json
+blind share oss://prod/my-bucket/crown.ply oss://archive/other-bucket/jaw.stl
+```
+
+Addresses are `oss://ALIAS/BUCKET/KEY`; percent-encode reserved characters in
+object keys. Each mesh selects its own alias. Local files can be mixed with OSS
+addresses, and `--config` accepts these addresses in `resources[].path`.
+Labels, groups, Raw/LOD, PNG and sharing work as for filesystem sources.
+
+OSS shares must be created by a **Server-local Client** (`blind join --local`)
+or the Server owner's PAT API. Remote SFTP Client credentials cannot use the
+Server's OSS aliases. Run Cyclops under that Server account (inside the Server
+container when applicable). Viewers only need the resulting Blind URL.
+
+Blind performs signed, read-only GET requests, hashes the original bytes, and
+does not save meshes to disk. Changes/deletion or alias removal invalidate
+shares; temporary authentication/network failures return 503 and remain
+recoverable. Reads are limited to 512 MiB per object and 120 seconds, and do
+not follow redirects. HTTPS is required except for loopback test endpoints.
 
 ## Why Blind
 
@@ -415,7 +458,8 @@ cargo test --locked
 | `POST /api/v1/control/doctor/clean-invalid` | PAT | Remove invalid short links from the live registry |
 | `POST /api/v1/control/doctor/clear-all` | PAT | Remove every short link from the live registry |
 | `GET /api/v1/hosts` | PAT | Detected Host candidates |
-| `POST /api/v1/scenes` | PAT | Create a scene from local paths |
+| `POST /api/v1/scenes` | PAT | Create a scene from local paths or OSS addresses |
+| `GET /api/v1/client/oss` | Client credential | Discover OSS aliases and sharing authority, without credentials |
 | `GET /api/v1/scenes/:token` | Scene capability | Read validated public state |
 | `GET /api/v1/scenes/:token/meshes/:index` | Scene capability | Stream a validated Mesh |
 | `GET /api/v1/scenes/:token/meshes/:index/lod` | Scene capability | Generate or stream an in-memory review LOD |

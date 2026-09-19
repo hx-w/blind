@@ -512,6 +512,27 @@ impl Sources {
         mode: AccessMode,
     ) -> std::result::Result<Observed, SourceError> {
         let registered = source.map(|s| self.get(&s.id)).transpose()?;
+        if crate::oss::is_oss(path) {
+            // A remote Client's registration only grants access to its own SFTP
+            // source, never to the Server's object-store credentials.
+            if registered.as_ref().is_some_and(|s| !s.local) {
+                return Err(SourceError::Unavailable(
+                    "OSS sharing requires a Server-local Client".into(),
+                ));
+            }
+            let _permit = self
+                .slots
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|_| SourceError::Unavailable("source reader closed".into()))?;
+            let result =
+                crate::oss::read(&self.dir, path, matches!(mode, AccessMode::Bytes)).await?;
+            if let Some(source) = source {
+                self.get(&source.id)?;
+            }
+            return Ok(result);
+        }
         let path = path.to_owned();
         let key = registered.as_ref().map(|s| self.key_path(&s.id));
         let pool = registered.as_ref().filter(|s| !s.local).map(|s| {

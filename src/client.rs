@@ -44,10 +44,10 @@ enum ClientCommand {
     /// Share Mesh resources from arguments or a JSON manifest.
     #[command(
         long_about = "Share Mesh resources through the registered Blind server. Pass files directly for small scenes, or use --config FILE for large, persistent resource lists. The config owns the title, resources, per-resource labels, and group labels. Relative resource paths are resolved from the config file's directory.",
-        after_help = "DIRECT EXAMPLES:\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1,2=Reference pair'\n\nCONFIG EXAMPLE (indices in groups.members are 1-based):\n  {\n    \"title\": \"Case review\",\n    \"resources\": [\n      {\"path\": \"meshes/crown.ply\", \"label\": \"Crown\"},\n      {\"path\": \"meshes/donor-a.ply\"},\n      {\"path\": \"meshes/donor-b.ply\"}\n    ],\n    \"groups\": [\n      {\"label\": \"Reference teeth\", \"members\": [2, 3]}\n    ]\n  }\n\nCONFIG CONTRACT:\n  - resources is required and must contain at least one {path,label?} object.\n  - paths may be absolute or relative to the config file; PLY, STL, OBJ, and PTS are supported.\n  - labels contain 1-120 characters. A group needs at least two unique in-range members.\n  - groups is optional and limited to 64 entries. The config file is limited to 4 MiB.\n  - unknown fields are errors, so misspelled keys never pass silently.\n\n--config conflicts with positional Meshes, --title, and --label. --host, --stateless, and --format still control delivery/output."
+        after_help = "DIRECT EXAMPLES:\n  blind share oss://prod/my-bucket/crown.ply --format json\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1,2=Reference pair'\n\nCONFIG EXAMPLE (indices in groups.members are 1-based):\n  {\n    \"title\": \"Case review\",\n    \"resources\": [\n      {\"path\": \"meshes/crown.ply\", \"label\": \"Crown\"},\n      {\"path\": \"meshes/donor-a.ply\"},\n      {\"path\": \"meshes/donor-b.ply\"}\n    ],\n    \"groups\": [\n      {\"label\": \"Reference teeth\", \"members\": [2, 3]}\n    ]\n  }\n\nCONFIG CONTRACT:\n  - resources is required and must contain at least one {path,label?} object.\n  - paths may be absolute, relative to the config file, or oss://ALIAS/BUCKET/KEY; PLY, STL, OBJ, and PTS are supported.\n  - labels contain 1-120 characters. A group needs at least two unique in-range members.\n  - groups is optional and limited to 64 entries. The config file is limited to 4 MiB.\n  - unknown fields are errors, so misspelled keys never pass silently.\n\n--config conflicts with positional Meshes, --title, and --label. --host, --stateless, and --format still control delivery/output."
     )]
     Share {
-        /// Mesh files in display order. Required unless --config is used.
+        /// Mesh paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
         #[arg(required_unless_present = "config", conflicts_with = "config")]
         meshes: Vec<PathBuf>,
         /// JSON manifest for a large resource set; relative paths use its directory.
@@ -118,6 +118,21 @@ fn load() -> Result<Option<ClientConfig>> {
         return Ok(None);
     }
     Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+}
+
+/// Return false when this process manages local Server configuration.
+pub(crate) async fn list_remote_oss() -> Result<bool> {
+    let Some(c) = load()? else {
+        return Ok(false);
+    };
+    if c.source.local {
+        return Ok(false);
+    }
+    let payload = api(&c.server, "/api/v1/client/oss", &c.credential, None).await?;
+    let stores: Vec<crate::oss::StoreInfo> = serde_json::from_value(payload["stores"].clone())
+        .context("Server does not support OSS discovery")?;
+    crate::oss::print_list(&stores, payload["can_share"].as_bool().unwrap_or(false));
+    Ok(true)
 }
 fn save(c: &ClientConfig) -> Result<()> {
     crate::source::private_dir(
@@ -562,11 +577,13 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
         if resource.path.as_os_str().is_empty() {
             bail!("resources[{}].path must not be empty", index + 1);
         }
-        meshes.push(if resource.path.is_absolute() {
-            resource.path
-        } else {
-            base.join(resource.path)
-        });
+        meshes.push(
+            if crate::oss::is_oss(&resource.path.to_string_lossy()) || resource.path.is_absolute() {
+                resource.path
+            } else {
+                base.join(resource.path)
+            },
+        );
         let label = resource
             .label
             .map(|text| {
@@ -659,6 +676,11 @@ async fn share(
         .meshes
         .iter()
         .map(|p| {
+            if crate::oss::is_oss(&p.to_string_lossy()) {
+                let address = p.to_string_lossy().into_owned();
+                crate::oss::Location::parse(&address)?;
+                return Ok(address);
+            }
             fs::canonicalize(p)
                 .with_context(|| format!("cannot resolve {}", p.display()))
                 .map(|p| p.to_string_lossy().into_owned())

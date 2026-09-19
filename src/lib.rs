@@ -3,6 +3,7 @@ pub mod config;
 pub mod lod;
 pub mod mesh;
 pub mod network;
+pub mod oss;
 pub mod registry;
 pub mod render;
 pub mod scene;
