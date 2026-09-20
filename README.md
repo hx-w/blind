@@ -543,3 +543,16 @@ cargo test --locked
 Server-side resolvers extend `blind share SCHEME://INPUT` without installing
 plugins on Clients. See [plugin installation, configuration and protocol](docs/plugins.md).
 `blind status` now reports both the local Server and the current Client connection.
+
+### Scene components
+
+Share geometry, text, HTML and images in one grouped scene. Installed plugins add
+other components; Cyclops provides order resolution and trace analysis:
+
+```sh
+blind share jaw.ply run.log tracing.json
+blind share capture.json --component cyclops:trace
+```
+
+See [component selection, layout and interaction](docs/components.md) for the common
+component contract, `--config` examples and display boundaries.

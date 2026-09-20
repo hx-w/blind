@@ -1,4 +1,6 @@
+pub mod archive;
 pub mod client;
+pub mod component;
 pub mod config;
 pub mod lod;
 pub mod mesh;
@@ -19,3 +21,5 @@ pub mod update;
 mod render_labels;
 
 mod render_occlusion;
+
+mod render_viewer;

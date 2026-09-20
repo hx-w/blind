@@ -1,4 +1,7 @@
+const exportMode = new URLSearchParams(location.search).has('render');
+if (exportMode) document.documentElement.classList.add('export-mode');
 import './styles.css';
+import { ComponentViewer } from './component-viewer';
 import { ApiError, loadScene, shareScene, type HostCandidate, type MeshQuality, type PublicScene, type ShareResponse } from './api';
 import { MarkupCanvas } from './markup';
 import { MeshViewer } from './viewer';
@@ -70,6 +73,7 @@ $('.skip-link').addEventListener('click', (event) => {
 });
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
+let components: ComponentViewer | undefined;
 let panelOpen = false;
 let panelMode: 'mesh' | 'info' = 'mesh';
 let shareLinks: ShareResponse | undefined;
@@ -88,9 +92,9 @@ new ResizeObserver(entries => {
 const surface = new SurfaceEditor(meshViewer, markup, shell, {closePanel, toast: showToast, change: syncDetailControls});
 
 meshViewer.onSelectionChange = () => {
-  syncDetailControls(); surface.refreshList();
+  components?.selectMesh(meshViewer.selectedIndex); syncDetailControls(); surface.refreshList();
 };
-meshViewer.onModelChange = () => { syncDetailControls(); syncSceneMeta(); surface.refreshList(); };
+meshViewer.onModelChange = () => { syncDetailControls(); syncSceneMeta(); surface.refreshList(); components?.sync(); };
 meshViewer.onLoadProgress = (progress) => {
   loadProgress = progress;
   renderLoadProgress();
@@ -136,9 +140,14 @@ async function start(): Promise<void> {
     title.insertAdjacentElement('afterend', artifactList);
     startLongLoadHint();
     await meshViewer.load(scene);
-    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total) {
+    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !scene.components?.some(c => c.source.kind === 'attachment')) {
       throw new Error('No models could be loaded');
     }
+    $('[data-copy="image"]').hidden = false;
+    components = new ComponentViewer(root, meshViewer, scene);
+    components.onSelect = () => syncDetailControls();
+    components.onChange = () => syncDetailControls();
+    window.addEventListener('pagehide', event => { if (!event.persisted) components?.dispose(); });
     markup.load(scene.state.strokes ?? []);
     surface.load();
     owner = scene.owner ? owner : undefined;
@@ -146,13 +155,20 @@ async function start(): Promise<void> {
     const notices = (scene.warnings?.length ?? 0) + loadProgress.failed;
     if (notices > 0) {
       const notice = $('#scene-notice'); notice.hidden = false;
-      notice.textContent = `${scene.warnings?.some(w => w.code === 'ORDER_FAILED') ? '订单失败 · 已有产物' : '场景部分可用'} · ${notices} 项提示`;
+      notice.textContent = `场景部分可用 · ${notices} 项提示`;
       if (loadProgress.failed) {
         const row = document.createElement('p'); row.textContent = `${loadProgress.failed} 个模型加载失败；请检查网络或稍后重试。`; artifactList.prepend(row);
       }
     }
     finishLoading();
+    if (exportMode) {
+      if (loadProgress.failed) throw new Error('Export failed: geometry unavailable');
+      await components.ready(); await document.fonts.ready;
+      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      document.documentElement.dataset.renderStatus = 'ready';
+    }
   } catch (error) {
+    if (exportMode) { document.documentElement.dataset.renderStatus = 'error'; document.documentElement.dataset.renderError = error instanceof Error ? error.message : 'Scene render failed'; }
     finishLoading(); hideViewerControls();
     invalid.hidden = false;
     if (!(error instanceof ApiError && error.status === 410)) {
@@ -207,11 +223,8 @@ function hideViewerControls(): void {
 }
 
 function renderMeshOptions(): void {
-  detailMeshSelect.replaceChildren(...meshViewer.modelInfos.map((mesh, index) => {
-    const option = document.createElement('option');
-    option.value = String(index);
-    option.textContent = mesh.label?.text ?? mesh.name;
-    return option;
+  detailMeshSelect.replaceChildren(...(components?.components ?? []).map(component => {
+    const option = document.createElement('option'); option.value = component.id; option.textContent = component.label; return option;
   }));
 }
 
@@ -226,9 +239,27 @@ function renderSwatches(): void {
 }
 
 function syncDetailControls(): void {
+  const component = components?.selectedComponent;
+  const geometry = !component || component.source.kind === 'mesh';
+  document.querySelectorAll<HTMLElement>('[data-geometry-only]').forEach(element => { element.hidden = !geometry; });
+  if (component) {
+    detailMeshSelect.value = component.id;
+    opacity.value = String(Math.round(component.opacity * 100)); opacityValue.value = `${opacity.value}%`;
+    meshVisibleToggle.checked = component.visible && component.opacity > 0;
+  }
+  const state = meshViewer.currentState;
+  axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
+  document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach(button => button.classList.toggle('active', button.dataset.projection === state.projection));
+  if (component && !geometry) {
+    panelContext.textContent = panelOpen && panelMode === 'mesh' ? component.label : '';
+    meshSummaryName.textContent = component.label;
+    meshSummaryMeta.textContent = `${component.component.toUpperCase()} · ${formatBytes(scene?.attachments?.[component.source.index]?.byte_size ?? 0)}`;
+    meshSummaryDot.style.setProperty('--mesh-color', 'var(--accent)');
+    return;
+  }
   const selected = meshViewer.selectedModel; if (!selected) return;
   panelContext.textContent = panelOpen && panelMode === 'mesh' ? selected.label?.text ?? selected.name : '';
-  detailMeshSelect.value = String(meshViewer.selectedIndex);
+  if (!component) detailMeshSelect.value = String(meshViewer.selectedIndex);
   meshSummaryName.textContent = selected.label?.text ?? selected.name;
   meshSummaryMeta.textContent = `${selected.format.toUpperCase()} · Raw ${formatBytes(selected.raw_bytes)}`;
   meshSummaryDot.style.setProperty('--mesh-color', selected.color);
@@ -251,7 +282,6 @@ function syncDetailControls(): void {
   } else if (selected.lod_error) lodSaving.textContent = 'LOD 暂不可用，当前已回退到 Raw';
   else lodSaving.textContent = '首次切换到 LOD 后显示节省量';
   document.querySelectorAll<HTMLButtonElement>('.swatch').forEach((button) => button.classList.toggle('active', button.style.getPropertyValue('--swatch').trim().toLowerCase() === selected.color.toLowerCase()));
-  const state = meshViewer.currentState;
   document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.classList.toggle('active', button.dataset.shading === state.shading));
   document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.classList.toggle('active', button.dataset.projection === state.projection));
   axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
@@ -261,7 +291,7 @@ detailsTrigger.addEventListener('click', () => {
   if (panelOpen && panelMode === 'mesh') closePanel(); else openPanel('mesh');
 });
 
-meshLabelText.addEventListener('input', () => meshViewer.setLabel(meshLabelText.value));
+meshLabelText.addEventListener('input', () => { meshViewer.setLabel(meshLabelText.value); components?.sync(); });
 
 function openPanel(mode: 'mesh' | 'info'): void {
   panelOpen = true; expanded = false;
@@ -334,10 +364,10 @@ $('#close-panel').addEventListener('click', () => closePanel(true));
 panel.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') { event.preventDefault(); closePanel(true); }
 });
-$('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast('已适配全部可见 Mesh'); });
-detailMeshSelect.addEventListener('change', () => meshViewer.select(Number(detailMeshSelect.value)));
-meshVisibleToggle.addEventListener('change', () => meshViewer.setVisible(meshViewer.selectedIndex, meshVisibleToggle.checked));
-opacity.addEventListener('input', () => { meshViewer.setOpacity(Number(opacity.value) / 100); opacityValue.value = `${opacity.value}%`; });
+$('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast('已适配全部可见元素'); });
+detailMeshSelect.addEventListener('change', () => components?.selectById(detailMeshSelect.value));
+meshVisibleToggle.addEventListener('change', () => components?.setSelectedVisible(meshVisibleToggle.checked));
+opacity.addEventListener('input', () => { components?.setSelectedOpacity(Number(opacity.value) / 100); opacityValue.value = `${opacity.value}%`; });
 document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach((button) => button.addEventListener('click', async () => {
   const quality = button.dataset.quality as MeshQuality;
   try {

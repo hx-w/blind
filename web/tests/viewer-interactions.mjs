@@ -151,9 +151,9 @@ test('visibility beside opacity preserves opacity, selection and shared state', 
     await toggle.locator('..').click();
     assert.equal(await toggle.isChecked(),false);
     assert.equal(await page.locator('#opacity-range').inputValue(),'37');
-    await page.locator('#detail-mesh-select').selectOption('1');
+    await page.locator('#detail-mesh-select').selectOption('mesh-1');
     assert.equal(await toggle.isChecked(),true);
-    await page.locator('#detail-mesh-select').selectOption('0');
+    await page.locator('#detail-mesh-select').selectOption('mesh-0');
     assert.equal(await toggle.isChecked(),false);
     assert.equal(await page.locator('#opacity-range').inputValue(),'37');
     // The hidden native checkbox remains keyboard operable and has a visible focus cue.
@@ -190,7 +190,7 @@ test('opaque geometry covers ordinary labels but the selected label stays in fro
   const page = await openPage({width:1280,height:800},0,ungrouped);
   try {
     await page.locator('.panel-trigger').click();
-    await page.locator('#detail-mesh-select').selectOption('1');
+    await page.locator('#detail-mesh-select').selectOption('mesh-1');
     await page.locator('#close-panel').click();
     await page.waitForTimeout(350);
     const placeInsideMesh = () => page.evaluate(() => {
@@ -210,7 +210,7 @@ test('opaque geometry covers ordinary labels but the selected label stays in fro
     assert.deepEqual(ordinary, geometry, 'an ordinary label must not paint over opaque geometry');
     await label.evaluate(element => {element.style.visibility='';});
     await page.locator('.panel-trigger').click();
-    await page.locator('#detail-mesh-select').selectOption('0');
+    await page.locator('#detail-mesh-select').selectOption('mesh-0');
     await page.locator('#close-panel').click();
     await page.waitForTimeout(350);
     clip = await placeInsideMesh();
@@ -236,7 +236,7 @@ test('selecting a group member lifts only its label and group caption', async ()
     }));
     assert.equal((await layer()).captions.length,0);
     for(const index of [0,1,2]) {
-      await page.locator('.panel-trigger').click();await page.locator('#detail-mesh-select').selectOption(String(index));await page.locator('#close-panel').click();
+      await page.locator('.panel-trigger').click();await page.locator('#detail-mesh-select').selectOption(`mesh-${index}`);await page.locator('#close-panel').click();
       await page.waitForTimeout(100);
       const state=await layer();assert.equal(state.frames,0);
       assert.deepEqual(state.members,[["Mesh one"],["Mesh two"],["Other"]][index]);
@@ -322,7 +322,7 @@ for (const viewport of [{width:390,height:844},{width:320,height:700},{width:740
         assert.ok(Math.min(a.x+a.width,b.x+b.width)<=Math.max(a.x,b.x) || Math.min(a.y+a.height,b.y+b.height)<=Math.max(a.y,b.y),'group captions overlap');
       }
       await page.locator('.panel-trigger').click();
-      await page.locator('#detail-mesh-select').selectOption('3');
+      await page.locator('#detail-mesh-select').selectOption('mesh-3');
       await page.locator('#close-panel').click();
       await page.waitForTimeout(350);
       assert.equal(await page.locator('.mesh-label:visible').count(),1);
@@ -520,7 +520,7 @@ test('surface hits choose the visible mesh independently of the mesh selection',
     assert.equal(await page.locator('#surface-name').inputValue(),'点 1');
     await page.waitForFunction(()=>document.querySelector('.surface-badge.selected')?.textContent.includes('点 1'));
     await page.locator('#surface-done').click();await page.locator('.panel-trigger').click();
-    await page.locator('#detail-mesh-select').selectOption('1');await page.locator('#mesh-visible-toggle').locator('..').click();
+    await page.locator('#detail-mesh-select').selectOption('mesh-1');await page.locator('#mesh-visible-toggle').locator('..').click();
     await page.locator('#close-panel').click();await page.locator('#brush-tool').click();
     assert.equal(await page.locator('.surface-list-row').count(),0);
   } finally {await page.close();}
@@ -805,8 +805,9 @@ test('partial scenes show a persistent notice and semantic details', async () =>
   const page=await openPage({width:390,height:844},0,partial);
   try {
     assert.equal(await page.locator('#scene-notice').isVisible(),true);
-    assert.match(await page.locator('#scene-notice').textContent(),/订单失败/);
+    assert.match(await page.locator('#scene-notice').textContent(),/场景部分可用/);
     await page.locator('#scene-notice').click();
+    assert.match(await page.locator('.scene-artifacts').textContent(),/牙冠生成失败；显示已有产物/);
     assert.match(await page.locator('.scene-artifacts').textContent(),/人工颈缘：产物缺失/);
     assert.match(await page.locator('.scene-artifacts').textContent(),/运行日志.*产物缺失/);
     assert.equal(await page.locator('.scene-artifacts a').count(),0);

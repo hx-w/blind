@@ -1,3 +1,4 @@
+import type { SceneComponent, ComponentUpdate } from "./scene-components";
 export type MeshFormat = 'ply' | 'stl' | 'obj' | 'pts';
 export type MeshQuality = 'lod' | 'raw';
 export type Shading = 'smooth' | 'flat' | 'wire';
@@ -71,6 +72,7 @@ export interface MeshLabelGroup {
 }
 
 export interface PublicScene {
+  components?: SceneComponent[];
   ttl_days?: number;
   source?: { id: string; name: string; host: string; user: string } | null;
   title: string;
@@ -105,6 +107,7 @@ export interface ShareResponse extends ShareLinks {
 }
 
 export interface SceneUpdate {
+  components?: ComponentUpdate[];
   meshes: Array<{ color: string; opacity: number; visible: boolean; quality: MeshQuality; label?: MeshLabel | null }>;
   state: ViewState;
 }

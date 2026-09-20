@@ -3,7 +3,7 @@
 ARG BLIND_RUNTIME_BASE=debian:bookworm-slim
 FROM ${BLIND_RUNTIME_BASE} AS runtime-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates openssh-client libvulkan1 mesa-vulkan-drivers libegl1 libgl1 \
+    chromium fonts-noto-cjk ca-certificates openssh-client libvulkan1 mesa-vulkan-drivers libegl1 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 FROM runtime-base
 ARG BLIND_UID=1000

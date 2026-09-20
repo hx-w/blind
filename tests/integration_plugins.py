@@ -37,8 +37,12 @@ with tempfile.TemporaryDirectory(prefix='blind-plugin-test-') as tmp:
  (package/'blind-plugin.json').write_text(json.dumps(manifest))
  (package/'resolver.py').write_text('''import json,sys
 r=json.loads(sys.stdin.readline());p=r['params'];assert p['config']['token']=='PRIVATE';assert p['protocol_version']==1
-uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing']
+uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing','grouped','collision']
 result={'schema_version':1,'requires':['layout.panels','attachments'],'title':'Plugin scene','resources':[{'id':'a','uri':'oss://test/bucket/a.ply','label':'First'},{'id':'b','uri':'oss://test/bucket/b.ply','label':'Second'}],'panels':[{'id':'one','label':'One','members':['a']},{'id':'two','label':'Two','members':['a','b']}],'attachments':[{'id':'zip','uri':'oss://test/bucket/log.zip','label':'Log'}],'new_optional_field':'ignored'}
+if uri=='grouped':
+ result['requires'].append('layout.panel-groups');result['panels']=[{'id':'m1','label':'16','group':'Stage one','members':['a','b']},{'id':'m2','label':'46','group':'Stage one','members':['a','b']},{'id':'c1','label':'16','group':'Stage two','members':['a','b']}]
+if uri=='collision':
+ result['requires'].append('components.v1');result['components']=[{'id':'mesh-0','uri':'oss://test/bucket/log.zip','component':'text','label':'Collision log'}]
 if uri=='bad':result['resources'][0]['uri']='oss://other/bucket/a.ply'
 if uri=='future':result['requires'].append('future.required')
 if uri=='partial':result['resources'][1]['uri']='oss://test/bucket/missing.ply'
@@ -83,6 +87,19 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   raw=http(origin+'/'+scene['meshes'][0]['source_url'])[1];assert raw
   assert http(origin+'/'+scene['meshes'][0]['source_url']+'/lod')[0]==200
   png=http(shared['image_url'])[1];assert png.startswith(b'\x89PNG')
+  grouped=json.loads(cli('share','demo://grouped','--format','json',environment=remote).stdout)
+  gscene=json.loads(http(origin+'/api/v1/scenes/'+grouped['viewer_url'].rsplit('/',1)[1])[1])
+  assert [c['group'] for c in gscene['components']]==['Stage one']*4+['Stage two']*2
+  assert len(gscene['meshes'])==6
+  positions=[m['translation'] for m in gscene['meshes']]
+  assert positions[0]==positions[1] and positions[2]==positions[3] and positions[4]==positions[5]
+  assert len({tuple(positions[i]) for i in [0,2,4]})==3
+  collision=json.loads(cli('share','demo://collision','--format','json',environment=remote).stdout)
+  ccode=collision['viewer_url'].rsplit('/',1)[1]
+  cscene=json.loads(http(origin+'/api/v1/scenes/'+ccode)[1])
+  assert len({c['id'] for c in cscene['components']})==len(cscene['components'])
+  update={'state':cscene['state'],'meshes':[{k:m[k] for k in ['color','opacity','visible','quality']} for m in cscene['meshes']], 'components':[{k:c.get(k) for k in ['id','position','size','visible','opacity']} for c in cscene['components']]}
+  assert http(origin+'/api/v1/scenes/'+ccode+'/share',data=update)[0]==200
   partial=json.loads(cli('share','demo://partial','--format','json',environment=remote).stdout);assert partial['status']=='partial'
   pscene=json.loads(http(origin+'/api/v1/scenes/'+partial['viewer_url'].rsplit('/',1)[1])[1])
   assert any(w['code']=='PANEL_INCOMPLETE' for w in pscene['warnings'])

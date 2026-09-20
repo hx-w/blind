@@ -13,7 +13,7 @@ use anyhow::Context;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path as AxumPath, State},
+    extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path as AxumPath, Query, State},
     http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, header, request::Parts},
     response::IntoResponse,
     routing::{get, post},
@@ -107,6 +107,8 @@ pub struct ShareResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateSceneRequest {
+    #[serde(default)]
+    display: Vec<crate::component::DisplayOptions>,
     #[serde(default = "crate::scene::default_ttl_days")]
     ttl_days: u32,
     #[serde(default)]
@@ -211,6 +213,7 @@ impl DoctorRegistryReport {
 
 #[derive(Debug, Serialize)]
 struct PublicScene {
+    components: Vec<crate::component::SceneComponent>,
     ttl_days: u32,
     source: Option<crate::source::SceneSource>,
     title: String,
@@ -309,6 +312,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/v1/scenes/{token}/share",
             post(reshare).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
         )
+        .route("/api/v1/scenes/{token}/renderers/{id}", get(get_renderer))
         .route("/i/{*token}", get(render_image))
         .route("/s/{token}", get(view_scene))
         .route("/v/{token}", get(view_scene))
@@ -331,7 +335,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .layer(SetResponseHeaderLayer::if_not_present(
             header::HeaderName::from_static("content-security-policy"),
             HeaderValue::from_static(
-                "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+                "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
             ),
         ))
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -626,7 +630,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        scene_schema: 4,
+        scene_schema: 5,
         image_renderer: state.renderer.is_some(),
     })
 }
@@ -739,7 +743,8 @@ async fn create_scene(
                 .into_owned()
         });
     }
-    let mut scene = scene_from_sources(&state, &paths, None, request.title).await?;
+    let mut scene =
+        scene_from_sources(&state, &paths, &request.display, None, request.title).await?;
     scene.ttl_days = Some(request.ttl_days);
     if let Some(labels) = request.labels.filter(|ls| ls.iter().any(Option::is_some)) {
         scene
@@ -806,6 +811,7 @@ async fn get_scene(
     Ok((
         no_store(),
         Json(PublicScene {
+            components: scene.component_descriptors(),
             attachments: scene.attachments.iter().enumerate().map(|(index,a)| serde_json::json!({"id":a.id,"label":a.label,"byte_size":a.byte_size,"unavailable":a.unavailable,"url":if a.revision.is_some(){Some(format!("api/v1/scenes/{token}/attachments/{index}"))}else{None}})).collect(),
             warnings: scene.warnings.clone(),
             ttl_days: scene.link_ttl_days(!is_short_secret(&token)),
@@ -960,6 +966,7 @@ async fn reshare(
     )?;
     let owner = owner_matches(&headers, &state, &opened);
     let mut scene = opened.scene;
+    scene.components = scene.component_descriptors();
     if !is_short_secret(&token) && scene.ttl_days.is_none() {
         scene.ttl_days = Some(0);
     }
@@ -996,14 +1003,54 @@ async fn render_image(
         token,
         state.registry.sources.validate_source(&scene),
     )?;
+    // The Viewer loads geometry and surfaces eagerly, including hidden entries.
+    // Bound their aggregate input before starting either renderer. ZIP members
+    // reserve their decompressed limit, not the much smaller archive size.
     let source_bytes = scene
         .meshes
         .iter()
-        .filter(|mesh| mesh.visible)
-        .try_fold(0_u64, |total, mesh| total.checked_add(mesh.byte_size))
+        .map(|m| m.byte_size)
+        .chain(
+            scene
+                .components
+                .iter()
+                .filter_map(|c| match c.source {
+                    crate::component::ComponentSource::Attachment(i) => scene.attachments.get(i),
+                    _ => None,
+                })
+                .map(|a| {
+                    if a.member.is_some() {
+                        64 * 1024 * 1024
+                    } else {
+                        a.byte_size.unwrap_or(0)
+                    }
+                }),
+        )
+        .try_fold(0_u64, |total, size| total.checked_add(size))
         .ok_or_else(|| AppError::unprocessable("source size overflow"))?;
     if source_bytes > crate::source::MAX_SOURCE_BYTES {
         return Err(AppError::unprocessable("image sources exceed 512 MiB"));
+    }
+    if !scene.components.is_empty() {
+        let url = format!(
+            "http://127.0.0.1:{}{}/s/{}?render=1",
+            state.config.port()?,
+            state.config.base_path().unwrap_or_default(),
+            token
+        );
+        let bytes = crate::render_viewer::render(&url,scene.state.frame.width,scene.state.frame.height).await.map_err(|error| {
+            tracing::warn!(%error,"full scene image render failed");
+            AppError::unprocessable("Full scene export failed; check component availability and the Server Chromium installation")
+        })?;
+        source_result(
+            &state,
+            token,
+            state.registry.sources.validate_source(&scene),
+        )?;
+        return Ok(Response::builder()
+            .header(header::CONTENT_TYPE, "image/png")
+            .header(header::CACHE_CONTROL, NO_STORE)
+            .body(Body::from(bytes))?);
     }
     let mut render_scene = scene.clone();
     let mut sources = Vec::with_capacity(scene.meshes.len());
@@ -1100,7 +1147,32 @@ async fn view_scene(
         &token,
         state.registry.sources.validate_source(&opened.scene),
     )?;
-    serve_index(state.config.base_path())
+    let mut response = serve_index(state.config.base_path())?;
+    let mut origins: Vec<_> = opened
+        .scene
+        .components
+        .iter()
+        .filter_map(|c| c.renderer.as_ref())
+        .flat_map(|r| r.frame_origins.iter())
+        .cloned()
+        .collect();
+    origins.sort();
+    origins.dedup();
+    for origin in &origins {
+        let url = url::Url::parse(origin).map_err(anyhow::Error::from)?;
+        if url.scheme() != "https" || url.origin().ascii_serialization() != *origin {
+            return Err(AppError::unprocessable("Invalid renderer frame origin"));
+        }
+    }
+    let policy = format!(
+        "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self' {}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        origins.join(" ")
+    );
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_str(&policy).map_err(anyhow::Error::from)?,
+    );
+    Ok(response)
 }
 
 async fn asset(
@@ -1731,28 +1803,48 @@ async fn local_client(
 async fn scene_from_sources(
     state: &AppState,
     paths: &[String],
+    display: &[crate::component::DisplayOptions],
     source: Option<crate::source::SceneSource>,
     title: Option<String>,
 ) -> Result<SceneDescriptor, AppError> {
     if paths.is_empty() {
         return Err(AppError::bad_request("a scene needs at least one file"));
     }
+    use crate::component::{ComponentKind, ComponentSource, SceneComponent};
+    if !display.is_empty() && display.len() != paths.len() {
+        return Err(AppError::bad_request(
+            "Display option count must match resources",
+        ));
+    }
+    if paths.len() > 256 {
+        return Err(AppError::bad_request(
+            "A scene supports at most 256 resources",
+        ));
+    }
     let mut meshes = Vec::new();
+    let mut attachments = Vec::new();
+    let mut components = Vec::new();
     for (i, path) in paths.iter().enumerate() {
-        if crate::oss::is_oss(path) {
-            let input_path = PathBuf::from(
-                crate::oss::Location::parse(path)
-                    .map_err(|_| AppError::bad_request("invalid OSS resource address"))?
-                    .key
-                    .as_ref(),
-            );
-            MeshFormat::from_path(&input_path)
-                .map_err(|_| AppError::bad_request("unsupported mesh format"))?;
+        let options = display.get(i).cloned().unwrap_or_default();
+        options
+            .validate()
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        let kind = options
+            .component
+            .map(Ok)
+            .unwrap_or_else(|| {
+                crate::plugin::infer_component(options.member.as_deref().unwrap_or(path))
+            })
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        if kind.geometry() && options.size.is_some() {
+            return Err(AppError::bad_request(
+                "size applies to surface components; geometry retains source dimensions",
+            ));
         }
         let observed = state
             .registry
             .sources
-            .observe(source.as_ref(), path, false)
+            .observe(source.as_ref(), path, options.member.is_some())
             .await
             .map_err(|e| match e {
                 SourceError::Gone => AppError::bad_request("Source file or OSS alias not found"),
@@ -1766,7 +1858,58 @@ async fn scene_from_sources(
         } else {
             PathBuf::from(&observed.path)
         };
+        let name = path
+            .file_name()
+            .context("missing filename")?
+            .to_string_lossy()
+            .into_owned();
+        if let Some(member) = &options.member {
+            if kind.geometry() {
+                return Err(AppError::bad_request("archive geometry is not supported"));
+            }
+            crate::archive::read_member(&observed.bytes, member)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        }
+        let source_ref = if kind.geometry() {
+            ComponentSource::Mesh(meshes.len())
+        } else {
+            ComponentSource::Attachment(attachments.len())
+        };
+        components.push(SceneComponent {
+            id: format!("resource-{}", i + 1),
+            state: None,
+            component: kind.clone(),
+            renderer: crate::plugin::bind_component(&kind)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?,
+            source: source_ref,
+            label: name.clone(),
+            group: options.group,
+            position: options.position,
+            size: options.size,
+            visible: true,
+            opacity: 1.0,
+        });
+        if !kind.geometry() {
+            if observed.size > 64 * 1024 * 1024 {
+                return Err(AppError::unprocessable("Surface component exceeds 64 MiB"));
+            }
+            attachments.push(crate::scene::SceneAttachment {
+                member: options.member,
+                id: format!("resource-{}", i + 1),
+                path: observed.path,
+                label: name,
+                byte_size: Some(observed.size),
+                revision: Some(observed.revision),
+                unavailable: None,
+            });
+            continue;
+        }
         let format = MeshFormat::from_path(&path)?;
+        if (kind == ComponentKind::Points) != (format == MeshFormat::Pts) {
+            return Err(AppError::bad_request(
+                "points requires PTS; mesh requires PLY, STL or OBJ",
+            ));
+        }
         meshes.push(crate::scene::MeshRef {
             path: observed.path.clone(),
             name: path
@@ -1784,24 +1927,25 @@ async fn scene_from_sources(
             visible: true,
             quality: MeshQuality::Lod,
             label: None,
-            translation: [0.0; 3],
+            translation: options.position.unwrap_or([0.0; 3]),
         });
     }
     let title = title.unwrap_or_else(|| {
-        if meshes.len() == 1 {
-            meshes[0].name.clone()
+        if components.len() == 1 {
+            components[0].label.clone()
         } else {
-            format!("{} Meshes", meshes.len())
+            format!("{} elements", components.len())
         }
     });
     Ok(SceneDescriptor {
         source,
-        schema: 3,
+        schema: 5,
         title,
         created_at: crate::source::now() as u64,
         ttl_days: None,
         meshes,
-        attachments: Vec::new(),
+        components,
+        attachments,
         warnings: Vec::new(),
         label_groups: Vec::new(),
         state: Default::default(),
@@ -1845,6 +1989,10 @@ async fn client_scene(
         {
             return Err(AppError::bad_request("nested plugin URIs are not allowed"));
         }
+        for uri in plan.components.iter().map(|c| &c.uri) {
+            crate::oss::Location::parse(uri)
+                .map_err(|_| AppError::bad_request("plugin components must be OSS references"))?;
+        }
         for a in &plan.attachments {
             crate::oss::Location::parse(&a.uri)
                 .map_err(|_| AppError::bad_request("attachments must be OSS references"))?;
@@ -1874,6 +2022,7 @@ async fn client_scene(
         scene_from_sources(
             &state,
             &request.paths,
+            &request.display,
             Some(source.scene_source()),
             request.title,
         )
@@ -1958,6 +2107,7 @@ async fn client_plugins(
 }
 
 async fn get_attachment(
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath((token, index)): AxumPath<(String, usize)>,
@@ -1988,7 +2138,33 @@ async fn get_attachment(
     if &observed.revision != revision {
         return Err(AppError::gone("Attachment changed"));
     }
-    let name = crate::oss::Location::parse(&a.path)?.key.to_string();
+    let bytes = if let Some(member) = &a.member {
+        crate::archive::read_member(&observed.bytes, member)
+            .map_err(|_| AppError::unavailable("Archive member unavailable"))?
+    } else {
+        observed.bytes
+    };
+    if query.get("embed").is_some_and(|v| v == "1") {
+        let html = opened.scene.components.iter().any(|c| {
+            c.component == crate::component::ComponentKind::Html
+                && c.source == crate::component::ComponentSource::Attachment(index)
+        });
+        if !html {
+            return Err(AppError::bad_request(
+                "Only HTML components support embedding",
+            ));
+        }
+        return Ok(Response::builder().status(StatusCode::OK)
+            .header(header::CACHE_CONTROL, NO_STORE)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header("content-security-policy", "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; frame-ancestors 'self'; base-uri 'none'; form-action 'none'")
+            .body(Body::from(bytes))?);
+    }
+    let name = if crate::oss::is_oss(&a.path) {
+        crate::oss::Location::parse(&a.path)?.key.to_string()
+    } else {
+        a.path.clone()
+    };
     let name = name.rsplit('/').next().unwrap_or("attachment");
     // RFC 5987 encoding, never interpolate raw source text into HTTP headers.
     let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
@@ -2003,7 +2179,7 @@ async fn get_attachment(
                 encoded.replace('+', "%20")
             ),
         )
-        .body(Body::from(observed.bytes))?)
+        .body(Body::from(bytes))?)
 }
 
 async fn scene_from_manifest(
@@ -2090,10 +2266,21 @@ async fn scene_from_manifest(
             });
         }
     }
-    if ready.is_empty() {
+    if ready.is_empty() && plan.components.is_empty() {
         return Err(AppError::unprocessable(
             "NO_READABLE_GEOMETRY: no geometry could be loaded; check Server OSS access and artifact availability, then retry",
         ));
+    }
+    let has_panel_groups = plan.panels.iter().any(|p| p.group.is_some());
+    let mut mesh_groups = Vec::new();
+    let mut group_order = Vec::<String>::new();
+    let mut group_counts = HashMap::<String, usize>::new();
+    for panel in &plan.panels {
+        let group = panel.group.as_ref().unwrap_or(&panel.label).clone();
+        if !group_counts.contains_key(&group) {
+            group_order.push(group.clone());
+        }
+        *group_counts.entry(group).or_default() += 1;
     }
     let mut meshes = Vec::new();
     let mut groups = Vec::new();
@@ -2130,6 +2317,7 @@ async fn scene_from_manifest(
             if members.is_empty() {
                 continue;
             }
+            let group = panel.group.clone().unwrap_or_else(|| panel.label.clone());
             let caption = if missing > 0 {
                 format!("{} · 部分可用", panel.label)
                     .chars()
@@ -2144,11 +2332,11 @@ async fn scene_from_manifest(
                 min = min.min(glam::Vec3::from_array(bounds.0));
                 max = max.max(glam::Vec3::from_array(bounds.1));
             }
-            panels.push((caption, members, min, max));
+            panels.push((caption, group, members, min, max));
         }
         let cell = panels
             .iter()
-            .map(|(_, _, min, max)| (*max - *min).max_element())
+            .map(|(_, _, _, min, max)| (*max - *min).max_element())
             .fold(1.0_f32, f32::max)
             * 1.1;
         if !cell.is_finite() {
@@ -2157,10 +2345,30 @@ async fn scene_from_manifest(
             ));
         }
         let cols = (panels.len() as f32).sqrt().ceil().min(4.0) as usize;
-        for (i, (label, members, min, max)) in panels.into_iter().enumerate() {
+        let group_cols = (group_order.len() as f32).sqrt().ceil().max(1.) as usize;
+        let block = group_counts
+            .values()
+            .map(|n| (*n as f32).sqrt().ceil())
+            .fold(1., f32::max)
+            * cell
+            + cell * 0.4;
+        let mut placed = HashMap::<String, usize>::new();
+        for (i, (label, group, members, min, max)) in panels.into_iter().enumerate() {
             let center = min * 0.5 + max * 0.5;
-            let target =
-                glam::Vec3::new((i % cols) as f32 * cell, -((i / cols) as f32) * cell, 0.0);
+            let target = if has_panel_groups {
+                let group_index = group_order.iter().position(|g| g == &group).unwrap();
+                let columns = (group_counts[&group] as f32).sqrt().ceil().max(1.) as usize;
+                let index = placed.entry(group.clone()).or_default();
+                let target = glam::Vec3::new(
+                    (group_index % group_cols) as f32 * block + (*index % columns) as f32 * cell,
+                    -((group_index / group_cols) as f32 * block + (*index / columns) as f32 * cell),
+                    0.,
+                );
+                *index += 1;
+                target
+            } else {
+                glam::Vec3::new((i % cols) as f32 * cell, -((i / cols) as f32) * cell, 0.0)
+            };
             let offset = target - center;
             if !target.is_finite() || !offset.is_finite() {
                 return Err(AppError::unprocessable(
@@ -2183,6 +2391,7 @@ async fn scene_from_manifest(
                         anchor: None,
                     });
                 }
+                mesh_groups.push(group.clone());
                 indices.push(meshes.len());
                 meshes.push(mesh);
             }
@@ -2216,6 +2425,7 @@ async fn scene_from_manifest(
             });
         }
         attachments.push(crate::scene::SceneAttachment {
+            member: None,
             id: a.id,
             path: a.uri,
             label: a.label.unwrap_or_else(|| "Attachment".into()),
@@ -2232,8 +2442,8 @@ async fn scene_from_manifest(
             .get(&s.id)
             .map_err(|_| AppError::unauthorized("Client was revoked"))?;
     }
-    Ok(SceneDescriptor {
-        source,
+    let mut scene = SceneDescriptor {
+        source: source.clone(),
         schema: 4,
         title: title
             .or(plan.title)
@@ -2241,9 +2451,103 @@ async fn scene_from_manifest(
         created_at: crate::source::now() as u64,
         ttl_days: None,
         meshes,
+        components: Vec::new(),
         label_groups: groups,
         state: Default::default(),
         attachments,
         warnings,
-    })
+    };
+    if !plan.components.is_empty() || has_panel_groups {
+        scene.components = scene.component_descriptors();
+        // Existing geometry groups and new surface groups share the same flat layout contract.
+        for (index, c) in scene.components.iter_mut().enumerate() {
+            if has_panel_groups {
+                c.group = mesh_groups.get(index).cloned();
+            }
+            c.position = None;
+        }
+        for resource in plan.components {
+            let child = scene_from_sources(
+                state,
+                &[resource.uri],
+                &[resource.display],
+                source.clone(),
+                None,
+            )
+            .await;
+            match child {
+                Ok(mut child) => {
+                    let mesh_offset = scene.meshes.len();
+                    let attachment_offset = scene.attachments.len();
+                    for c in &mut child.components {
+                        c.id = format!("plugin-{}", resource.id);
+                        c.label = resource.label.clone();
+                        match &mut c.source {
+                            crate::component::ComponentSource::Mesh(i) => {
+                                child.meshes[*i].label = Some(crate::scene::MeshLabel {
+                                    text: resource.label.clone(),
+                                    anchor: None,
+                                });
+                                *i += mesh_offset;
+                            }
+                            crate::component::ComponentSource::Attachment(i) => {
+                                *i += attachment_offset
+                            }
+                        }
+                    }
+                    scene.meshes.extend(child.meshes);
+                    scene.attachments.extend(child.attachments);
+                    scene.components.extend(child.components);
+                }
+                Err(_) => scene.warnings.push(crate::plugin::Warning {
+                    code: "COMPONENT_UNAVAILABLE".into(),
+                    message: format!(
+                        "{}: component source or renderer unavailable",
+                        resource.label
+                    ),
+                    resource_id: Some(resource.id),
+                }),
+            }
+        }
+        if scene.components.is_empty() {
+            return Err(AppError::unprocessable("No readable scene components"));
+        }
+        scene.schema = 5;
+    }
+    Ok(scene)
+}
+
+async fn get_renderer(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    AxumPath((token, id)): AxumPath<(String, String)>,
+) -> Result<Response<Body>, AppError> {
+    let opened = open_scene(&state, &token, peer.ip())?;
+    source_result(
+        &state,
+        &token,
+        state.registry.sources.validate_source(&opened.scene),
+    )?;
+    let binding = opened
+        .scene
+        .components
+        .iter()
+        .find(|c| c.id == id)
+        .and_then(|c| c.renderer.as_ref())
+        .ok_or_else(|| AppError::not_found("Renderer not found"))?;
+    let (bytes, origins) = crate::plugin::renderer_document(binding)
+        .map_err(|_| AppError::unavailable("Pinned renderer unavailable"))?;
+    let policy = format!(
+        "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; frame-src {}; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+        if origins.is_empty() {
+            "'none'".into()
+        } else {
+            origins.join(" ")
+        }
+    );
+    Ok(Response::builder()
+        .header(header::CACHE_CONTROL, NO_STORE)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header("content-security-policy", policy)
+        .body(Body::from(bytes))?)
 }
