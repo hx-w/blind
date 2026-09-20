@@ -394,7 +394,7 @@ mod tests {
         for bad in ["1.2", "1.2.3-beta", "01.2.3", "1.2.3+build", "vv1.2.3"] {
             assert!(version(bad).is_err());
         }
-        assert!(validate_repository("deepshape-ai/cyclops").is_ok());
+        assert!(validate_repository("team/example").is_ok());
         for bad in [
             "../x",
             "a/b/c",

@@ -975,8 +975,8 @@ mod tests {
     #[test]
     fn nested_url_and_capability_compatibility() {
         assert_eq!(
-            scheme("cyclops://https://example.test/a?b=c"),
-            Some("cyclops")
+            scheme("example://https://example.test/a?b=c"),
+            Some("example")
         );
         assert!(!is_plugin("oss://team/bucket/a.ply"));
         let value = json!({"schema_version":1,"resources":[{"id":"a","uri":"oss://team/bucket/a.ply"}],"future_optional":{"a":1}});
