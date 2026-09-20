@@ -49,7 +49,12 @@ pub enum Command {
     /// Discover plugins on the connected Server, or locally when unregistered.
     List,
     /// Unregister this machine's plugin; retain configuration and existing scenes.
-    Remove { id: String },
+    Remove {
+        id: String,
+        /// Also discard plugin settings, for an explicitly requested clean reinstall.
+        #[arg(long)]
+        purge_config: bool,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -357,7 +362,20 @@ fn executable(command: &str, package: &Path) -> Result<PathBuf> {
                 format!("runtime {command} not found; install it on the Server first")
             })?
     };
-    Ok(fs::canonicalize(resolved)?)
+    let resolved = fs::canonicalize(resolved)?;
+    ensure!(
+        resolved.is_file(),
+        "plugin entrypoint must be a regular file"
+    );
+    #[cfg(unix)]
+    if !resolved.starts_with(package) {
+        use std::os::unix::fs::PermissionsExt;
+        ensure!(
+            fs::metadata(&resolved)?.permissions().mode() & 0o111 != 0,
+            "plugin runtime is not executable"
+        );
+    }
+    Ok(resolved)
 }
 fn install_package(dir: &Path, directory: &Path) -> Result<()> {
     let package = fs::canonicalize(directory)?;
@@ -496,8 +514,36 @@ fn save_update_token(dir: &Path, id: &str, repository: &str, token: Option<&str>
     }
     Ok(())
 }
+fn lock_admin(dir: &Path) -> Result<fs::File> {
+    private_dir(dir)?;
+    let path = dir.join("plugins.lock");
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        ensure!(
+            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
+            "another plugin administration command is running; retry after it finishes"
+        );
+    }
+    Ok(file)
+}
 pub async fn run(command: Command) -> Result<()> {
     let dir = root()?;
+    // Serialize administrative mutations across processes, including the whole
+    // download/validate/publish sequence. Resolve calls retain immutable versions.
+    let _lock = if matches!(&command, Command::List) {
+        None
+    } else {
+        Some(lock_admin(&dir)?)
+    };
     match command {
         Command::List => {
             if let Some(v) = crate::client::remote_plugins().await? {
@@ -516,10 +562,15 @@ pub async fn run(command: Command) -> Result<()> {
                 crate::plugin_update::validate_repository(repo)?;
                 let id = repo.rsplit('/').next().unwrap();
                 let token = update_token(&dir, id, repo, token_stdin)?;
-                let package = crate::plugin_update::fetch_package(repo, id, None, token.as_deref())
-                    .await?
-                    .context("release package missing")?;
-                install_package(&dir, package.path())?;
+                let current = installed(&dir, id).ok();
+                let version = current.as_ref().map(|i| i.manifest.version.as_str());
+                if let Some(package) =
+                    crate::plugin_update::fetch_package(repo, id, version, token.as_deref()).await?
+                {
+                    install_package(&dir, package.path())?;
+                } else {
+                    println!("{id} is up to date.");
+                }
                 save_update_token(&dir, id, repo, token.as_deref())?;
             } else {
                 let m: Manifest =
@@ -678,12 +729,22 @@ pub async fn run(command: Command) -> Result<()> {
             }
             println!("{}", serde_json::to_string_pretty(&v)?);
         }
-        Command::Remove { id } => {
+        Command::Remove { id, purge_config } => {
             eprintln!("Local Server configuration: {}", dir.display());
             fs::remove_file(installed_path(&dir, &id)?)?;
-            println!(
-                "Removed {id}; configuration, installed versions and existing scenes retained."
-            );
+            if purge_config {
+                let config = settings_path(&dir, &id)?;
+                if config.exists() {
+                    fs::remove_file(config)?;
+                }
+                println!(
+                    "Removed {id} and its configuration; installed versions and existing scenes retained."
+                );
+            } else {
+                println!(
+                    "Removed {id}; configuration, installed versions and existing scenes retained."
+                );
+            }
         }
     }
     Ok(())
@@ -713,6 +774,10 @@ impl ShareManifest {
                 && self.attachments.len() <= 4096
                 && self.panels.len() <= 64,
             "share manifest exceeds resource/panel limits"
+        );
+        ensure!(
+            self.panels.iter().map(|p| p.members.len()).sum::<usize>() <= 4096,
+            "share manifest exceeds expanded mesh instance limit"
         );
         let mut ids = HashSet::new();
         for r in self.resources.iter().chain(&self.attachments) {
@@ -869,6 +934,44 @@ pub async fn resolve(dir: &Path, uri: &str) -> Result<ShareManifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn entrypoint_and_administration_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(executable(dir.path().to_str().unwrap(), dir.path()).is_err());
+        let lock = lock_admin(dir.path()).unwrap();
+        assert!(lock_admin(dir.path()).is_err());
+        drop(lock);
+        assert!(lock_admin(dir.path()).is_ok());
+    }
+    #[test]
+    fn panel_expansion_has_a_scene_wide_limit() {
+        let resources: Vec<_> = (0..100)
+            .map(|i| Resource {
+                id: format!("r{i}"),
+                uri: "oss://x/b/a.ply".into(),
+                label: None,
+            })
+            .collect();
+        let panels: Vec<_> = (0..42)
+            .map(|i| Panel {
+                id: format!("p{i}"),
+                label: "Panel".into(),
+                members: resources.iter().map(|r| r.id.clone()).collect(),
+            })
+            .collect();
+        let mut plan = ShareManifest {
+            schema_version: 1,
+            requires: vec!["layout.panels".into()],
+            title: None,
+            resources,
+            panels,
+            attachments: vec![],
+            warnings: vec![],
+        };
+        assert!(plan.validate().is_err());
+        plan.panels.truncate(40);
+        plan.validate().unwrap();
+    }
     #[test]
     fn nested_url_and_capability_compatibility() {
         assert_eq!(

@@ -306,8 +306,9 @@ not duplicate visibility with a Solo mode.
 
 LOD generation uses meshoptimizer for PLY, STL, and OBJ triangle geometry.
 PLY point clouds are deterministically sampled across the full source order;
-PTS previews preserve every ordered source point and reduce only the procedural
-tube radial tessellation. Generated binary PLY bytes are cached in memory
+PTS previews preserve ordered source samples when the curve budget permits,
+and otherwise resample the smooth curve by arc length before building its tube.
+Raw retains the full curve detail. Generated binary PLY bytes are cached in memory
 up to 256 MiB and disappear when the server exits; neither LODs nor Raw source
 copies are written to disk. Raw is fetched only after a client explicitly
 selects it, except for a bounded compatibility fallback: at most 32 MiB for one

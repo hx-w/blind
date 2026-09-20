@@ -1,6 +1,6 @@
 [package]
 name = "blind"
-version = "0.12.2"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Instant local geometry review from any device"
@@ -79,7 +79,6 @@ url = "2.5"
 wait-timeout = "0.2.1"
 wgpu = "0.20.1"
 zstd = "0.13"
-
 
 [profile.release]
 lto = "thin"

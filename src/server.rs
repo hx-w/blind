@@ -722,6 +722,11 @@ async fn create_scene(
     headers: HeaderMap,
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if request.manifest.is_some() {
+        return Err(AppError::bad_request(
+            "Use the registered Client share endpoint for manifests",
+        ));
+    }
     let mut paths = Vec::with_capacity(request.paths.len());
     for path in request.paths {
         paths.push(if crate::oss::is_oss(&path) {
@@ -1809,6 +1814,21 @@ async fn client_scene(
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let source = client_auth(&state, &headers, false)?;
+    let _manifest_permit = if request.manifest.is_some()
+        || request.paths.iter().any(|p| crate::plugin::is_plugin(p))
+    {
+        Some(
+            state
+                .plugin_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    AppError::too_many_requests("Two manifest shares already running; retry later")
+                })?,
+        )
+    } else {
+        None
+    };
     let mut scene = if let Some(plan) = request.manifest {
         if !request.paths.is_empty()
             || request.labels.as_ref().is_some_and(|ls| !ls.is_empty())
@@ -1842,13 +1862,6 @@ async fn client_scene(
                 "plugin shares require one URI without label overrides",
             ));
         }
-        let _permit = state
-            .plugin_slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| {
-                AppError::too_many_requests("Two plugin shares already running; retry later")
-            })?;
         let dir = config_path()?
             .parent()
             .context("missing config parent")?
@@ -2007,6 +2020,14 @@ async fn scene_from_manifest(
     for r in &plan.resources {
         if !cached.contains_key(&r.uri) {
             let result = async {
+                // Reserve the existing shared geometry memory budget before
+                // reading an un-sized source. Keep it inside the blocking task
+                // so request cancellation cannot release it before parsing ends.
+                let memory = state
+                    .lod_memory
+                    .clone()
+                    .acquire_many_owned(LOD_MEMORY_MIB)
+                    .await?;
                 let observed = state
                     .registry
                     .sources
@@ -2021,6 +2042,7 @@ async fn scene_from_manifest(
                 let format = MeshFormat::from_path(std::path::Path::new(&filename))?;
                 let bytes = observed.bytes;
                 let bounds = tokio::task::spawn_blocking(move || {
+                    let _memory = memory;
                     crate::mesh::Geometry::from_bytes(&bytes, format).map(|g| g.bounds())
                 })
                 .await??;
@@ -2137,10 +2159,16 @@ async fn scene_from_manifest(
         }
         let cols = (panels.len() as f32).sqrt().ceil().min(4.0) as usize;
         for (i, (label, members, min, max)) in panels.into_iter().enumerate() {
-            let center = (min + max) * 0.5;
+            let center = min * 0.5 + max * 0.5;
             let target =
                 glam::Vec3::new((i % cols) as f32 * cell, -((i / cols) as f32) * cell, 0.0);
-            let shift = (target - center).to_array();
+            let offset = target - center;
+            if !target.is_finite() || !offset.is_finite() {
+                return Err(AppError::unprocessable(
+                    "Geometry bounds exceed layout limits",
+                ));
+            }
+            let shift = offset.to_array();
             let mut indices = Vec::new();
             let single = members.len() == 1;
             for (mesh, _) in members {

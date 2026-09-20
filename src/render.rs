@@ -800,7 +800,25 @@ fn load_scene_geometry_bytes(
         Background::Dark => clear_color(&material.background_dark)?,
         Background::Light => clear_color(&material.background_light)?,
     };
-    let labels = scene_labels(scene, projection * view, position, &occluders, &mesh_bounds)?;
+    let mut labels = scene_labels(scene, projection * view, position, &occluders, &mesh_bounds)?;
+    if let Some(warning) = scene.warnings.first() {
+        labels.insert(
+            0,
+            RenderLabel {
+                flat: true,
+                anchor: [0.04, 0.04],
+                text: format!(
+                    "部分可用 · {} 项提示：{}",
+                    scene.warnings.len(),
+                    warning.message
+                )
+                .chars()
+                .take(110)
+                .collect(),
+                color: [210, 170, 105],
+            },
+        );
+    }
     Ok(RenderInput {
         labels,
         light_background: scene.state.background == Background::Light,

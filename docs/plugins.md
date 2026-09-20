@@ -243,10 +243,21 @@ validation or downloading fails. Local directory reinstall remains available.
 
 ## Partial results
 
-Warnings persist in scenes and reshares. The Client prints them to stderr while
+Warnings persist in scenes and reshares; PNG exports include a partial-result notice. The Client prints them to stderr while
 keeping JSON/link stdout machine-readable. The viewer shows a persistent notice
 with details and unavailable attachments in Info. Partially readable panels retain
 their captions, including when only one mesh remains. Empty panels are listed in
 warnings; no readable geometry produces an error instead of an empty viewer link.
 Plugins may provide safe state warnings (such as a failed upstream job with useful
 remaining outputs); do not include credentials or upstream stack traces.
+
+Configuration schema evolution should remain additive: new required fields need
+defaults, and existing fields retain their meanings. An incompatible schema is
+rejected before upgrade. For an intentional breaking reconfiguration, save the
+values you need, run `blind plugin remove ID --purge-config`, reinstall, and run
+`blind plugin configure ID`; the explicit flag discards plugin settings but keeps
+the separate release-download credential and existing scenes. Administrative
+commands serialize across processes; concurrent commands report busy and can be
+retried after the first finishes.
+
+A manifest may expand to at most 4,096 Mesh instances across all panels. Both plugin and direct manifest shares use the same bounded Server admission and geometry memory budget.

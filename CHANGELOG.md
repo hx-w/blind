@@ -3,6 +3,24 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-09-20
+
+### Added
+
+- Install Server-side share resolver plugins and invoke them from any connected
+  Client with `blind share SCHEME://INPUT`, with grouped layouts and attachments.
+- Update plugins from verified GitHub Release packages, including private
+  repositories, while preserving configuration and existing scenes.
+- Show incomplete scenes with persistent notices, readable remaining groups and
+  unavailable-resource details; report empty and failed requests explicitly.
+
+### Changed
+
+- `blind status` now shows local Server state, the connected Server and installed
+  plugins together; plugin-only Clients can register without SSH.
+- Render PTS contours as smooth curves without sample spheres, with bounded LOD
+  geometry and matching curve semantics in interactive views and PNG exports.
+
 ## [0.12.2] - 2026-09-20
 
 ### Added
