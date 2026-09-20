@@ -3,6 +3,26 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-09-20
+
+### Added
+
+- Set share-link lifetimes with `--ttl DAYS`: the default is 7 days, and 0 keeps
+  links valid until their sources become invalid. Browser reshares inherit the
+  lifetime setting, including permanent links with annotations.
+
+### Fixed
+
+- Let the selection tool rotate the scene or edit a mark, with colors always
+  visible in the toolbar and no separate camera mode.
+- Show annotation names directly on the canvas and open the list only when
+  space allows. Closing the list preserves marks and labels; click a label to edit.
+  Annotation labels use flat, muted colors in both the viewer and PNG exports.
+- Update annotation labels in the same frame as camera movement, removing
+  the delay while rotating a scene. Long lists stay within their scroll area.
+- Keep selected Mesh and group captions legible in front of geometry while
+  group frames and sibling Mesh labels retain their original layer.
+
 ## [0.11.0] - 2026-09-20
 
 ### Added

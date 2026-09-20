@@ -44,7 +44,7 @@ enum ClientCommand {
     /// Share Mesh resources from arguments or a JSON manifest.
     #[command(
         long_about = "Share Mesh resources through the registered Blind server. Pass files directly for small scenes, or use --config FILE for large, persistent resource lists. The config owns the title, resources, per-resource labels, and group labels. Relative resource paths are resolved from the config file's directory.",
-        after_help = "DIRECT EXAMPLES:\n  blind share oss://prod/my-bucket/crown.ply --format json\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1,2=Reference pair'\n\nCONFIG EXAMPLE (indices in groups.members are 1-based):\n  {\n    \"title\": \"Case review\",\n    \"resources\": [\n      {\"path\": \"meshes/crown.ply\", \"label\": \"Crown\"},\n      {\"path\": \"meshes/donor-a.ply\"},\n      {\"path\": \"meshes/donor-b.ply\"}\n    ],\n    \"groups\": [\n      {\"label\": \"Reference teeth\", \"members\": [2, 3]}\n    ]\n  }\n\nCONFIG CONTRACT:\n  - resources is required and must contain at least one {path,label?} object.\n  - paths may be absolute, relative to the config file, or oss://ALIAS/BUCKET/KEY; PLY, STL, OBJ, and PTS are supported.\n  - labels contain 1-120 characters. A group needs at least two unique in-range members.\n  - groups is optional and limited to 64 entries. The config file is limited to 4 MiB.\n  - unknown fields are errors, so misspelled keys never pass silently.\n\n--config conflicts with positional Meshes, --title, and --label. --host, --stateless, and --format still control delivery/output."
+        after_help = "DIRECT EXAMPLES:\n  blind share oss://prod/my-bucket/crown.ply --format json\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1,2=Reference pair'\n\nCONFIG EXAMPLE (indices in groups.members are 1-based):\n  {\n    \"title\": \"Case review\",\n    \"resources\": [\n      {\"path\": \"meshes/crown.ply\", \"label\": \"Crown\"},\n      {\"path\": \"meshes/donor-a.ply\"},\n      {\"path\": \"meshes/donor-b.ply\"}\n    ],\n    \"groups\": [\n      {\"label\": \"Reference teeth\", \"members\": [2, 3]}\n    ]\n  }\n\nCONFIG CONTRACT:\n  - resources is required and must contain at least one {path,label?} object.\n  - paths may be absolute, relative to the config file, or oss://ALIAS/BUCKET/KEY; PLY, STL, OBJ, and PTS are supported.\n  - labels contain 1-120 characters. A group needs at least two unique in-range members.\n  - groups is optional and limited to 64 entries. The config file is limited to 4 MiB.\n  - unknown fields are errors, so misspelled keys never pass silently.\n\n--config conflicts with positional Meshes, --title, and --label. --host, --stateless, --ttl, and --format still control delivery/output."
     )]
     Share {
         /// Mesh paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
@@ -73,6 +73,9 @@ enum ClientCommand {
         /// Emit a long self-contained /v/ link instead of storing a short-link registry row.
         #[arg(long)]
         stateless: bool,
+        /// Link lifetime in whole days; 0 keeps it until its sources become invalid.
+        #[arg(long, value_name = "DAYS", default_value_t = crate::scene::DEFAULT_TTL_DAYS)]
+        ttl: u32,
         /// Select printed output: viewer URL, image URL, full text, or JSON.
         #[arg(long, value_enum, default_value = "full")]
         format: OutputFormat,
@@ -93,6 +96,13 @@ enum OutputFormat {
     Image,
     Full,
     Json,
+}
+
+struct ShareOptions {
+    host: Option<String>,
+    stateless: bool,
+    ttl_days: u32,
+    format: OutputFormat,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct ClientConfig {
@@ -241,8 +251,23 @@ pub async fn run() -> Result<()> {
             labels,
             host,
             stateless,
+            ttl,
             format,
-        } => share(meshes, config, title, labels, host, stateless, format).await?,
+        } => {
+            share(
+                meshes,
+                config,
+                title,
+                labels,
+                ShareOptions {
+                    host,
+                    stateless,
+                    ttl_days: ttl,
+                    format,
+                },
+            )
+            .await?
+        }
         ClientCommand::Status { json: as_json } => {
             let c =
                 load()?.context("not registered; run blind join --stdin or blind join --local")?;
@@ -652,10 +677,14 @@ async fn share(
     config: Option<PathBuf>,
     title: Option<String>,
     labels: Vec<String>,
-    host: Option<String>,
-    stateless: bool,
-    format: OutputFormat,
+    options: ShareOptions,
 ) -> Result<()> {
+    let ShareOptions {
+        host,
+        stateless,
+        ttl_days,
+        format,
+    } = options;
     let config_mode = config.is_some();
     let input = match config {
         Some(path) => read_share_config(&path)?,
@@ -692,7 +721,15 @@ async fn share(
             paths.len()
         );
     }
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":paths,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless}))).await?;
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":paths,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless,"ttl_days":ttl_days}))).await?;
+    let confirmed_ttl = payload["ttl_days"].as_u64();
+    if confirmed_ttl.is_some_and(|days| days != u64::from(ttl_days))
+        || (confirmed_ttl.is_none() && (ttl_days != crate::scene::DEFAULT_TTL_DAYS || stateless))
+    {
+        bail!(
+            "Server did not confirm the requested link lifetime; update the Blind server and retry"
+        );
+    }
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&payload)?),
         OutputFormat::View => println!(
@@ -762,6 +799,31 @@ pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn share_ttl_accepts_whole_days_and_defaults_to_seven() {
+        for (args, expected) in [
+            (vec!["blind", "share", "mesh.ply"], 7),
+            (vec!["blind", "share", "mesh.ply", "--ttl", "0"], 0),
+            (
+                vec!["blind", "share", "--config", "scene.json", "--ttl", "30"],
+                30,
+            ),
+            (
+                vec!["blind", "share", "mesh.ply", "--stateless", "--ttl", "1"],
+                1,
+            ),
+        ] {
+            let ClientCommand::Share { ttl, .. } = Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("expected share")
+            };
+            assert_eq!(ttl, expected);
+        }
+        for invalid in ["-1", "1.5", "days", "4294967296"] {
+            assert!(Cli::try_parse_from(["blind", "share", "mesh.ply", "--ttl", invalid]).is_err());
+        }
+    }
+
     #[test]
     fn authorization_is_readonly_and_cannot_open_shell_or_forward() {
         let c = ClientConfig {

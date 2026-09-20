@@ -70,6 +70,7 @@ export interface MeshLabelGroup {
 }
 
 export interface PublicScene {
+  ttl_days?: number;
   source?: { id: string; name: string; host: string; user: string } | null;
   title: string;
   meshes: PublicMesh[];
@@ -79,6 +80,7 @@ export interface PublicScene {
 }
 
 export interface ShareLinks {
+  ttl_days?: number;
   viewer_url: string;
   image_url: string;
   owner_url?: string;

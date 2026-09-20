@@ -18,7 +18,6 @@ use crate::{
 };
 
 pub const SHORT_CODE_LEN: usize = 6;
-pub const SHORT_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 const TOMBSTONE_SECONDS: i64 = 24 * 60 * 60;
 const MAX_ACTIVE_SCENES: i64 = 10_000;
 const MAX_REGISTRY_ROWS: i64 = 12_000;
@@ -226,7 +225,12 @@ impl Registry {
                 return Ok(existing);
             }
         }
-        let expires_at = now + SHORT_TTL_SECONDS;
+        let days = scene.link_ttl_days(false);
+        let expires_at = if days == 0 {
+            i64::MAX
+        } else {
+            now + i64::from(days) * 86_400
+        };
         let payload = self.codec.seal(Scope::Public, scene)?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
@@ -286,10 +290,17 @@ impl Registry {
     }
 
     pub fn resolve(&self, code: &str) -> std::result::Result<RegisteredScene, RegistryLookupError> {
+        self.resolve_at(code, now())
+    }
+
+    fn resolve_at(
+        &self,
+        code: &str,
+        now: i64,
+    ) -> std::result::Result<RegisteredScene, RegistryLookupError> {
         if !is_short_secret(code) {
             return Err(RegistryLookupError::NotFound);
         }
-        let now = now();
         let connection = self.lock().map_err(RegistryLookupError::Internal)?;
         let row: Option<StoredScene> = connection
             .query_row(
@@ -519,10 +530,14 @@ impl Registry {
     }
 
     fn prune(&self) -> Result<()> {
+        self.prune_at(now())
+    }
+
+    fn prune_at(&self, now: i64) -> Result<()> {
         let connection = self.lock()?;
         connection.execute(
             "DELETE FROM scenes WHERE expires_at < ?1",
-            [now() - TOMBSTONE_SECONDS],
+            [now - TOMBSTONE_SECONDS],
         )?;
         connection
             .execute_batch("PRAGMA wal_checkpoint(PASSIVE); PRAGMA incremental_vacuum(128);")?;
@@ -532,6 +547,10 @@ impl Registry {
     fn fingerprint(&self, scene: &SceneDescriptor) -> Result<Vec<u8>> {
         let mut canonical = scene.clone();
         canonical.created_at = 0;
+        // Explicit default TTL and legacy short scenes have identical lifetimes.
+        if canonical.ttl_days == Some(crate::scene::DEFAULT_TTL_DAYS) {
+            canonical.ttl_days = None;
+        }
         let mut hasher = Sha256::new();
         hasher.update(self.fingerprint_key);
         hasher.update(serde_json::to_vec(&canonical)?);
@@ -800,6 +819,93 @@ fn set_private_permissions(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ttl_preserves_legacy_dedup_and_permanent_links_across_time_and_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let mesh_path = directory.path().join("mesh.ply");
+        fs::write(&mesh_path, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let config = Config::fresh();
+        let db = directory.path().join("scenes.sqlite3");
+        let registry = Registry::open_at(&config, db.clone()).unwrap();
+        let mut scene = SceneDescriptor::create(std::slice::from_ref(&mesh_path), None)
+            .await
+            .unwrap();
+        let legacy = registry.register(&scene).unwrap();
+        scene.ttl_days = Some(7);
+        assert_eq!(legacy.code, registry.register(&scene).unwrap().code);
+        scene.ttl_days = Some(30);
+        let monthly = registry.register(&scene).unwrap();
+        scene.ttl_days = Some(0);
+        let permanent = registry.register(&scene).unwrap();
+        assert_ne!(permanent.code, legacy.code);
+        assert_ne!(permanent.code, monthly.code);
+        assert_eq!(permanent.code, registry.register(&scene).unwrap().code);
+        let future = now() + 10 * 86_400;
+        assert!(matches!(
+            registry.resolve_at(&legacy.code, future),
+            Err(RegistryLookupError::Gone)
+        ));
+        assert!(registry.resolve_at(&monthly.code, future).is_ok());
+        assert!(registry.resolve_at(&permanent.code, future).is_ok());
+        registry.prune_at(now() + 365 * 86_400).unwrap();
+        assert!(matches!(
+            registry.resolve(&monthly.code),
+            Err(RegistryLookupError::NotFound)
+        ));
+        assert!(registry.resolve(&permanent.code).is_ok());
+        drop(registry);
+        let registry = Registry::open_at(&config, db).unwrap();
+        assert_eq!(registry.audit().await.unwrap().valid, 1);
+        assert!(registry.resolve(&permanent.code).is_ok());
+        fs::remove_file(mesh_path).unwrap();
+        let audit = registry.audit().await.unwrap();
+        assert_eq!(audit.source_gone, 1);
+        assert_eq!(registry.clean_invalid(&audit).await.unwrap(), 1);
+        assert!(matches!(
+            registry.resolve(&permanent.code),
+            Err(RegistryLookupError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn capacity_cleanup_preserves_permanent_scenes_until_source_invalidation() {
+        let directory = tempfile::tempdir().unwrap();
+        let mesh_path = directory.path().join("mesh.ply");
+        fs::write(&mesh_path, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let registry =
+            Registry::open_at(&Config::fresh(), directory.path().join("scenes.sqlite3")).unwrap();
+        let mut scene = SceneDescriptor::create(&[mesh_path], None).await.unwrap();
+        scene.ttl_days = Some(0);
+        let permanent = registry.register(&scene).unwrap();
+        {
+            let mut connection = registry.lock().unwrap();
+            let transaction = connection.transaction().unwrap();
+            for index in 0..MAX_REGISTRY_ROWS - 1 {
+                transaction.execute("INSERT INTO scenes (code, created_at, expires_at, gone_at) VALUES (?1, ?2, ?2, ?2)", params![format!("{index:06}"), now() - 1]).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        scene.title = "another permanent scene".into();
+        registry.register(&scene).unwrap();
+        assert!(registry.resolve(&permanent.code).is_ok());
+        let rows: i64 = registry
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM scenes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, MAX_REGISTRY_ROWS);
+        registry.mark_gone(&permanent.code).unwrap();
+        assert!(matches!(
+            registry.resolve(&permanent.code),
+            Err(RegistryLookupError::Gone)
+        ));
+        registry.prune_at(now() + 3 * 86_400).unwrap();
+        assert!(matches!(
+            registry.resolve(&permanent.code),
+            Err(RegistryLookupError::NotFound)
+        ));
+    }
 
     #[tokio::test]
     async fn audit_classifies_and_cleans_invalid_links() {
