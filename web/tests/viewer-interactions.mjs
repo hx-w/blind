@@ -893,3 +893,18 @@ test('flat scan back faces receive the same lighting as front faces', async () =
   assert.ok(values[0]>200);
   assert.ok(Math.abs(values[0]-values[1])<=1,`front/back lighting differs: ${values}`);
 });
+
+
+test('PNG export does not read hidden unavailable geometry', async () => {
+  const exported = structuredClone(scene);
+  exported.meshes[1].visible = false;
+  const page = await browser.newPage({viewport:{width:1200,height:900}});
+  let hiddenReads = 0;
+  try {
+    await page.route('**/api/v1/scenes/**', route => route.fulfill({json:exported}));
+    await page.route('**/mesh/1*', route => {hiddenReads++;return route.fulfill({status:410,body:'gone'});});
+    await page.goto(`${origin}/s/fixture?render=1`);
+    await page.waitForFunction(() => document.documentElement.dataset.renderStatus === 'ready');
+    assert.equal(hiddenReads,0,'hidden sources must not invalidate or block the exported scene');
+  } finally {await page.close();}
+});

@@ -135,7 +135,7 @@ export class MeshViewer {
     this.animate();
   }
 
-  async load(scene: PublicScene): Promise<void> {
+  async load(scene: PublicScene, skipHidden = false): Promise<void> {
     this.disposeModels();
     // Keep assembly captions (e.g. one model comparison) within flat component groups.
     // Only suppress a caption when the component shell already names the same group.
@@ -152,6 +152,11 @@ export class MeshViewer {
     const loaded = await mapConcurrent(scene.meshes, LOAD_CONCURRENCY, async (info) => {
       let result;
       const requestedQuality = this.annotations.some(mark => mark.mesh === scene.meshes.indexOf(info)) ? 'raw' : info.quality ?? 'lod';
+      if (skipHidden && (!info.visible || info.opacity === 0)) {
+        completed += 1;
+        this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
+        return {quality: requestedQuality};
+      }
       try {
         result = { quality: requestedQuality, asset: await loadObject(info, requestedQuality) };
       } catch (error) {

@@ -139,7 +139,7 @@ async function start(): Promise<void> {
     }
     title.insertAdjacentElement('afterend', artifactList);
     startLongLoadHint();
-    await meshViewer.load(scene);
+    await meshViewer.load(scene, exportMode);
     if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !scene.components?.some(c => c.source.kind === 'attachment')) {
       throw new Error('No models could be loaded');
     }
