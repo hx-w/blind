@@ -3,7 +3,7 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.12.1] - 2026-09-20
+## [0.12.2] - 2026-09-20
 
 ### Added
 
