@@ -43,6 +43,8 @@ pub struct Source {
     pub user: String,
     pub host_key: String,
     pub local: bool,
+    #[serde(default)]
+    pub client_only: bool,
     pub active: bool,
 }
 impl Source {
@@ -61,6 +63,8 @@ impl Source {
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct JoinRequest {
+    #[serde(default)]
+    pub client_only: bool,
     pub name: String,
     pub host: String,
     #[serde(default)]
@@ -235,16 +239,20 @@ impl Sources {
     pub fn begin(&self, invite: &str, req: JoinRequest) -> Result<JoinResponse> {
         validate_label(&req.name)?;
         validate_label(&req.user)?;
-        validate_address(&req.host, req.port)?;
+        if !req.client_only {
+            validate_address(&req.host, req.port)?;
+        }
         if !req.hostname.is_empty() {
             validate_label(&req.hostname)?;
         }
         self.prune_pending()?;
-        let key = STANDARD
-            .decode(&req.host_key)
-            .context("invalid SSH host key")?;
-        if key.len() < 32 || key.len() > 4096 {
-            bail!("invalid SSH host key");
+        if !req.client_only {
+            let key = STANDARD
+                .decode(&req.host_key)
+                .context("invalid SSH host key")?;
+            if key.len() < 32 || key.len() > 4096 {
+                bail!("invalid SSH host key");
+            }
         }
         let id = random_b64(18);
         let source = Source {
@@ -256,7 +264,8 @@ impl Sources {
             user: req.user,
             host_key: req.host_key,
             local: false,
-            active: false,
+            client_only: req.client_only,
+            active: req.client_only,
         };
         let credential = format!("blind_client_{}", random_b64(32));
         let challenge = random_b64(32);
@@ -284,26 +293,30 @@ impl Sources {
         if pending >= 32 {
             bail!("too many pending registrations; complete or revoke them first");
         }
-        let key_path = self.key_path(&id);
-        let output = std::process::Command::new("ssh-keygen")
-            .args([
-                "-q",
-                "-t",
-                "ed25519",
-                "-N",
-                "",
-                "-C",
-                "blind-readonly",
-                "-f",
-            ])
-            .arg(&key_path)
-            .output()?;
-        if !output.status.success() {
-            bail!("SSH key generation failed");
-        }
-        let public_key = fs::read_to_string(key_path.with_extension("pub"))?
-            .trim()
-            .to_owned();
+        let public_key = if req.client_only {
+            String::new()
+        } else {
+            let key_path = self.key_path(&id);
+            let output = std::process::Command::new("ssh-keygen")
+                .args([
+                    "-q",
+                    "-t",
+                    "ed25519",
+                    "-N",
+                    "",
+                    "-C",
+                    "blind-readonly",
+                    "-f",
+                ])
+                .arg(&key_path)
+                .output()?;
+            if !output.status.success() {
+                bail!("SSH key generation failed");
+            }
+            fs::read_to_string(key_path.with_extension("pub"))?
+                .trim()
+                .to_owned()
+        };
         tx.execute(
             "INSERT INTO sources VALUES (?1,?2,?3,?4,?5)",
             params![
@@ -311,7 +324,7 @@ impl Sources {
                 hash_bytes(credential.as_bytes()),
                 serde_json::to_string(&source)?,
                 challenge,
-                now() + 600
+                if req.client_only { 0 } else { now() + 600 }
             ],
         )?;
         tx.commit()?;
@@ -335,6 +348,7 @@ impl Sources {
             port: 0,
             host_key: String::new(),
             local: true,
+            client_only: false,
             active: true,
         };
         let credential = format!("blind_client_{}", random_b64(32));
@@ -527,6 +541,11 @@ impl Sources {
                 self.get(&source.id)?;
             }
             return Ok(result);
+        }
+        if registered.as_ref().is_some_and(|s| s.client_only) {
+            return Err(SourceError::Unavailable(
+                "Client has no filesystem source; register SFTP to share local files".into(),
+            ));
         }
         let path = path.to_owned();
         let key = registered.as_ref().map(|s| self.key_path(&s.id));
@@ -1072,6 +1091,7 @@ mod tests {
         let sources = Sources::open(dir.path()).unwrap();
         let invite = sources.invite("http://server:7400".into()).unwrap();
         let req = || JoinRequest {
+            client_only: false,
             name: "user@B".into(),
             host: "127.0.0.1".into(),
             hostname: "B".into(),
@@ -1120,6 +1140,7 @@ mod tests {
 
         let invitation = sources.invite("http://server:7400".into()).unwrap();
         let request = || JoinRequest {
+            client_only: false,
             name: "user@B".into(),
             host: "127.0.0.1".into(),
             hostname: "B".into(),

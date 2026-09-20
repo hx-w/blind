@@ -104,6 +104,7 @@ markup.onActiveChange = (active) => shell.classList.toggle('drawing-stroke', act
 
 void start();
 
+$('#scene-notice').addEventListener('click', () => openPanel('info'));
 sceneInfoToggle.addEventListener('click', () => {
   if (panelOpen && panelMode === 'info') closePanel(); else openPanel('info');
 });
@@ -117,18 +118,47 @@ async function start(): Promise<void> {
     startLongLoadHint();
     scene = await loadScene(token, owner);
     title.textContent = scene.source ? `${scene.title}\n\n来源主机：${scene.source.host}\n用户：${scene.source.user} · ${scene.source.name}` : scene.title;
+    const artifactList = document.createElement('div');
+    artifactList.className = 'scene-artifacts';
+    for (const warning of scene.warnings ?? []) {
+      const row = document.createElement('p'); row.textContent = warning.message; artifactList.append(row);
+    }
+    if (scene.attachments?.length) {
+      const heading = document.createElement('p'); heading.textContent = `附件（${scene.attachments.length}）`; artifactList.append(heading);
+      for (const attachment of scene.attachments) {
+        const row = document.createElement('p');
+        if (attachment.url) {
+          const link = document.createElement('a'); link.href = attachment.url; link.textContent = attachment.label; link.download = ''; row.append(link);
+        } else { row.textContent = `${attachment.label} · ${attachment.unavailable ?? '不可用'}`; }
+        artifactList.append(row);
+      }
+    }
+    title.insertAdjacentElement('afterend', artifactList);
     startLongLoadHint();
     await meshViewer.load(scene);
+    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total) {
+      throw new Error('No models could be loaded');
+    }
     markup.load(scene.state.strokes ?? []);
     surface.load();
     owner = scene.owner ? owner : undefined;
     renderMeshOptions(); renderSwatches(); syncDetailControls(); syncSceneMeta();
+    const notices = (scene.warnings?.length ?? 0) + loadProgress.failed;
+    if (notices > 0) {
+      const notice = $('#scene-notice'); notice.hidden = false;
+      notice.textContent = `${scene.warnings?.some(w => w.code === 'ORDER_FAILED') ? '订单失败 · 已有产物' : '场景部分可用'} · ${notices} 项提示`;
+      if (loadProgress.failed) {
+        const row = document.createElement('p'); row.textContent = `${loadProgress.failed} 个模型加载失败；请检查网络或稍后重试。`; artifactList.prepend(row);
+      }
+    }
     finishLoading();
   } catch (error) {
     finishLoading(); hideViewerControls();
     invalid.hidden = false;
     if (!(error instanceof ApiError && error.status === 410)) {
       invalid.querySelector('span')!.textContent = error instanceof ApiError ? String(error.status) : 'ERR';
+      invalid.querySelector('h2')!.textContent = error instanceof ApiError && error.status === 404 ? '场景不存在' : '暂时无法打开场景';
+      invalid.querySelector('p')!.textContent = error instanceof ApiError && error.status === 404 ? '请检查链接是否正确。' : '资源或服务暂时不可用，请稍后重试。';
     }
   }
 }
@@ -180,7 +210,7 @@ function renderMeshOptions(): void {
   detailMeshSelect.replaceChildren(...meshViewer.modelInfos.map((mesh, index) => {
     const option = document.createElement('option');
     option.value = String(index);
-    option.textContent = mesh.name;
+    option.textContent = mesh.label?.text ?? mesh.name;
     return option;
   }));
 }
@@ -197,9 +227,9 @@ function renderSwatches(): void {
 
 function syncDetailControls(): void {
   const selected = meshViewer.selectedModel; if (!selected) return;
-  panelContext.textContent = panelOpen && panelMode === 'mesh' ? selected.name : '';
+  panelContext.textContent = panelOpen && panelMode === 'mesh' ? selected.label?.text ?? selected.name : '';
   detailMeshSelect.value = String(meshViewer.selectedIndex);
-  meshSummaryName.textContent = selected.name;
+  meshSummaryName.textContent = selected.label?.text ?? selected.name;
   meshSummaryMeta.textContent = `${selected.format.toUpperCase()} · Raw ${formatBytes(selected.raw_bytes)}`;
   meshSummaryDot.style.setProperty('--mesh-color', selected.color);
   meshVisibleToggle.checked = selected.visible;

@@ -392,6 +392,8 @@ export class MeshViewer {
   }
 
   private prepareObject(object: THREE.Object3D, index: number, info: ViewerMesh): void {
+    object.position.fromArray(info.translation ?? [0, 0, 0]);
+    object.updateMatrixWorld(true);
     object.userData.modelIndex = index;
     // Keep layer precedence stable while the camera moves. The depth bias resolves
     // coplanar samples; renderOrder also makes translucent meshes deterministic.
@@ -405,8 +407,8 @@ export class MeshViewer {
       child.material = createObjectMaterial(child, {
         color: info.color,
         opacity: info.opacity,
-        flat: this.state.shading === 'flat',
-        wireframe: this.state.shading === 'wire',
+        flat: info.format !== 'pts' && this.state.shading === 'flat',
+        wireframe: info.format !== 'pts' && this.state.shading === 'wire',
         layer: index,
       }, this.renderer.getPixelRatio());
       if (child instanceof THREE.Points) return;
@@ -423,8 +425,8 @@ export class MeshViewer {
       updateObjectMaterial(child, {
         color: model.info.color,
         opacity: model.info.opacity,
-        flat: this.state.shading === 'flat',
-        wireframe: this.state.shading === 'wire',
+        flat: model.info.format !== 'pts' && this.state.shading === 'flat',
+        wireframe: model.info.format !== 'pts' && this.state.shading === 'wire',
         layer: index,
       });
     }));

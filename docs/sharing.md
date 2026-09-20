@@ -131,7 +131,7 @@ The image route:
 1. Decrypts and validates the descriptor.
 2. Parses all visible PLY, STL, OBJ, and PTS sources. Vertex-only PLY uses
    sphere-shaded point sprites; PTS rings use one shared generated
-   tube-and-sphere triangle representation in both render paths.
+   smooth interpolating tube representation in both render paths.
 3. Rebuilds the camera, shared matte material, colors, deterministic overlap bias, and axes.
 4. Renders with the host graphics adapter into an offscreen texture.
 5. Composites the captured screen strokes with anti-aliased round joins and

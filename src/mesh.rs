@@ -15,8 +15,6 @@ use crate::scene::MeshFormat;
 
 const MAX_PTS_POINTS: usize = 4_096;
 const TUBE_RADIAL_SEGMENTS: usize = 16;
-const SPHERE_LONGITUDE_SEGMENTS: usize = 12;
-const SPHERE_LATITUDE_SEGMENTS: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct Geometry {
@@ -225,32 +223,40 @@ pub fn serve_bytes(bytes: Vec<u8>, format: MeshFormat) -> Result<(Vec<u8>, &'sta
 }
 
 pub fn pts_geometry(bytes: &[u8]) -> Result<Geometry> {
-    pts_geometry_from_points(
-        &parse_pts_points(bytes)?,
-        TUBE_RADIAL_SEGMENTS,
-        SPHERE_LONGITUDE_SEGMENTS,
-        SPHERE_LATITUDE_SEGMENTS,
-    )
+    pts_geometry_from_points(&parse_pts_points(bytes)?, TUBE_RADIAL_SEGMENTS)
 }
 
 /// Raw payload size and LOD preview from a single PTS parse: the raw endpoint
 /// ships PTS as generated binary PLY, so the raw size comes from the
 /// full-detail build.
-pub fn pts_raw_size_and_lod_geometry(bytes: &[u8]) -> Result<(usize, Geometry)> {
+pub fn pts_raw_size_and_lod_geometry(
+    bytes: &[u8],
+    target_triangles: usize,
+) -> Result<(usize, usize, Geometry)> {
     let points = parse_pts_points(bytes)?;
-    let raw_size = pts_geometry_from_points(
-        &points,
-        TUBE_RADIAL_SEGMENTS,
-        SPHERE_LONGITUDE_SEGMENTS,
-        SPHERE_LATITUDE_SEGMENTS,
-    )?
-    .to_binary_ply()?
-    .len();
-    Ok((raw_size, pts_lod_geometry_from_points(&points)?))
+    let raw = pts_geometry_from_points(&points, TUBE_RADIAL_SEGMENTS)?;
+    let source_triangles = raw.primitive_count();
+    let raw_size = raw.to_binary_ply()?.len();
+    Ok((
+        raw_size,
+        source_triangles,
+        pts_lod_geometry_from_points(&points, target_triangles)?,
+    ))
 }
 
-fn pts_lod_geometry_from_points(points: &[Vec3]) -> Result<Geometry> {
-    pts_geometry_from_points(points, 6, 6, 4)
+fn pts_lod_geometry_from_points(points: &[Vec3], target_triangles: usize) -> Result<Geometry> {
+    // A closed tube needs at least three rings of three vertices (18 faces).
+    // Reduce sampling before tessellation; mesh decimation damages thin tubes.
+    let radial_segments = (target_triangles / 6).clamp(3, 10);
+    let ring_budget = (target_triangles / (2 * radial_segments)).max(3);
+    let radius = pts_tube_radius(points);
+    let curve = smooth_closed_curve_budgeted(points, radius, ring_budget);
+    let mut geometry = Geometry {
+        positions: Vec::new(),
+        indices: Vec::new(),
+    };
+    append_closed_tube(&mut geometry, &curve, radius, radial_segments)?;
+    Ok(geometry)
 }
 
 fn parse_pts_points(bytes: &[u8]) -> Result<Vec<Vec3>> {
@@ -293,33 +299,105 @@ fn parse_pts_points(bytes: &[u8]) -> Result<Vec<Vec3>> {
     Ok(points)
 }
 
-fn pts_geometry_from_points(
-    points: &[Vec3],
-    tube_radial_segments: usize,
-    sphere_longitude_segments: usize,
-    sphere_latitude_segments: usize,
-) -> Result<Geometry> {
+fn pts_tube_radius(points: &[Vec3]) -> f32 {
     let (min, max) = bounds_of(points.iter().map(|point| point.to_array()));
     let diagonal = (Vec3::from_array(max) - Vec3::from_array(min))
         .length()
         .max(1e-6);
-    let tube_radius = (diagonal * 0.006).clamp(0.04, 0.12);
-    let point_radius = tube_radius * 1.75;
+    (diagonal * 0.006).clamp(0.04, 0.12)
+}
+
+fn pts_geometry_from_points(points: &[Vec3], tube_radial_segments: usize) -> Result<Geometry> {
+    let tube_radius = pts_tube_radius(points);
     let mut geometry = Geometry {
         positions: Vec::new(),
         indices: Vec::new(),
     };
-    append_closed_tube(&mut geometry, points, tube_radius, tube_radial_segments)?;
-    for &point in points {
-        append_sphere(
-            &mut geometry,
-            point,
-            point_radius,
-            sphere_longitude_segments,
-            sphere_latitude_segments,
-        )?;
-    }
+    let curve = smooth_closed_curve(points, tube_radius);
+    append_closed_tube(&mut geometry, &curve, tube_radius, tube_radial_segments)?;
     Ok(geometry)
+}
+
+/// Centripetal Catmull–Rom interpolates the original ordered samples without
+/// moving them. Its distance-based knots avoid overshoot on uneven sampling.
+fn smooth_closed_curve(points: &[Vec3], radius: f32) -> Vec<Vec3> {
+    smooth_closed_curve_budgeted(points, radius, usize::MAX)
+}
+
+/// Keep every original sample when the ring budget permits, reducing only the
+/// interpolated subdivisions. For denser inputs, uniformly resample the smooth
+/// centerline by arc length. Raw geometry always preserves the original samples.
+fn smooth_closed_curve_budgeted(points: &[Vec3], radius: f32, ring_budget: usize) -> Vec<Vec3> {
+    let n = points.len();
+    let desired_steps: Vec<_> = (0..n)
+        .map(|i| ((points[i].distance(points[(i + 1) % n]) / radius).ceil() as usize).clamp(2, 8))
+        .collect();
+    let desired_extra: usize = desired_steps.iter().map(|steps| steps - 1).sum();
+    let extra_budget = if ring_budget >= n {
+        ring_budget.saturating_sub(n).min(desired_extra)
+    } else {
+        desired_extra
+    };
+    let mut assigned_extra = 0;
+    let mut curve = Vec::new();
+    for i in 0..n {
+        let [p0, p1, p2, p3] = [
+            points[(i + n - 1) % n],
+            points[i],
+            points[(i + 1) % n],
+            points[(i + 2) % n],
+        ];
+        let t0 = 0.0;
+        let t1 = p0.distance(p1).sqrt().max(1e-6);
+        let t2 = t1 + p1.distance(p2).sqrt().max(1e-6);
+        let t3 = t2 + p2.distance(p3).sqrt().max(1e-6);
+        let previous_extra = assigned_extra;
+        assigned_extra += desired_steps[i] - 1;
+        let steps = 1 + assigned_extra * extra_budget / desired_extra
+            - previous_extra * extra_budget / desired_extra;
+        let blend = |a: Vec3, b: Vec3, ta: f32, tb: f32, t: f32| {
+            a * ((tb - t) / (tb - ta)) + b * ((t - ta) / (tb - ta))
+        };
+        for step in 0..steps {
+            let t = t1 + (t2 - t1) * step as f32 / steps as f32;
+            let a1 = blend(p0, p1, t0, t1, t);
+            let a2 = blend(p1, p2, t1, t2, t);
+            let a3 = blend(p2, p3, t2, t3, t);
+            let b1 = blend(a1, a2, t0, t2, t);
+            let b2 = blend(a2, a3, t1, t3, t);
+            curve.push(blend(b1, b2, t1, t2, t));
+        }
+    }
+    if ring_budget < n {
+        resample_closed_curve(&curve, ring_budget.max(3))
+    } else {
+        curve
+    }
+}
+
+fn resample_closed_curve(curve: &[Vec3], count: usize) -> Vec<Vec3> {
+    let mut distances = Vec::with_capacity(curve.len() + 1);
+    distances.push(0.0);
+    for i in 0..curve.len() {
+        distances.push(distances[i] + curve[i].distance(curve[(i + 1) % curve.len()]));
+    }
+    let length = distances[curve.len()];
+    let mut segment = 0;
+    (0..count)
+        .map(|i| {
+            let distance = length * (i as f32 / count as f32);
+            while segment + 1 < curve.len() && distances[segment + 1] <= distance {
+                segment += 1;
+            }
+            let span = distances[segment + 1] - distances[segment];
+            let fraction = if span > 0.0 {
+                (distance - distances[segment]) / span
+            } else {
+                0.0
+            };
+            curve[segment].lerp(curve[(segment + 1) % curve.len()], fraction)
+        })
+        .collect()
 }
 
 fn append_closed_tube(
@@ -385,62 +463,6 @@ fn append_closed_tube(
             let d = base + (index * radial_segments + next_side) as u32;
             geometry.indices.extend_from_slice(&[a, d, c, a, c, b]);
         }
-    }
-    Ok(())
-}
-
-fn append_sphere(
-    geometry: &mut Geometry,
-    center: Vec3,
-    radius: f32,
-    longitude_segments: usize,
-    latitude_segments: usize,
-) -> Result<()> {
-    let base = u32::try_from(geometry.positions.len()).context("PTS geometry is too large")?;
-    geometry
-        .positions
-        .push((center + Vec3::Y * radius).to_array());
-    for latitude in 1..latitude_segments {
-        let phi = std::f32::consts::PI * latitude as f32 / latitude_segments as f32;
-        for longitude in 0..longitude_segments {
-            let theta = std::f32::consts::TAU * longitude as f32 / longitude_segments as f32;
-            let normal = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
-            geometry
-                .positions
-                .push((center + normal * radius).to_array());
-        }
-    }
-    let bottom = u32::try_from(geometry.positions.len()).context("PTS geometry is too large")?;
-    geometry
-        .positions
-        .push((center - Vec3::Y * radius).to_array());
-    let ring = |latitude: usize, longitude: usize| {
-        base + 1 + ((latitude - 1) * longitude_segments + longitude % longitude_segments) as u32
-    };
-    for longitude in 0..longitude_segments {
-        let next = (longitude + 1) % longitude_segments;
-        geometry
-            .indices
-            .extend_from_slice(&[base, ring(1, next), ring(1, longitude)]);
-    }
-    for latitude in 1..latitude_segments - 1 {
-        for longitude in 0..longitude_segments {
-            let next = (longitude + 1) % longitude_segments;
-            let a = ring(latitude, longitude);
-            let b = ring(latitude + 1, longitude);
-            let c = ring(latitude + 1, next);
-            let d = ring(latitude, next);
-            geometry.indices.extend_from_slice(&[a, c, b, a, d, c]);
-        }
-    }
-    let last_ring = latitude_segments - 1;
-    for longitude in 0..longitude_segments {
-        let next = (longitude + 1) % longitude_segments;
-        geometry.indices.extend_from_slice(&[
-            ring(last_ring, next),
-            bottom,
-            ring(last_ring, longitude),
-        ]);
     }
     Ok(())
 }
@@ -521,7 +543,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn denta_pts_becomes_closed_tube_and_sample_spheres() {
+    fn denta_pts_becomes_a_continuous_closed_curve() {
         let source = b"BEGIN_6\n0 0 0\n2 0 0\n2 2 0\n0 2 0\n0 0 0\nSELECTION_SEED 1 1 1\nEND_6\n";
         let geometry = pts_geometry(source).unwrap();
         assert!(geometry.positions.len() > 400);
@@ -578,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_tube_and_sphere_faces_point_outward() {
+    fn generated_tube_faces_point_outward() {
         let mut tube = Geometry {
             positions: Vec::new(),
             indices: Vec::new(),
@@ -602,28 +624,84 @@ mod tests {
             let face = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
             assert!(face.dot(outward) > 0.0);
         }
+    }
 
-        let mut sphere = Geometry {
-            positions: Vec::new(),
-            indices: Vec::new(),
+    #[test]
+    fn curve_preserves_samples_and_has_no_point_bulges() {
+        let points: Vec<_> = (0..32)
+            .map(|i| {
+                let t = std::f32::consts::TAU * i as f32 / 32.0;
+                Vec3::new(4.0 * t.cos(), 4.0 * t.sin(), 0.0)
+            })
+            .collect();
+        let curve = smooth_closed_curve(&points, 0.1);
+        for p in &points {
+            assert!(curve.iter().any(|q| q.distance(*p) < 1e-5));
+        }
+        let mut tube = Geometry {
+            positions: vec![],
+            indices: vec![],
         };
-        append_sphere(
-            &mut sphere,
-            Vec3::ZERO,
-            1.0,
-            SPHERE_LONGITUDE_SEGMENTS,
-            SPHERE_LATITUDE_SEGMENTS,
-        )
-        .unwrap();
-        for triangle in sphere.indices.chunks_exact(3) {
-            let vertices = [
-                Vec3::from_array(sphere.positions[triangle[0] as usize]),
-                Vec3::from_array(sphere.positions[triangle[1] as usize]),
-                Vec3::from_array(sphere.positions[triangle[2] as usize]),
-            ];
-            let centroid = (vertices[0] + vertices[1] + vertices[2]) / 3.0;
-            let face = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
-            assert!(face.dot(centroid) > 0.0);
+        append_closed_tube(&mut tube, &curve, 0.1, 16).unwrap();
+        assert_eq!(tube.positions.len(), curve.len() * 16);
+        for (ring, center) in tube.positions.chunks_exact(16).zip(&curve) {
+            for p in ring {
+                assert!((Vec3::from_array(*p).distance(*center) - 0.1).abs() < 1e-5);
+            }
+        }
+        // Closed tube is manifold: no seam, open ends, or sample spheres.
+        let mut edges = std::collections::HashMap::new();
+        for tri in tube.indices.chunks_exact(3) {
+            for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        assert!(edges.values().all(|count| *count == 2));
+    }
+
+    #[test]
+    fn budgeted_curve_preserves_samples_when_they_fit() {
+        let points: Vec<_> = (0..32)
+            .map(|i| {
+                let angle = std::f32::consts::TAU * i as f32 / 32.0;
+                Vec3::new(4.0 * angle.cos(), 4.0 * angle.sin(), 0.0)
+            })
+            .collect();
+        for budget in [32, 39, 100, 256] {
+            let curve = smooth_closed_curve_budgeted(&points, 0.1, budget);
+            assert!(curve.len() <= budget);
+            for point in &points {
+                assert!(curve.iter().any(|sample| sample.distance(*point) < 1e-5));
+            }
+        }
+    }
+
+    #[test]
+    fn dense_pts_lod_has_bounded_faces_and_a_closed_smooth_centerline() {
+        let points: Vec<_> = (0..MAX_PTS_POINTS)
+            .map(|i| {
+                let angle = std::f32::consts::TAU * i as f32 / MAX_PTS_POINTS as f32;
+                Vec3::new(4.0 * angle.cos(), 4.0 * angle.sin(), 0.0)
+            })
+            .collect();
+        for budget in [1, 18, 59, 60, 1_000, 50_000] {
+            let geometry = pts_lod_geometry_from_points(&points, budget).unwrap();
+            assert!(geometry.primitive_count() <= budget.max(18));
+            assert!(geometry.positions.iter().flatten().all(|x| x.is_finite()));
+            let mut edges = std::collections::HashMap::new();
+            for tri in geometry.indices.chunks_exact(3) {
+                for (a, b) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                    *edges.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+                }
+            }
+            assert!(edges.values().all(|count| *count == 2));
+        }
+        let curve = smooth_closed_curve_budgeted(&points, 0.1, 50);
+        assert_eq!(curve.len(), 50);
+        for (i, point) in curve.iter().enumerate() {
+            assert!((point.length() - 4.0).abs() < 1e-4);
+            let segment_length = point.distance(curve[(i + 1) % curve.len()]);
+            assert!((segment_length - 8.0 * (std::f32::consts::PI / 50.0).sin()).abs() < 1e-4);
         }
     }
 }

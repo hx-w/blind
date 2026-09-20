@@ -56,6 +56,7 @@ export interface PublicMesh {
   visible: boolean;
   quality: MeshQuality;
   source_url: string;
+  translation?: Vec3;
   label?: MeshLabel | null;
 }
 
@@ -76,6 +77,8 @@ export interface PublicScene {
   label_groups: MeshLabelGroup[];
   state: ViewState;
   owner: boolean;
+  attachments?: Array<{id: string; label: string; byte_size: number | null; url: string | null; unavailable: string | null}>;
+  warnings?: Array<{code: string; message: string; resource_id?: string}>;
 }
 
 export interface ShareLinks {

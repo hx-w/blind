@@ -81,7 +81,7 @@ and user identity are separate from the host's.
   `blind leave` and reuse the same permanent invitation to start again.
 - If the invitation was revoked, run `blind leave`, request the current
   invitation and join again.
-- `blind status --json` reports this user's registration without credentials.
+- `blind status --json` reports local Server state, this user's connection and target plugins without credentials.
 - `blind leave` removes only this registration's managed authorized-key line,
   revokes the registration, and removes local Client state. If A is offline,
   the SSH authorization is still removed; retry leave when A returns.
@@ -143,8 +143,8 @@ The installation remains one `blind` binary on each host. Preserve the existing
 Server configuration and scene database when upgrading A, then register the
 Client locally if A also shares files. `blind serve`, `blind service install`
 and `blind update` keep their existing entry points. Client commands do not
-start the Server. `blind status` reports Client registration; `blind server-status`
-reports the Server. Existing source-less scenes still resolve local Server files.
+start the Server. `blind status` reports local Server state, Client connectivity and target plugins.
+`blind server-status` is a hidden compatibility alias for the same report. Existing source-less scenes still resolve local Server files.
 
 ## Verification
 
@@ -160,3 +160,6 @@ The integration test starts an isolated SSH daemon on a random port with
 throwaway keys. It never changes OS SSH settings or the user's authorized keys.
 It covers writable-key rejection, independent credentials, source ownership,
 Raw/LOD/PNG, unavailable-source cleanup, recovery, revocation and deletion.
+
+Plugin/OSS-only Clients may register using `blind join --stdin --client-only`
+without SSH. This identity has no filesystem source. See [plugins](plugins.md).

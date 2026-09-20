@@ -626,3 +626,51 @@ test('undo derives the restored draft target from its original mesh', async () =
     const result=await captureShare(page);assert.equal(result.state.annotations.length,1);assert.equal(result.state.annotations[0].mesh,0);assert.ok(result.state.annotations[0].points.length>=2);
   } finally {await page.close();}
 });
+
+test('translated panels retain their separate world positions and attachment links', async () => {
+  const shifted=structuredClone(scene);
+  shifted.label_groups=[];
+  shifted.meshes=shifted.meshes.map((m,i)=>({...m,translation:[i===0?-6:6,0,0],label:{text:i===0?'Left panel':'Right panel'},visible:true}));
+  shifted.state.camera={position:[0,0,25],target:[0,0,0],up:[0,1,0],fov:50,zoom:1,orthographic_height:20};
+  shifted.state.strokes=[];
+  shifted.attachments=[{id:'log',label:'Run log',byte_size:12,url:'api/v1/scenes/fixture/attachments/0',unavailable:null}];
+  shifted.warnings=[{code:'MISSING',message:'Missing historical artifact'}];
+  const page=await openPage({width:1280,height:800},0,shifted);
+  try {
+    const left=await page.locator('.mesh-label').getByText('Left panel',{exact:true}).boundingBox();
+    const right=await page.locator('.mesh-label').getByText('Right panel',{exact:true}).boundingBox();
+    assert.ok(left && right && right.x-left.x>150,'labels must follow translated geometry');
+    assert.equal(await page.locator('.scene-artifacts a').getAttribute('href'),'api/v1/scenes/fixture/attachments/0');
+    assert.match(await page.locator('.scene-artifacts').textContent(),/Missing historical artifact/);
+  } finally {await page.close();}
+});
+
+
+test('partial scenes show a persistent notice and semantic details', async () => {
+  const partial=structuredClone(scene);
+  partial.warnings=[{code:'ORDER_FAILED',message:'牙冠生成失败；显示已有产物。'}, {code:'RESOURCE_UNAVAILABLE',message:'人工颈缘：产物缺失'}];
+  partial.attachments=[{id:'log',label:'运行日志',url:null,unavailable:'产物缺失'}];
+  const page=await openPage({width:390,height:844},0,partial);
+  try {
+    assert.equal(await page.locator('#scene-notice').isVisible(),true);
+    assert.match(await page.locator('#scene-notice').textContent(),/订单失败/);
+    await page.locator('#scene-notice').click();
+    assert.match(await page.locator('.scene-artifacts').textContent(),/人工颈缘：产物缺失/);
+    assert.match(await page.locator('.scene-artifacts').textContent(),/运行日志.*产物缺失/);
+    assert.equal(await page.locator('.scene-artifacts a').count(),0);
+    assert.equal(await page.locator('#detail-mesh-select option').first().textContent(),'Mesh one');
+  } finally { await page.close(); }
+});
+
+
+test('all failed mesh downloads show unavailable instead of a partial scene', async () => {
+  const page=await browser.newPage({viewport:{width:390,height:844}});
+  try {
+    await page.route('**/mesh/**',route=>route.fulfill({status:503,body:'Unavailable'}));
+    await page.goto(`${origin}/s/fixture`);
+    await page.waitForSelector('#invalid-state:not([hidden])');
+    assert.match(await page.locator('#invalid-state h2').textContent(),/暂时无法打开/);
+    assert.equal(await page.locator('#scene-notice').isVisible(),false);
+    assert.equal(await page.locator('#share-view').isVisible(),false);
+  } finally { await page.close(); }
+});

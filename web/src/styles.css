@@ -241,3 +241,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 @media (max-height:480px) and (min-width:600px) {
   .panel-open .surface-list { right: 354px; left: auto; width: min(260px, calc(100vw - 368px)); }
 }
+
+.scene-notice { position: absolute; z-index: 8; top: max(18px, env(safe-area-inset-top)); left: 16px; max-width: calc(100% - 158px); padding: 9px 12px; border: 1px solid #aa8b58; border-radius: 8px; color: #ffe0ae; background: #343028; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
+.scene-notice[hidden] { display: none; }
+.scene-artifacts p { margin: 10px 0; line-height: 1.5; overflow-wrap: anywhere; }

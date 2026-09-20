@@ -605,7 +605,7 @@ fn load_scene_geometry_bytes(
         if source_bytes > MAX_RENDER_SOURCE_BYTES {
             bail!("image rendering supports at most 512 MiB of visible source data");
         }
-        let geometry = match sources {
+        let mut geometry = match sources {
             Some(data) => Geometry::from_bytes(
                 data.get(layer)
                     .and_then(Option::as_deref)
@@ -614,6 +614,11 @@ fn load_scene_geometry_bytes(
             )?,
             None => Geometry::load(Path::new(&mesh.path), mesh.format)?,
         };
+        for p in &mut geometry.positions {
+            for (coordinate, shift) in p.iter_mut().zip(mesh.translation) {
+                *coordinate += shift;
+            }
+        }
         triangles = triangles
             .checked_add(geometry.indices.len() / 3)
             .context("triangle count overflow")?;
@@ -678,6 +683,8 @@ fn load_scene_geometry_bytes(
             });
             continue;
         }
+        let flat = flat && mesh.format != crate::scene::MeshFormat::Pts;
+        let wire = wire && mesh.format != crate::scene::MeshFormat::Pts;
         let normals = (!flat).then(|| geometry.smooth_normals());
         let mut vertices = Vec::with_capacity(geometry.indices.len());
         for triangle in geometry.indices.chunks_exact(3) {
@@ -1344,6 +1351,27 @@ fn align_to(value: u32, alignment: u32) -> u32 {
 mod tests {
     use super::*;
     use image::Rgba;
+
+    #[tokio::test]
+    async fn scene_translation_moves_render_geometry_without_changing_source() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tetra.ply");
+        let mut scene = SceneDescriptor::create(&[path.clone(), path], None)
+            .await
+            .unwrap();
+        scene.state.axes = false;
+        scene.meshes[1].translation = [100.0, 20.0, -5.0];
+        let material: MatteShader =
+            serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
+        let input = load_scene_geometry(&scene, &material).unwrap();
+        assert!(
+            (input.batches[1].center
+                - input.batches[0].center
+                - glam::Vec3::new(100.0, 20.0, -5.0))
+            .length()
+                < 0.0001
+        );
+        assert_eq!(scene.meshes[0].revision, scene.meshes[1].revision);
+    }
 
     #[tokio::test]
     async fn renderer_initializes_all_shader_pipelines() {

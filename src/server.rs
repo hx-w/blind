@@ -55,6 +55,7 @@ pub struct AppState {
     pub lod_slots: Arc<tokio::sync::Semaphore>,
     pub lod_memory: Arc<tokio::sync::Semaphore>,
     join_slots: Arc<tokio::sync::Semaphore>,
+    plugin_slots: Arc<tokio::sync::Semaphore>,
     pub lod_cache: LodCache,
     pub shutdown: tokio::sync::mpsc::Sender<()>,
     doctor_lock: Arc<tokio::sync::Mutex<()>>,
@@ -105,6 +106,9 @@ pub struct ShareResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateSceneRequest {
+    #[serde(default)]
+    manifest: Option<crate::plugin::ShareManifest>,
+    #[serde(default)]
     paths: Vec<String>,
     title: Option<String>,
     origin: Option<String>,
@@ -210,6 +214,8 @@ struct PublicScene {
     label_groups: Vec<crate::scene::MeshLabelGroup>,
     state: crate::scene::ViewState,
     owner: bool,
+    attachments: Vec<serde_json::Value>,
+    warnings: Vec<crate::plugin::Warning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,6 +230,7 @@ struct PublicMesh {
     quality: MeshQuality,
     label: Option<crate::scene::MeshLabel>,
     source_url: String,
+    translation: [f32; 3],
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
@@ -249,6 +256,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         lod_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         lod_memory: Arc::new(tokio::sync::Semaphore::new(LOD_MEMORY_MIB as usize)),
         join_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        plugin_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         lod_cache: LodCache::default(),
         shutdown: shutdown_tx,
         doctor_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -275,6 +283,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/v1/clients/join", post(join_client))
         .route("/api/v1/client", get(client_info))
         .route("/api/v1/client/oss", get(client_oss))
+        .route("/api/v1/client/plugins", get(client_plugins))
+        .route(
+            "/api/v1/scenes/{token}/attachments/{index}",
+            get(get_attachment),
+        )
         .route("/api/v1/client/activate", post(activate_client))
         .route("/api/v1/client/revoke", post(revoke_client))
         .route(
@@ -608,7 +621,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        scene_schema: 3,
+        scene_schema: 4,
         image_renderer: state.renderer.is_some(),
     })
 }
@@ -717,7 +730,7 @@ async fn create_scene(
         });
     }
     let mut scene = scene_from_sources(&state, &paths, None, request.title).await?;
-    if let Some(labels) = request.labels {
+    if let Some(labels) = request.labels.filter(|ls| ls.iter().any(Option::is_some)) {
         scene
             .set_labels(labels)
             .map_err(|error| AppError::bad_request(&error.to_string()))?;
@@ -773,6 +786,7 @@ async fn get_scene(
             visible: mesh.visible,
             quality: mesh.quality,
             label: mesh.label.clone(),
+            translation: mesh.translation,
             // Relative to the document base so both root and base-path mounts
             // resolve to the correct API prefix.
             source_url: format!("api/v1/scenes/{token}/meshes/{index}"),
@@ -781,6 +795,8 @@ async fn get_scene(
     Ok((
         no_store(),
         Json(PublicScene {
+            attachments: scene.attachments.iter().enumerate().map(|(index,a)| serde_json::json!({"id":a.id,"label":a.label,"byte_size":a.byte_size,"unavailable":a.unavailable,"url":if a.revision.is_some(){Some(format!("api/v1/scenes/{token}/attachments/{index}"))}else{None}})).collect(),
+            warnings: scene.warnings.clone(),
             source: scene.source.clone(),
             title: scene.title,
             meshes,
@@ -830,7 +846,15 @@ async fn get_mesh_lod(
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
-    let scene = opened.scene;
+    lod_response(scene_lod(&state, &token, &opened.scene, index).await?)
+}
+
+async fn scene_lod(
+    state: &AppState,
+    token: &str,
+    scene: &SceneDescriptor,
+    index: usize,
+) -> Result<Arc<LodAsset>, AppError> {
     let mesh = scene
         .meshes
         .get(index)
@@ -839,15 +863,15 @@ async fn get_mesh_lod(
     let key = lod::cache_key(&mesh.revision, mesh.format, target_primitives);
     if let Some(asset) = state.lod_cache.get(&key) {
         source_result(
-            &state,
-            &token,
+            state,
+            token,
             state
                 .registry
                 .sources
-                .validate_mesh_metadata(&scene, mesh)
+                .validate_mesh_metadata(scene, mesh)
                 .await,
         )?;
-        return lod_response(asset);
+        return Ok(asset);
     }
 
     let _permit = state
@@ -857,15 +881,15 @@ async fn get_mesh_lod(
         .map_err(|error| AppError::unavailable(&error.to_string()))?;
     if let Some(asset) = state.lod_cache.get(&key) {
         source_result(
-            &state,
-            &token,
+            state,
+            token,
             state
                 .registry
                 .sources
-                .validate_mesh_metadata(&scene, mesh)
+                .validate_mesh_metadata(scene, mesh)
                 .await,
         )?;
-        return lod_response(asset);
+        return Ok(asset);
     }
 
     let memory_permits = lod_memory_permits(mesh.byte_size);
@@ -877,9 +901,9 @@ async fn get_mesh_lod(
         .map_err(|error| AppError::unavailable(&error.to_string()))?;
 
     let bytes = source_result(
-        &state,
-        &token,
-        state.registry.sources.read_mesh(&scene, mesh, true).await,
+        state,
+        token,
+        state.registry.sources.read_mesh(scene, mesh, true).await,
     )?
     .bytes;
     let format = mesh.format;
@@ -889,7 +913,7 @@ async fn get_mesh_lod(
             .map_err(|e| AppError::internal(&e.to_string()))??;
     let asset = Arc::new(asset);
     state.lod_cache.insert(key, asset.clone());
-    lod_response(asset)
+    Ok(asset)
 }
 
 fn lod_response(asset: Arc<LodAsset>) -> Result<Response<Body>, AppError> {
@@ -966,8 +990,24 @@ async fn render_image(
     if source_bytes > crate::source::MAX_SOURCE_BYTES {
         return Err(AppError::unprocessable("image sources exceed 512 MiB"));
     }
+    let mut render_scene = scene.clone();
     let mut sources = Vec::with_capacity(scene.meshes.len());
-    for mesh in &scene.meshes {
+    for (index, mesh) in scene.meshes.iter().enumerate() {
+        if mesh.visible
+            && mesh.quality == MeshQuality::Lod
+            && mesh.format != MeshFormat::Pts
+            && !scene
+                .state
+                .annotations
+                .iter()
+                .any(|mark| mark.mesh == index)
+        {
+            let asset = scene_lod(&state, token, &scene, index).await?;
+            render_scene.meshes[index].format = MeshFormat::Ply;
+            render_scene.meshes[index].byte_size = asset.bytes.len() as u64;
+            sources.push(Some(asset.bytes.to_vec()));
+            continue;
+        }
         if mesh.visible {
             sources.push(Some(
                 source_result(
@@ -985,10 +1025,13 @@ async fn render_image(
         .renderer
         .as_ref()
         .ok_or_else(|| AppError::unavailable("Image renderer unavailable"))?;
-    let bytes = renderer.render(&scene, sources).await.map_err(|error| {
-        tracing::warn!(%error, "image render failed");
-        AppError::unprocessable("Image render failed")
-    })?;
+    let bytes = renderer
+        .render(&render_scene, sources)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "image render failed");
+            AppError::unprocessable("Image render failed")
+        })?;
     for mesh in scene.meshes.iter().filter(|mesh| mesh.visible) {
         source_result(
             &state,
@@ -1672,6 +1715,7 @@ async fn scene_from_sources(
             visible: true,
             quality: MeshQuality::Lod,
             label: None,
+            translation: [0.0; 3],
         });
     }
     let title = title.unwrap_or_else(|| {
@@ -1687,6 +1731,8 @@ async fn scene_from_sources(
         title,
         created_at: crate::source::now() as u64,
         meshes,
+        attachments: Vec::new(),
+        warnings: Vec::new(),
         label_groups: Vec::new(),
         state: Default::default(),
     })
@@ -1698,21 +1744,73 @@ async fn client_scene(
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let source = client_auth(&state, &headers, false)?;
-    let mut scene = scene_from_sources(
-        &state,
-        &request.paths,
-        Some(source.scene_source()),
-        request.title,
-    )
-    .await?;
-    if let Some(labels) = request.labels {
+    let mut scene = if let Some(plan) = request.manifest {
+        if !request.paths.is_empty()
+            || request.labels.as_ref().is_some_and(|ls| !ls.is_empty())
+            || !request.label_groups.is_empty()
+        {
+            return Err(AppError::bad_request(
+                "manifest conflicts with paths/labels",
+            ));
+        }
+        if plan
+            .resources
+            .iter()
+            .any(|r| crate::plugin::is_plugin(&r.uri))
+        {
+            return Err(AppError::bad_request("nested plugin URIs are not allowed"));
+        }
+        for a in &plan.attachments {
+            crate::oss::Location::parse(&a.uri)
+                .map_err(|_| AppError::bad_request("attachments must be OSS references"))?;
+        }
+        scene_from_manifest(&state, plan, Some(source.scene_source()), request.title).await?
+    } else if request.paths.iter().any(|p| crate::plugin::is_plugin(p)) {
+        if request.paths.len() != 1
+            || request
+                .labels
+                .as_ref()
+                .is_some_and(|ls| ls.iter().any(Option::is_some))
+            || !request.label_groups.is_empty()
+        {
+            return Err(AppError::bad_request(
+                "plugin shares require one URI without label overrides",
+            ));
+        }
+        let _permit = state
+            .plugin_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                AppError::too_many_requests("Two plugin shares already running; retry later")
+            })?;
+        let dir = config_path()?
+            .parent()
+            .context("missing config parent")?
+            .to_owned();
+        let plan = crate::plugin::resolve(&dir, &request.paths[0])
+            .await
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        scene_from_manifest(&state, plan, Some(source.scene_source()), request.title).await?
+    } else {
+        scene_from_sources(
+            &state,
+            &request.paths,
+            Some(source.scene_source()),
+            request.title,
+        )
+        .await?
+    };
+    if let Some(labels) = request.labels.filter(|ls| ls.iter().any(Option::is_some)) {
         scene
             .set_labels(labels)
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
     }
-    scene
-        .set_label_groups(request.label_groups)
-        .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    if !request.label_groups.is_empty() {
+        scene
+            .set_label_groups(request.label_groups)
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    }
     // Server configuration/request origin selects the public endpoint; source addresses never form URLs.
     let origin = match request.origin {
         Some(origin) => state.config.normalize_share_origin(&origin)?,
@@ -1757,6 +1855,301 @@ async fn client_scene(
             .map(|m| serde_json::json!({"path":m.path,"revision":m.revision}))
             .collect::<Vec<_>>()
     );
+    response["warnings"] = serde_json::to_value(&scene.warnings).map_err(anyhow::Error::from)?;
+    response["status"] = serde_json::json!(if scene.warnings.is_empty() {
+        "complete"
+    } else {
+        "partial"
+    });
+    response["attachments"] = serde_json::json!(scene.attachments.len());
     response["source"] = serde_json::to_value(&scene.source).map_err(anyhow::Error::from)?;
     Ok((no_store(), Json(response)))
+}
+
+async fn client_plugins(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AppError> {
+    client_auth(&state, &headers, false)?;
+    let dir = config_path()?
+        .parent()
+        .context("missing config parent")?
+        .to_owned();
+    Ok((no_store(), Json(crate::plugin::list(&dir)?)))
+}
+
+async fn get_attachment(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    AxumPath((token, index)): AxumPath<(String, usize)>,
+) -> Result<Response<Body>, AppError> {
+    let opened = open_scene(&state, &token, peer.ip())?;
+    source_result(
+        &state,
+        &token,
+        state.registry.sources.validate_source(&opened.scene),
+    )?;
+    let a = opened
+        .scene
+        .attachments
+        .get(index)
+        .ok_or_else(|| AppError::not_found("Attachment not found"))?;
+    let revision = a.revision.as_ref().ok_or_else(|| {
+        AppError::unavailable("Attachment was unavailable when this scene was created")
+    })?;
+    let observed = state
+        .registry
+        .sources
+        .observe(opened.scene.source.as_ref(), &a.path, true)
+        .await
+        .map_err(|e| match e {
+            SourceError::Gone => AppError::gone("Attachment deleted"),
+            _ => AppError::unavailable("Attachment unavailable"),
+        })?;
+    if &observed.revision != revision {
+        return Err(AppError::gone("Attachment changed"));
+    }
+    let name = crate::oss::Location::parse(&a.path)?.key.to_string();
+    let name = name.rsplit('/').next().unwrap_or("attachment");
+    // RFC 5987 encoding, never interpolate raw source text into HTTP headers.
+    let encoded: String = url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CACHE_CONTROL, NO_STORE)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!(
+                "attachment; filename=\"attachment\"; filename*=UTF-8''{}",
+                encoded.replace('+', "%20")
+            ),
+        )
+        .body(Body::from(observed.bytes))?)
+}
+
+async fn scene_from_manifest(
+    state: &AppState,
+    plan: crate::plugin::ShareManifest,
+    source: Option<crate::source::SceneSource>,
+    title: Option<String>,
+) -> Result<SceneDescriptor, AppError> {
+    plan.validate()
+        .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    let mut warnings = plan.warnings;
+    let mut ready = HashMap::new();
+    let mut cached = HashMap::new();
+    for r in &plan.resources {
+        if !cached.contains_key(&r.uri) {
+            let result = async {
+                let observed = state
+                    .registry
+                    .sources
+                    .observe(source.as_ref(), &r.uri, true)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("resource unavailable"))?;
+                let filename = if crate::oss::is_oss(&r.uri) {
+                    crate::oss::Location::parse(&r.uri)?.key.to_string()
+                } else {
+                    r.uri.clone()
+                };
+                let format = MeshFormat::from_path(std::path::Path::new(&filename))?;
+                let bytes = observed.bytes;
+                let bounds = tokio::task::spawn_blocking(move || {
+                    crate::mesh::Geometry::from_bytes(&bytes, format).map(|g| g.bounds())
+                })
+                .await??;
+                Ok::<_, anyhow::Error>((
+                    crate::scene::MeshRef {
+                        path: observed.path,
+                        name: std::path::Path::new(&filename)
+                            .file_name()
+                            .context("no filename")?
+                            .to_string_lossy()
+                            .into_owned(),
+                        format,
+                        revision: observed.revision,
+                        byte_size: observed.size,
+                        modified_ns: observed.modified_ns,
+                        change_ns: observed.change_ns,
+                        color: crate::scene::PALETTE[ready.len() % crate::scene::PALETTE.len()]
+                            .into(),
+                        opacity: 1.0,
+                        visible: true,
+                        quality: MeshQuality::Lod,
+                        label: None,
+                        translation: [0.0; 3],
+                    },
+                    bounds,
+                ))
+            }
+            .await;
+            cached.insert(r.uri.clone(), result.ok());
+        }
+        if let Some(Some((mesh, bounds))) = cached.get(&r.uri) {
+            let mut mesh = mesh.clone();
+            mesh.label = r.label.as_ref().map(|text| crate::scene::MeshLabel {
+                text: text.clone(),
+                anchor: None,
+            });
+            ready.insert(r.id.clone(), (mesh, *bounds));
+        } else {
+            warnings.push(crate::plugin::Warning {
+                code: "RESOURCE_UNAVAILABLE".into(),
+                message: format!(
+                    "{}: resource unavailable or unsupported geometry",
+                    r.label.as_deref().unwrap_or(&r.id)
+                ),
+                resource_id: Some(r.id.clone()),
+            });
+        }
+    }
+    if ready.is_empty() {
+        return Err(AppError::unprocessable(
+            "NO_READABLE_GEOMETRY: no geometry could be loaded; check Server OSS access and artifact availability, then retry",
+        ));
+    }
+    let mut meshes = Vec::new();
+    let mut groups = Vec::new();
+    if plan.panels.is_empty() {
+        for r in &plan.resources {
+            if let Some((m, _)) = ready.get(&r.id) {
+                meshes.push(m.clone());
+            }
+        }
+    } else {
+        let mut panels = Vec::new();
+        for panel in plan.panels {
+            let members: Vec<_> = panel
+                .members
+                .iter()
+                .filter_map(|id| ready.get(id))
+                .collect();
+            let missing = panel.members.len() - members.len();
+            if missing > 0 {
+                warnings.push(crate::plugin::Warning {
+                    code: "PANEL_INCOMPLETE".into(),
+                    message: format!(
+                        "{}：缺少 {missing} 个产物{}",
+                        panel.label,
+                        if members.is_empty() {
+                            "，该组暂无可显示的模型。"
+                        } else {
+                            "，仅显示可用部分。"
+                        }
+                    ),
+                    resource_id: None,
+                });
+            }
+            if members.is_empty() {
+                continue;
+            }
+            let caption = if missing > 0 {
+                format!("{} · 部分可用", panel.label)
+                    .chars()
+                    .take(120)
+                    .collect()
+            } else {
+                panel.label
+            };
+            let mut min = glam::Vec3::splat(f32::INFINITY);
+            let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+            for (_, bounds) in &members {
+                min = min.min(glam::Vec3::from_array(bounds.0));
+                max = max.max(glam::Vec3::from_array(bounds.1));
+            }
+            panels.push((caption, members, min, max));
+        }
+        let cell = panels
+            .iter()
+            .map(|(_, _, min, max)| (*max - *min).max_element())
+            .fold(1.0_f32, f32::max)
+            * 1.1;
+        if !cell.is_finite() {
+            return Err(AppError::unprocessable(
+                "Geometry bounds exceed layout limits",
+            ));
+        }
+        let cols = (panels.len() as f32).sqrt().ceil().min(4.0) as usize;
+        for (i, (label, members, min, max)) in panels.into_iter().enumerate() {
+            let center = (min + max) * 0.5;
+            let target =
+                glam::Vec3::new((i % cols) as f32 * cell, -((i / cols) as f32) * cell, 0.0);
+            let shift = (target - center).to_array();
+            let mut indices = Vec::new();
+            let single = members.len() == 1;
+            for (mesh, _) in members {
+                let mut mesh = mesh.clone();
+                mesh.translation = shift;
+                if single {
+                    let text = match &mesh.label {
+                        Some(own) if own.text != label => format!("{label} · {}", own.text),
+                        _ => label.clone(),
+                    };
+                    mesh.label = Some(crate::scene::MeshLabel {
+                        text: text.chars().take(120).collect(),
+                        anchor: None,
+                    });
+                }
+                indices.push(meshes.len());
+                meshes.push(mesh);
+            }
+            if indices.len() > 1 {
+                groups.push(crate::scene::MeshLabelGroup {
+                    text: label,
+                    meshes: indices,
+                });
+            }
+        }
+    }
+    let mut attachments = Vec::new();
+    for a in plan.attachments {
+        let observed = state
+            .registry
+            .sources
+            .observe(source.as_ref(), &a.uri, false)
+            .await
+            .ok();
+        let unavailable = observed
+            .is_none()
+            .then(|| "Resource unavailable".to_owned());
+        if unavailable.is_some() {
+            warnings.push(crate::plugin::Warning {
+                code: "ATTACHMENT_UNAVAILABLE".into(),
+                message: format!(
+                    "{}: attachment unavailable",
+                    a.label.as_deref().unwrap_or(&a.id)
+                ),
+                resource_id: Some(a.id.clone()),
+            });
+        }
+        attachments.push(crate::scene::SceneAttachment {
+            id: a.id,
+            path: a.uri,
+            label: a.label.unwrap_or_else(|| "Attachment".into()),
+            byte_size: observed.as_ref().map(|o| o.size),
+            revision: observed.map(|o| o.revision),
+            unavailable,
+        });
+    }
+    // Recheck ownership after potentially slow upstream reads, before publishing.
+    if let Some(s) = &source {
+        state
+            .registry
+            .sources
+            .get(&s.id)
+            .map_err(|_| AppError::unauthorized("Client was revoked"))?;
+    }
+    Ok(SceneDescriptor {
+        source,
+        schema: 4,
+        title: title
+            .or(plan.title)
+            .unwrap_or_else(|| "Plugin scene".into()),
+        created_at: crate::source::now() as u64,
+        meshes,
+        label_groups: groups,
+        state: Default::default(),
+        attachments,
+        warnings,
+    })
 }

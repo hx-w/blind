@@ -4,6 +4,8 @@ pub mod lod;
 pub mod mesh;
 pub mod network;
 pub mod oss;
+pub mod plugin;
+pub mod plugin_update;
 pub mod registry;
 pub mod render;
 pub mod scene;

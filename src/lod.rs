@@ -144,17 +144,23 @@ pub fn build(path: &Path, format: MeshFormat, target_primitives: usize) -> Resul
 }
 
 pub fn build_bytes(bytes: &[u8], format: MeshFormat, target_primitives: usize) -> Result<LodAsset> {
-    let (raw_bytes, geometry) = if format == MeshFormat::Pts {
-        mesh::pts_raw_size_and_lod_geometry(bytes)?
+    let (raw_bytes, source_primitives, geometry) = if format == MeshFormat::Pts {
+        mesh::pts_raw_size_and_lod_geometry(bytes, target_primitives)?
     } else {
         let raw_bytes = bytes.len();
-        (raw_bytes, Geometry::from_bytes(bytes, format)?)
+        let geometry = Geometry::from_bytes(bytes, format)?;
+        (raw_bytes, geometry.primitive_count(), geometry)
     };
     // Both feeds already reject non-finite coordinates: Geometry::load scans
     // PLY/STL/OBJ, and the PTS parser skips non-finite points per line.
     let point_cloud = geometry.is_point_cloud();
-    let source_primitives = geometry.primitive_count();
-    let geometry = simplify_geometry(geometry, target_primitives);
+    // A PTS tube is already a controlled procedural preview. Mesh decimation
+    // collapses its thin cross sections and introduces visible kinks.
+    let geometry = if format == MeshFormat::Pts {
+        geometry
+    } else {
+        simplify_geometry(geometry, target_primitives)
+    };
     let asset = LodAsset {
         bytes: Bytes::from(geometry.to_binary_ply()?),
         raw_bytes,
@@ -216,7 +222,7 @@ fn simplify_geometry(mut geometry: Geometry, target_primitives: usize) -> Geomet
 pub fn cache_key(revision: &str, format: MeshFormat, target_primitives: usize) -> String {
     // Encoding the profile parameters (instead of a hand-bumped suffix) makes
     // any profile change invalidate cached entries automatically.
-    format!("{revision}:{format:?}:{target_primitives}:{TARGET_ERROR}")
+    format!("{revision}:{format:?}:{target_primitives}:{TARGET_ERROR}:curve3")
 }
 
 #[cfg(test)]
@@ -266,8 +272,24 @@ mod tests {
     #[test]
     fn pts_lod_keeps_semantic_points_but_reduces_procedural_detail() {
         let source = b"0 0 0\n2 0 0\n2 2 0\n0 2 0\n";
-        let (raw_size, preview) = mesh::pts_raw_size_and_lod_geometry(source).unwrap();
+        let (raw_size, _, preview) = mesh::pts_raw_size_and_lod_geometry(source, 2_000).unwrap();
         assert!(preview.to_binary_ply().unwrap().len() < raw_size);
+    }
+
+    #[test]
+    fn dense_pts_build_respects_the_shared_scene_budget() {
+        let mut source = String::new();
+        for i in 0..4_096 {
+            let angle = std::f32::consts::TAU * i as f32 / 4_096.0;
+            source.push_str(&format!("{} {} 0\n", 4.0 * angle.cos(), 4.0 * angle.sin()));
+        }
+        let target = target_primitives(13);
+        let asset = build_bytes(source.as_bytes(), MeshFormat::Pts, target).unwrap();
+        assert!(!asset.point_cloud);
+        assert!(asset.primitives <= target);
+        assert!(asset.primitives * 13 <= SCENE_TARGET_PRIMITIVES);
+        assert!(asset.source_primitives > asset.primitives);
+        assert!(asset.raw_bytes > asset.bytes.len());
     }
 
     #[test]
