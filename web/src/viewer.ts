@@ -65,6 +65,32 @@ export class MeshViewer {
   private readonly pointer = new THREE.Vector2();
   private readonly resizeObserver: ResizeObserver;
   private readonly visibleBounds = new THREE.Box3();
+  private readonly componentBounds = new THREE.Box3();
+  readonly renderListeners = new Set<() => void>();
+  componentUpdates?: () => SceneUpdate['components'];
+  get activeCamera(): THREE.PerspectiveCamera | THREE.OrthographicCamera { return this.camera; }
+  invalidate(): void { this.dirty = true; }
+  navigatePointer(event: PointerEvent): void { this.renderer.domElement.dispatchEvent(new PointerEvent('pointerdown', event)); }
+  navigateWheel(event: WheelEvent): void { this.renderer.domElement.dispatchEvent(new WheelEvent('wheel', event)); }
+  meshBounds(index: number): THREE.Box3 { return this.models[index]?.bounds.clone() ?? new THREE.Box3(); }
+  setMeshPosition(index: number, position: Vec3): void {
+    const model = this.models[index]; if (!model) return;
+    const delta = new THREE.Vector3().fromArray(position).sub(model.object.position);
+    // Annotations are world-space and travel with their component.
+    for (const mark of this.annotations.filter(mark => mark.mesh === index)) {
+      mark.points = mark.points.map(point => new THREE.Vector3().fromArray(point).add(delta).toArray() as Vec3);
+    }
+    if (model.info.label?.anchor) model.info.label.anchor = new THREE.Vector3().fromArray(model.info.label.anchor).add(delta).toArray() as Vec3;
+    model.info.translation = [...position]; model.object.position.fromArray(position);
+    model.bounds.setFromObject(model.object); this.labels.invalidateLayout(); this.relayout();
+  }
+  setMeshOpacity(index: number, opacity: number): void {
+    const model = this.models[index]; if (!model) return;
+    model.info.opacity = opacity; this.applyMaterials(); this.onModelChange?.();
+  }
+  setComponentBounds(bounds: THREE.Box3): void { this.componentBounds.copy(bounds); this.relayout(); }
+  focusBounds(bounds: THREE.Box3): void { if (!bounds.isEmpty()) this.fitBox(bounds, false); }
+
   private readonly rendererSize = new THREE.Vector2();
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   private models: Model[] = [];
@@ -109,9 +135,11 @@ export class MeshViewer {
     this.animate();
   }
 
-  async load(scene: PublicScene): Promise<void> {
+  async load(scene: PublicScene, skipHidden = false): Promise<void> {
     this.disposeModels();
-    this.labelGroups = scene.label_groups ?? [];
+    // Keep assembly captions (e.g. one model comparison) within flat component groups.
+    // Only suppress a caption when the component shell already names the same group.
+    this.labelGroups = (scene.label_groups ?? []).filter(group => !scene.components?.length || !group.meshes.every(index => scene.components!.find(c => c.source.kind === 'mesh' && c.source.index === index)?.group === group.text));
     this.state = structuredClone(scene.state);
     this.state.strokes ??= [];
     this.state.annotations ??= [];
@@ -124,6 +152,11 @@ export class MeshViewer {
     const loaded = await mapConcurrent(scene.meshes, LOAD_CONCURRENCY, async (info) => {
       let result;
       const requestedQuality = this.annotations.some(mark => mark.mesh === scene.meshes.indexOf(info)) ? 'raw' : info.quality ?? 'lod';
+      if (skipHidden && (!info.visible || info.opacity === 0)) {
+        completed += 1;
+        this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
+        return {quality: requestedQuality};
+      }
       try {
         result = { quality: requestedQuality, asset: await loadObject(info, requestedQuality) };
       } catch (error) {
@@ -164,7 +197,7 @@ export class MeshViewer {
     this.resize();
     await settledLayout();
     if (scene.state.camera) this.restoreCamera(scene.state);
-    else this.fitAll(true);
+    else this.fitAll(false);
     this.labels.invalidateLayout();
     this.resizeHelpers();
   }
@@ -230,6 +263,7 @@ export class MeshViewer {
   setVisible(index: number, visible: boolean): void {
     const model = this.models[index];
     if (!model) return;
+    if (model.info.visible === visible && model.object.visible === visible) return;
     model.info.visible = visible;
     model.object.visible = visible;
     this.relayout();
@@ -357,6 +391,7 @@ export class MeshViewer {
     return {
       meshes: this.models.map(({ info }) => ({ color: info.color, opacity: info.opacity, visible: info.visible, quality: info.quality, label: info.label ?? null })),
       state: this.exportState(),
+      components: this.componentUpdates?.(),
     };
   }
 
@@ -535,7 +570,7 @@ export class MeshViewer {
 
   // Refresh the cached joint bounds; only visibility and model changes alter them.
   private refreshVisibleBounds(): void {
-    this.visibleBounds.makeEmpty();
+    this.visibleBounds.copy(this.componentBounds);
     for (const model of this.models) if (model.info.visible) this.visibleBounds.union(model.bounds);
   }
   private resizeHelpers(): void {
@@ -579,6 +614,7 @@ export class MeshViewer {
       this.renderer.render(this.scene, this.camera);
       this.labels.render(this.models, this.labelGroups, this.camera, this.selected);
       this.onRender?.();
+      for (const render of this.renderListeners) render();
       this.dirty = false;
     }
   };

@@ -56,6 +56,12 @@ jobs:
         run: |
           npx playwright install chromium
           npm run test:browser
+      - name: Prepare component export tests
+        working-directory: web
+        run: |
+          node --input-type=module -e 'import { chromium } from "playwright"; console.log(`BLIND_RENDER_BROWSER=${chromium.executablePath()}`)' >> "$GITHUB_ENV"
+          python3 -m venv "$RUNNER_TEMP/component-tests"
+          "$RUNNER_TEMP/component-tests/bin/python" -m pip install Pillow==12.2.0
       - name: Install Rust
         run: rustup toolchain install stable --profile minimal --no-self-update
       - name: Verify source
@@ -69,6 +75,15 @@ jobs:
         run: python3 tests/integration_sftp.py target/release
       - name: Verify read-only OSS sources
         run: python3 tests/integration_oss.py target/release
+      - name: Verify sandboxed Docker component export
+        if: runner.os == 'Linux'
+        run: |
+          docker build -f deploy/Dockerfile -t blind-component-test .
+          "$RUNNER_TEMP/component-tests/bin/python" tests/integration_container.py blind-component-test
+      - name: Verify export network isolation
+        run: cargo test --locked render_viewer::tests -- --include-ignored
+      - name: Verify components and PNG export
+        run: '"$RUNNER_TEMP/component-tests/bin/python" tests/integration_components.py target/release'
       - name: Verify Server plugins
         run: python3 tests/integration_plugins.py target/release
       - name: Package

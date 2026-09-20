@@ -261,3 +261,11 @@ commands serialize across processes; concurrent commands report busy and can be
 retried after the first finishes.
 
 A manifest may expand to at most 4,096 Mesh instances across all panels. Both plugin and direct manifest shares use the same bounded Server admission and geometry memory budget.
+
+## Component renderers
+
+Plugins can also register sandboxed, namespaced surface components, with pinned
+package revisions and a versioned loading/state/export protocol. See
+[component API](components.md#plugin-components-api-1). Business resolvers may return
+`components` with `components.v1` and exact ZIP members with `archive.members`;
+Blind does not interpret order, task, or trace semantics.

@@ -18,6 +18,7 @@ services:
       - /tmp:size=256m,mode=1777
     security_opt:
       - no-new-privileges:true
+      - seccomp:./seccomp-chromium.json
     cap_drop:
       - ALL
     cpus: 4

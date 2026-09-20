@@ -1,6 +1,6 @@
 [package]
 name = "blind"
-version = "0.13.2"
+version = "0.14.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Instant local geometry review from any device"
@@ -79,6 +79,8 @@ url = "2.5"
 wait-timeout = "0.2.1"
 wgpu = "0.20.1"
 zstd = "0.13"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = "thin"

@@ -18,7 +18,13 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const LIMIT: usize = 4 * 1024 * 1024;
-pub const FEATURES: &[&str] = &["layout.panels", "attachments"];
+pub const FEATURES: &[&str] = &[
+    "layout.panels",
+    "layout.panel-groups",
+    "attachments",
+    "components.v1",
+    "archive.members",
+];
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -64,6 +70,8 @@ pub struct Manifest {
     pub version: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub components: Vec<RendererDefinition>,
     pub schemes: Vec<String>,
     pub protocol_versions: Vec<u32>,
     pub entrypoint: Vec<String>,
@@ -90,6 +98,9 @@ pub struct Resource {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Panel {
+    /// Flat display group containing this geometry assembly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub id: String,
     pub label: String,
     pub members: Vec<String>,
@@ -108,6 +119,8 @@ pub struct ShareManifest {
     pub requires: Vec<String>,
     pub title: Option<String>,
     pub resources: Vec<Resource>,
+    #[serde(default)]
+    pub components: Vec<ComponentResource>,
     #[serde(default)]
     pub panels: Vec<Panel>,
     #[serde(default)]
@@ -245,9 +258,11 @@ fn validate_manifest(m: &Manifest) -> Result<()> {
         "plugin has no compatible protocol (Host supports 1)"
     );
     ensure!(
-        !m.schemes.is_empty() && !m.entrypoint.is_empty(),
-        "schemes and entrypoint are required"
+        ((!m.schemes.is_empty() && !m.entrypoint.is_empty())
+            || (m.schemes.is_empty() && m.entrypoint.is_empty() && !m.components.is_empty())),
+        "plugin needs a resolver or components"
     );
+    validate_renderers(m)?;
     let mut seen = HashSet::new();
     for s in &m.schemes {
         ensure!(
@@ -340,7 +355,7 @@ pub fn list(dir: &Path) -> Result<Value> {
                         validate_binding(dir, &v)
                     })
                     .is_ok();
-                result.push(json!({"id":id,"name":i.manifest.name,"version":i.manifest.version,"description":i.manifest.description,"schemes":i.manifest.schemes,"state":if ready{"configured"}else{"unconfigured"}}));
+                result.push(json!({"id":id,"name":i.manifest.name,"version":i.manifest.version,"description":i.manifest.description,"schemes":i.manifest.schemes,"components":i.manifest.components,"state":if ready{"configured"}else{"unconfigured"}}));
             }
             Err(_) => result.push(json!({"id":id,"state":"invalid"})),
         }
@@ -418,7 +433,10 @@ fn install_package(dir: &Path, directory: &Path) -> Result<()> {
         hash_input.extend_from_slice(&bytes);
         files.push((file, bytes));
     }
-    let runtime = executable(&m.entrypoint[0], &package)?;
+    let runtime = match m.entrypoint.first() {
+        Some(entry) => executable(entry, &package)?,
+        None => PathBuf::new(),
+    };
     let config = settings(dir, &m)?;
     if settings_path(dir, &m.id)?.exists() {
         validate_config(&m, &config)?;
@@ -769,7 +787,8 @@ impl ShareManifest {
             "attachments require attachments capability"
         );
         ensure!(
-            !self.resources.is_empty()
+            (!self.resources.is_empty() || !self.components.is_empty())
+                && self.components.len() <= 256
                 && self.resources.len() <= 4096
                 && self.attachments.len() <= 4096
                 && self.panels.len() <= 64,
@@ -794,10 +813,42 @@ impl ShareManifest {
                 .validate()?;
             }
         }
+        ensure!(
+            self.components.is_empty() || self.requires.iter().any(|s| s == "components.v1"),
+            "components require components.v1"
+        );
+        for c in &self.components {
+            ensure!(
+                valid_id(&c.id) && ids.insert(&c.id),
+                "invalid or repeated component ID"
+            );
+            ensure!(!c.uri.is_empty(), "empty component URI");
+            c.display.validate()?;
+            ensure!(
+                c.display.member.is_none() || self.requires.iter().any(|s| s == "archive.members"),
+                "archive members require archive.members"
+            );
+            crate::scene::MeshLabel {
+                text: c.label.clone(),
+                anchor: None,
+            }
+            .validate()?;
+        }
         let resources: HashSet<_> = self.resources.iter().map(|r| &r.id).collect();
         let mut panels = HashSet::new();
         let mut used = HashSet::new();
         for p in &self.panels {
+            if let Some(group) = &p.group {
+                ensure!(
+                    self.requires.iter().any(|s| s == "layout.panel-groups"),
+                    "panel groups require layout.panel-groups"
+                );
+                crate::scene::MeshLabel {
+                    text: group.clone(),
+                    anchor: None,
+                }
+                .validate()?;
+            }
             ensure!(
                 !p.id.is_empty() && panels.insert(&p.id) && !p.members.is_empty(),
                 "invalid or duplicate panel"
@@ -894,33 +945,30 @@ pub async fn resolve(dir: &Path, uri: &str) -> Result<ShareManifest> {
     if let Some(error) = response.get("error") {
         // Do not forward arbitrary subprocess text (it could contain secrets).
         let code = error["data"]["code"].as_str().unwrap_or("PLUGIN_ERROR");
-        let message = match code {
-            "ORDER_NOT_FOUND" => "ORDER_NOT_FOUND: order does not exist",
-            "UPSTREAM_AUTH_FAILED" => "UPSTREAM_AUTH_FAILED: order API rejected plugin credentials",
-            "INVALID_INPUT" => "INVALID_INPUT: invalid order URL or UUID",
-            "NO_GEOMETRY" => {
-                "NO_GEOMETRY: order has no referenced geometry yet; retry after artifacts are generated"
-            }
-            "ORDER_FAILED_NO_GEOMETRY" => {
-                "ORDER_FAILED_NO_GEOMETRY: order failed and has no geometry to display; inspect the order logs"
-            }
-            "UPSTREAM_RATE_LIMITED" => "UPSTREAM_RATE_LIMITED: order API rate limited; retry later",
-            "INVALID_CONFIG" => "INVALID_CONFIG: check the Server plugin configuration",
-            "INVALID_MANIFEST" => {
-                "INVALID_MANIFEST: order API returned an invalid artifact manifest"
-            }
-            "LIMIT_EXCEEDED" => "LIMIT_EXCEEDED: order manifest exceeds supported limits",
-            "UPSTREAM_UNAVAILABLE" => "UPSTREAM_UNAVAILABLE: order API unavailable",
-            _ => "PLUGIN_ERROR: resolver failed",
+        let code = if code.len() <= 64
+            && !code.is_empty()
+            && code
+                .bytes()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == b'_')
+        {
+            code
+        } else {
+            "PLUGIN_ERROR"
         };
-        bail!("{message}");
+        bail!("{code}: plugin resolver failed; check plugin configuration and source availability");
     }
     let plan: ShareManifest =
         serde_json::from_value(response["result"].clone()).context("invalid share manifest")?;
     plan.validate()?;
-    for r in plan.resources.iter().chain(&plan.attachments) {
+    for uri in plan
+        .resources
+        .iter()
+        .chain(&plan.attachments)
+        .map(|r| &r.uri)
+        .chain(plan.components.iter().map(|c| &c.uri))
+    {
         let loc =
-            crate::oss::Location::parse(&r.uri).context("plugins may only return OSS resources")?;
+            crate::oss::Location::parse(uri).context("plugins may only return OSS resources")?;
         if config.get("oss_alias").is_some() {
             ensure!(
                 config["oss_alias"] == loc.alias && config["bucket"] == loc.bucket,
@@ -954,12 +1002,14 @@ mod tests {
             .collect();
         let panels: Vec<_> = (0..42)
             .map(|i| Panel {
+                group: None,
                 id: format!("p{i}"),
                 label: "Panel".into(),
                 members: resources.iter().map(|r| r.id.clone()).collect(),
             })
             .collect();
         let mut plan = ShareManifest {
+            components: vec![],
             schema_version: 1,
             requires: vec!["layout.panels".into()],
             title: None,
@@ -986,6 +1036,7 @@ mod tests {
         assert!(plan.validate().is_err());
         plan.requires = vec!["layout.panels".into()];
         plan.panels.push(Panel {
+            group: None,
             id: "p".into(),
             label: "Pair".into(),
             members: vec!["a".into(), "missing".into()],
@@ -1002,3 +1053,10 @@ mod tests {
         assert!(plan.validate().is_err());
     }
 }
+
+mod components;
+use components::validate_renderers;
+pub use components::{
+    ComponentResource, RendererBinding, RendererDefinition, bind_component, infer_component,
+    renderer_document,
+};

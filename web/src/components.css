@@ -1,0 +1,74 @@
+/* Scene chrome shares the Viewer tokens. Content surfaces live in world coordinates. */
+.component-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.component-layer > div { pointer-events: none; }
+.scene-surface { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-xs); color: var(--text); pointer-events: auto; }
+.scene-surface.selected { border-color: var(--accent); }
+.component-handle { display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid var(--line); cursor: grab; touch-action: none; }
+.component-handle:active { cursor: grabbing; }
+.component-handle > span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 15px; font-weight: 500; }
+.component-handle button, .component-dialog header button { border: 0; padding: 9px 12px; background: transparent; color: var(--text-secondary); font-size: 13px; border-radius: var(--radius-xs); cursor: pointer; }
+.component-handle button:hover, .component-dialog header button:hover { background: var(--surface-2); color: var(--text); }
+.component-body { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.component-content { width: 100%; height: 100%; overflow: auto; background: var(--canvas); }
+.component-content pre { padding: 16px 18px; margin: 0; width: max-content; min-width: 100%; font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; color: var(--text-secondary); }
+.component-content iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
+.component-content img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.component-enter { position: absolute; inset: 0; width: 100%; border: 0; background: transparent; cursor: zoom-in; touch-action: none; }
+.component-enter:active { transform: none; }
+.component-resize { position: absolute; bottom: 0; right: 0; width: 24px; height: 24px; border: 0; background: var(--surface-2); color: transparent; font-size: 0; cursor: nwse-resize; touch-action: none; }
+.component-resize::after { content: ''; position: absolute; right: 5px; bottom: 5px; width: 7px; height: 7px; border-right: 1px solid var(--text-secondary); border-bottom: 1px solid var(--text-secondary); }
+.component-error, .component-status { padding: 16px; font-size: 13px; color: var(--text-secondary); }
+.component-status { position: absolute; z-index: 1; margin: 0; background: var(--surface-1); }
+.component-status button, .component-status a { margin-left: 12px; color: var(--accent); }
+.component-group-labels { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+.component-group-labels span { position: absolute; top: 0; left: 0; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+.scene-tree { position: fixed; top: 66px; bottom: 24px; right: 14px; width: 224px; z-index: 18; display: flex; flex-direction: column; background: var(--surface-1); border-radius: var(--radius-sm); overflow: hidden; }
+.scene-tree header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 8px 16px; min-height: 44px; }
+.scene-tree h2 { font-size: 13px; font-weight: 500; margin: 0; }
+.scene-tree header button { min-width: 42px; min-height: 36px; border: 0; background: transparent; border-radius: var(--radius-xs); color: var(--text-tertiary); font-size: 11px; cursor: pointer; }
+.scene-tree-list { overflow: auto; padding: 0 8px 12px; overscroll-behavior: contain; }
+.scene-tree h3 { font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin: 14px 8px 6px; overflow-wrap: anywhere; }
+.scene-tree-row { display: flex; align-items: center; min-height: 38px; border-radius: var(--radius-xs); padding-right: 8px; }
+.scene-tree-row:has([aria-pressed="true"]) { background: var(--surface-2); }
+.scene-tree-row > button { flex: 1; min-width: 0; border: 0; padding: 10px 8px; background: transparent; text-align: left; font-size: 12px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: var(--element-opacity, 1); cursor: pointer; }
+.scene-tree-row > button[aria-pressed="true"] { color: var(--accent); }
+.scene-tree-row input { flex: none; width: 16px; height: 16px; margin: 8px; accent-color: var(--accent); cursor: pointer; }
+.tree-open .view-control { right: 252px; }
+.panel-open .scene-tree { right: 354px; }
+.component-dialog { width: calc(100vw - 64px); height: calc(100dvh - 64px); max-width: 1600px; max-height: none; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-1); color: var(--text); overflow: hidden; }
+.component-dialog::backdrop { background: oklch(0.08 0.006 255 / .7); }
+.component-dialog[open] { display: flex; flex-direction: column; }
+.component-dialog > header { display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 4px 10px 4px 18px; }
+.component-dialog h2 { flex: 1; min-width: 0; margin: 0; font-size: 14px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.component-expanded-content { flex: 1; min-height: 0; }
+.scene-surface.expanded { border: 0; border-radius: 0; opacity: 1 !important; }
+.scene-surface.expanded .component-handle, .scene-surface.expanded .component-enter, .scene-surface.expanded .component-resize { display: none; }
+.component-dialog:fullscreen { width: 100vw; height: 100dvh; max-width: none; border: 0; border-radius: 0; }
+@media (max-width: 1099px), (max-height: 599px) {
+  .scene-tree { bottom: auto; max-height: calc(100dvh - 170px); width: min(260px, calc(100vw - 28px)); }
+  .tree-open .view-control { right: 14px; }
+  .panel-open .scene-tree { display: none; }
+  .component-dialog { width: 100vw; height: 100dvh; max-width: none; margin: 0; border: 0; border-radius: 0; }
+  .component-dialog > header { padding-top: max(4px, env(safe-area-inset-top)); }
+}
+@media (min-width: 1100px) and (min-height: 600px) {
+  .tree-open .viewer { right: 238px; }
+  .tree-open .view-control { right: 14px; }
+}
+.surface-mode .component-layer { pointer-events: none; }
+.surface-mode .scene-surface { pointer-events: none; }
+.surface-mode .scene-tree { visibility: hidden; }
+@media (max-width: 759px) {
+  .scene-tree-row { min-height: 44px; }
+  .scene-tree-row input { margin: 14px 8px; }
+}
+/* The export viewport equals the saved canvas frame; no editor chrome consumes space. */
+.export-mode [data-viewer-chrome], .export-mode .topbar, .export-mode .control-panel,
+.export-mode .scene-tree, .export-mode .component-handle button, .export-mode .component-resize,
+.export-mode .component-enter, .export-mode .skip-link { display: none !important; }
+.export-mode .viewer { inset: 0 !important; }
+.export-mode .scene-surface.selected { border-color: var(--line); }
+
+/* External views leave the component's own 44px toolbar available. */
+.component-content:has(.component-external-frame) { position: relative; }
+.component-content .component-external-frame { position: absolute; top: 44px; left: 0; width: 100%; height: calc(100% - 44px); }

@@ -3,6 +3,17 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-09-20
+
+### Added
+
+- Arrange text, HTML, images, meshes and point contours in one scene with flat
+  groups, a responsive element list, and shared visibility and presentation controls.
+- Install plugin components with automatic file detection, isolated rendering and
+  pinned versions that keep existing shares working after plugin updates.
+- Export component scenes to PNG, including text and plugin content, using a
+  Server-side Chromium installation.
+
 ## [0.13.2] - 2026-09-20
 
 ### Fixed

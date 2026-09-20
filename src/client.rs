@@ -44,13 +44,13 @@ enum ClientCommand {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Share Mesh resources from arguments or a JSON manifest.
+    /// Share files as scene components through the registered Blind server.
     #[command(
-        long_about = "Share Mesh resources through the registered Blind server. Pass files directly for small scenes, or use --config FILE for large, persistent resource lists. The config owns the title, resources, per-resource labels, and group labels. Relative resource paths are resolved from the config file's directory.",
-        after_help = "DIRECT EXAMPLES:\n  blind share oss://prod/my-bucket/crown.ply --format json\n  blind share crown.ply --label '1=Crown'\n  blind share donor-a.ply donor-b.ply --label '1,2=Reference pair'\n\nCONFIG EXAMPLE (indices in groups.members are 1-based):\n  {\n    \"title\": \"Case review\",\n    \"resources\": [\n      {\"path\": \"meshes/crown.ply\", \"label\": \"Crown\"},\n      {\"path\": \"meshes/donor-a.ply\"},\n      {\"path\": \"meshes/donor-b.ply\"}\n    ],\n    \"groups\": [\n      {\"label\": \"Reference teeth\", \"members\": [2, 3]}\n    ]\n  }\n\nCONFIG CONTRACT:\n  - resources is required and must contain at least one {path,label?} object.\n  - paths may be absolute, relative to the config file, or oss://ALIAS/BUCKET/KEY; PLY, STL, OBJ, and PTS are supported.\n  - labels contain 1-120 characters. A group needs at least two unique in-range members.\n  - groups is optional and limited to 64 entries. The config file is limited to 4 MiB.\n  - unknown fields are errors, so misspelled keys never pass silently.\n\n--config conflicts with positional Meshes, --title, and --label. --host, --stateless, --ttl, and --format still control delivery/output."
+        long_about = "Share files with automatic display selection. PLY/STL/OBJ → mesh, PTS → points, logs/text/ordinary JSON → text, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
+        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, html, image or plugin:name. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
     )]
     Share {
-        /// Mesh paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
+        /// File paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
         #[arg(required_unless_present = "config", conflicts_with = "config")]
         meshes: Vec<PathBuf>,
         /// JSON manifest for a large resource set; relative paths use its directory.
@@ -70,6 +70,13 @@ enum ClientCommand {
             conflicts_with = "config"
         )]
         labels: Vec<String>,
+        /// Override automatic display selection (e.g. 2=cyclops:trace); one file also accepts just cyclops:trace.
+        #[arg(
+            long = "component",
+            value_name = "INDEX=TYPE",
+            conflicts_with = "config"
+        )]
+        components: Vec<String>,
         /// Public Blind origin used in generated links (for example https://blind.example.com).
         #[arg(long)]
         host: Option<String>,
@@ -253,6 +260,7 @@ pub async fn run() -> Result<()> {
             config,
             title,
             labels,
+            components,
             host,
             stateless,
             ttl,
@@ -263,6 +271,7 @@ pub async fn run() -> Result<()> {
                 config,
                 title,
                 labels,
+                components,
                 ShareOptions {
                     host,
                     stateless,
@@ -549,8 +558,14 @@ struct ShareConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShareResource {
+    #[serde(default)]
+    member: Option<String>,
     path: PathBuf,
     label: Option<String>,
+    component: Option<crate::component::ComponentKind>,
+    group: Option<String>,
+    position: Option<[f32; 3]>,
+    size: Option<[f32; 2]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -567,6 +582,7 @@ pub struct ParsedLabels {
 }
 
 struct ShareInput {
+    display: Vec<crate::component::DisplayOptions>,
     manifest: Option<crate::plugin::ShareManifest>,
     meshes: Vec<PathBuf>,
     title: Option<String>,
@@ -607,6 +623,7 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
             crate::oss::Location::parse(&attachment.uri)?;
         }
         return Ok(ShareInput {
+            display: Vec::new(),
             meshes: manifest
                 .resources
                 .iter()
@@ -627,8 +644,18 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
     }
     let base = config_path.parent().context("share config has no parent")?;
     let mut meshes = Vec::with_capacity(config.resources.len());
+    let mut display = Vec::with_capacity(config.resources.len());
     let mut mesh_labels = Vec::with_capacity(config.resources.len());
     for (index, resource) in config.resources.into_iter().enumerate() {
+        let options = crate::component::DisplayOptions {
+            component: resource.component,
+            member: resource.member,
+            group: resource.group,
+            position: resource.position,
+            size: resource.size,
+        };
+        options.validate()?;
+        display.push(options);
         if resource.path.as_os_str().is_empty() {
             bail!("resources[{}].path must not be empty", index + 1);
         }
@@ -695,6 +722,7 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
         );
     }
     Ok(ShareInput {
+        display,
         manifest: None,
         meshes,
         title: config.title,
@@ -710,6 +738,7 @@ async fn share(
     config: Option<PathBuf>,
     title: Option<String>,
     labels: Vec<String>,
+    components: Vec<String>,
     options: ShareOptions,
 ) -> Result<()> {
     let ShareOptions {
@@ -723,7 +752,9 @@ async fn share(
         Some(path) => read_share_config(&path)?,
         None => {
             let labels = parse_labels(&labels, meshes.len())?;
+            let display = parse_components(&components, meshes.len())?;
             ShareInput {
+                display,
                 manifest: None,
                 meshes,
                 title,
@@ -739,7 +770,11 @@ async fn share(
         anyhow::ensure!(
             input.meshes.len() == 1
                 && input.labels.meshes.iter().all(Option::is_none)
-                && input.labels.groups.is_empty(),
+                && input.labels.groups.is_empty()
+                && input.display.iter().all(|o| o.component.is_none()
+                    && o.group.is_none()
+                    && o.position.is_none()
+                    && o.size.is_none()),
             "a plugin share accepts one URI and no --label overrides"
         );
     }
@@ -770,7 +805,7 @@ async fn share(
             paths.len()
         );
     }
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless,"ttl_days":ttl_days}))).await?;
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"display":input.display,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless,"ttl_days":ttl_days}))).await?;
     let confirmed_ttl = payload["ttl_days"].as_u64();
     if confirmed_ttl.is_some_and(|days| days != u64::from(ttl_days))
         || (confirmed_ttl.is_none() && (ttl_days != crate::scene::DEFAULT_TTL_DAYS || stateless))
@@ -804,6 +839,33 @@ async fn share(
         ),
     }
     Ok(())
+}
+
+fn parse_components(
+    values: &[String],
+    count: usize,
+) -> Result<Vec<crate::component::DisplayOptions>> {
+    let mut display = vec![crate::component::DisplayOptions::default(); count];
+    let mut seen = std::collections::HashSet::new();
+    for value in values {
+        let (index, kind) = if let Some((index, kind)) = value.split_once('=') {
+            (index.parse::<usize>()?, kind)
+        } else if count == 1 {
+            (1, value.as_str())
+        } else {
+            bail!("use --component INDEX=TYPE for multiple files");
+        };
+        anyhow::ensure!(index > 0 && index <= count, "component index out of range");
+        anyhow::ensure!(
+            seen.insert(index),
+            "component specified twice for resource {index}"
+        );
+        display[index - 1].component = Some(
+            serde_json::from_value(serde_json::Value::String(kind.into()))
+                .context("component must be mesh, points, text, html, image or plugin:name")?,
+        );
+    }
+    Ok(display)
 }
 
 pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {
