@@ -70,4 +70,30 @@ Phone mesh sheets use content height up to 52dvh. Style sheets snap to 44dvh and
 - "Add an icon action using a 42px hit area, 10px radius, graphite surface, and 0.96 press scale."
 - "Add a mobile sheet using 44dvh and 82dvh detents, 16px top radius, no blur, and a 48px drag header."
 - "Add a selected row using only an accent dot and surface lightness step, without a decorative side rail."
-- "Add a screen-markup action using a pointer-blocking canvas, 4.25px round ink, a 7px dark separation edge, four high-contrast colors, and a compact two-row layout below 360px."
+- "Add a screen-markup action using a pointer-blocking canvas, 3.2px round ink, a subtle 3.8px separation edge, four high-contrast colors, and a compact two-row layout below 360px."
+
+## Surface annotation interaction
+
+The annotation action opens one selection, point, line and screen-brush dock.
+Keep two persistent tool rows; reveal the color palette on demand and name/line
+controls only for a selected mark. Newly created points and completed lines stay
+selected so their name field remains editable. Never autofocus a phone keyboard.
+Do not expose a target-Mesh picker: the nearest visible hit determines ownership.
+Release a dragged stroke to finish it; the next stroke naturally creates another.
+Only click-to-connect drafts need an explicit Finish Line action.
+
+The separate annotation list covers all visible Meshes and screen strokes. Canvas
+numbers match list rows. Open the list by default when a shared scene contains
+annotations, without entering drawing mode. Selecting a row highlights the mark and brings obscured
+surface marks into view. A compact sheet above the dock on phones and a right
+panel on desktop keep the mesh primary. All actions retain 42px touch targets.
+Opening tools and lists never resizes the scene canvas. Details and Info move
+beside the open annotation list rather than hiding the list or canvas badges.
+
+Use the shared 3.2px ink width for screen and surface lines. Surface ribbons lie
+on local tangent planes, avoiding clipping on slopes. Do not add tube lighting,
+gloss, glow or heavy dark outlines. Only selections show pale emphasis and handles.
+Smooth curves are sampled onto the visible surface; invalid smoothing preserves
+the valid path. Never refit a shared path on load. Camera navigation is explicit;
+interrupted touches roll back the current surface gesture. Screen strokes retain
+their view-dependent behavior, with shared undo history cleared of obsolete views.

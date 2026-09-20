@@ -3,6 +3,9 @@ use std::path::Path;
 fn main() {
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/src");
+    println!("cargo:rerun-if-changed=web/public");
+    println!("cargo:rerun-if-changed=web/dist");
+    println!("cargo:rerun-if-changed=assets/fonts");
     println!("cargo:rerun-if-changed=web/package.json");
     println!("cargo:rerun-if-changed=web/package-lock.json");
     println!("cargo:rerun-if-changed=shaders");

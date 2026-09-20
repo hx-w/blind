@@ -19,6 +19,21 @@ export interface ScreenStroke {
   points: Array<[number, number]>;
 }
 
+export type Vec3 = [number, number, number];
+export interface SurfaceAnnotation {
+  id: string;
+  mesh: number;
+  revision: string;
+  kind: 'point' | 'line';
+  label: string;
+  color: string;
+  visible: boolean;
+  closed: boolean;
+  points: Vec3[];
+  normals: Vec3[];
+  controls: number[];
+}
+
 export interface ViewState {
   selected: number;
   shading: Shading;
@@ -28,6 +43,7 @@ export interface ViewState {
   frame: { width: number; height: number };
   camera: CameraState | null;
   strokes: ScreenStroke[];
+  annotations?: SurfaceAnnotation[];
 }
 
 export interface PublicMesh {

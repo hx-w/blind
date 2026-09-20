@@ -10,6 +10,8 @@ use wgpu::util::DeviceExt;
 
 use crate::{
     mesh::Geometry,
+    render_labels::{RenderLabel, overlay_labels},
+    render_occlusion::Occluders,
     scene::{Background, Projection, SceneDescriptor, ScreenStroke, Shading, parse_hex_color},
 };
 
@@ -385,6 +387,14 @@ impl Renderer {
                 })
         });
 
+        let annotation_buffer = (!input.annotation_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Surface annotations"),
+                    contents: bytemuck::cast_slice(&input.annotation_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let bytes_per_row = width * 4;
         let padded_bytes_per_row = align_to(bytes_per_row, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -451,6 +461,12 @@ impl Renderer {
                 pass.set_vertex_buffer(0, buffer.slice(..));
                 pass.draw(0..input.line_vertices.len() as u32, 0..1);
             }
+            if let Some(buffer) = &annotation_buffer {
+                pass.set_bind_group(0, &bind_group, &[0]);
+                pass.set_pipeline(&self.translucent_triangle_pipeline);
+                pass.set_vertex_buffer(0, buffer.slice(..));
+                pass.draw(0..input.annotation_vertices.len() as u32, 0..1);
+            }
         }
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
@@ -500,6 +516,7 @@ impl Renderer {
             input.width,
             input.height,
         )?;
+        overlay_labels(&mut image, &input.labels, input.light_background)?;
         let mut encoded = Cursor::new(Vec::new());
         image.write_to(&mut encoded, ImageFormat::Png)?;
         Ok(encoded.into_inner())
@@ -509,6 +526,9 @@ impl Renderer {
 struct RenderInput {
     batches: Vec<RenderBatch>,
     line_vertices: Vec<Vertex>,
+    annotation_vertices: Vec<Vertex>,
+    labels: Vec<RenderLabel>,
+    light_background: bool,
     width: u32,
     height: u32,
     view_projection: Mat4,
@@ -613,6 +633,28 @@ fn load_scene_geometry_bytes(
         bounds_max = bounds_max.max(Vec3::from_array(max));
         loaded.push((layer, mesh, geometry, min, max));
     }
+    let occluders: Vec<_> = if scene.state.annotations.iter().any(|mark| mark.visible) {
+        loaded
+            .iter()
+            .filter(|(_, mesh, _, _, _)| mesh.opacity > 0.0)
+            .flat_map(|(_, _, geometry, _, _)| {
+                geometry.indices.chunks_exact(3).map(|tri| {
+                    [
+                        Vec3::from_array(geometry.positions[tri[0] as usize]),
+                        Vec3::from_array(geometry.positions[tri[1] as usize]),
+                        Vec3::from_array(geometry.positions[tri[2] as usize]),
+                    ]
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let occluders = Occluders::new(occluders);
+    let mesh_bounds: Vec<_> = loaded
+        .iter()
+        .map(|(i, _, _, min, max)| (*i, Vec3::from_array(*min), Vec3::from_array(*max)))
+        .collect();
     let mut batches = Vec::new();
     let mut line_vertices = Vec::new();
     let wire = scene.state.shading == Shading::Wire;
@@ -751,8 +793,18 @@ fn load_scene_geometry_bytes(
         Background::Dark => clear_color(&material.background_dark)?,
         Background::Light => clear_color(&material.background_light)?,
     };
+    let labels = scene_labels(scene, projection * view, position, &occluders, &mesh_bounds)?;
     Ok(RenderInput {
+        labels,
+        light_background: scene.state.background == Background::Light,
         batches,
+        annotation_vertices: surface_annotation_vertices(
+            scene,
+            projection * view,
+            position,
+            &occluders,
+            material.depth_bias_step,
+        )?,
         line_vertices,
         width: frame.width,
         height: frame.height,
@@ -764,6 +816,264 @@ fn load_scene_geometry_bytes(
         background,
         strokes: scene.state.strokes.clone(),
     })
+}
+
+/// Mirrors the screen-sized, depth-tested ink in web/src/surface-render.ts.
+fn scene_labels(
+    scene: &SceneDescriptor,
+    vp: Mat4,
+    camera: Vec3,
+    occluders: &Occluders,
+    bounds: &[(usize, Vec3, Vec3)],
+) -> Result<Vec<RenderLabel>> {
+    let mut labels = Vec::new();
+    let inverse = vp.inverse();
+    let project = |point: Vec3| -> Option<[f32; 2]> {
+        let p = vp.project_point3(point);
+        (p.is_finite() && p.z > 0.0 && p.z < 1.0 && p.x.abs() <= 1.0 && p.y.abs() <= 1.0)
+            .then_some([(p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5])
+    };
+    let color = |hex: &str| -> Result<[u8; 3]> {
+        Ok(parse_hex_color(hex)
+            .context("invalid label color")?
+            .map(|v| (v * 255.0).round() as u8))
+    };
+    let visible_mesh = |index: usize| {
+        scene
+            .meshes
+            .get(index)
+            .is_some_and(|m| m.visible && m.opacity > 0.0)
+    };
+    let mut number = 0;
+    for mark in &scene.state.annotations {
+        if !visible_mesh(mark.mesh) {
+            continue;
+        }
+        number += 1;
+        if !mark.visible {
+            continue;
+        }
+        // Try a bounded set of representatives when the midpoint is obscured.
+        let candidates = annotation_label_candidates(mark.points.len());
+        for index in candidates {
+            let p = mark.points[index];
+            let point = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+            let Some(anchor) = project(point) else {
+                continue;
+            };
+            let projected = vp.project_point3(point);
+            let origin = if scene.state.projection == Projection::Orthographic {
+                inverse.project_point3(Vec3::new(projected.x, projected.y, 0.0))
+            } else {
+                camera
+            };
+            if !surface_anchor_visible(origin, point, occluders) {
+                continue;
+            }
+            let name = if mark.label.trim().is_empty() {
+                "未命名标记"
+            } else {
+                &mark.label
+            };
+            labels.push(RenderLabel {
+                anchor,
+                text: format!("{number} · {name}"),
+                color: color(&mark.color)?,
+            });
+            break;
+        }
+    }
+    for (i, stroke) in scene.state.strokes.iter().enumerate() {
+        if let Some(p) = stroke.points.get(stroke.points.len() / 2) {
+            let aspect = scene.state.frame.width as f32 / scene.state.frame.height.max(1) as f32;
+            let anchor = [
+                ((p[0] * 2.0 - 1.0) * stroke.aspect / aspect + 1.0) * 0.5,
+                p[1],
+            ];
+            if anchor.iter().all(|v| (0.0..=1.0).contains(v)) {
+                labels.push(RenderLabel {
+                    anchor,
+                    text: format!("{} · 画笔 {}", number + i + 1, i + 1),
+                    color: color(&stroke.color)?,
+                });
+            }
+        }
+    }
+    for &(index, min, max) in bounds {
+        let mesh = &scene.meshes[index];
+        if mesh.opacity <= 0.0 {
+            continue;
+        }
+        let Some(label) = &mesh.label else {
+            continue;
+        };
+        let point = label
+            .anchor
+            .map(Vec3::from_array)
+            .unwrap_or((min + max) * 0.5);
+        if let Some(anchor) = project(point) {
+            labels.push(RenderLabel {
+                anchor,
+                text: label.text.clone(),
+                color: color(&mesh.color)?,
+            });
+        }
+    }
+    for group in &scene.label_groups {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for &(index, a, b) in bounds {
+            if group.meshes.contains(&index) && visible_mesh(index) {
+                min = min.min(a);
+                max = max.max(b);
+            }
+        }
+        if let Some(anchor) = project((min + max) * 0.5) {
+            labels.push(RenderLabel {
+                anchor,
+                text: group.text.clone(),
+                color: [143, 169, 201],
+            });
+        }
+    }
+    Ok(labels)
+}
+
+fn surface_annotation_vertices(
+    scene: &SceneDescriptor,
+    vp: Mat4,
+    camera_position: Vec3,
+    occluders: &Occluders,
+    bias: f32,
+) -> Result<Vec<Vertex>> {
+    let mut vertices = Vec::new();
+    let ink: ScreenInk = serde_json::from_str(include_str!("../shaders/stroke.json"))?;
+    let inverse = vp.inverse();
+    let width = scene.state.frame.width.max(1) as f32;
+    let height = scene.state.frame.height.max(1) as f32;
+    for mark in &scene.state.annotations {
+        if !mark.visible
+            || !scene
+                .meshes
+                .get(mark.mesh)
+                .is_some_and(|m| m.visible && m.opacity > 0.0)
+        {
+            continue;
+        }
+        let color = parse_color(&mark.color, 1.0)?;
+        let points: Vec<_> = mark
+            .points
+            .iter()
+            .map(|p| vp.project_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)))
+            .collect();
+        let depth_bias = (mark.mesh as f32 + 0.75) * bias;
+        let vertex = |p: Vec3, x: f32, y: f32, color: [f32; 4], normal: Option<Vec3>| {
+            let offset = p + Vec3::new(x * 2.0 / width, y * 2.0 / height, 0.0);
+            let mut q = inverse.project_point3(offset);
+            if let Some(normal) = normal {
+                let origin = inverse.project_point3(Vec3::new(offset.x, offset.y, 0.0));
+                let direction = (q - origin).normalize_or_zero();
+                let denominator = direction.dot(normal);
+                if denominator.abs() > 0.08 {
+                    let anchor = inverse.project_point3(p);
+                    q += direction * (anchor - q).dot(normal) / denominator;
+                }
+            }
+            Vertex {
+                position: q.to_array(),
+                normal: [0.0; 3],
+                color,
+                depth_bias,
+            }
+        };
+        let disk =
+            |out: &mut Vec<Vertex>, p: Vec3, radius: f32, color: [f32; 4], normal: Option<Vec3>| {
+                for i in 0..24 {
+                    let a = i as f32 * std::f32::consts::PI / 12.0;
+                    let b = (i + 1) as f32 * std::f32::consts::PI / 12.0;
+                    out.extend([
+                        vertex(p, 0.0, 0.0, color, normal),
+                        vertex(p, a.cos() * radius, a.sin() * radius, color, normal),
+                        vertex(p, b.cos() * radius, b.sin() * radius, color, normal),
+                    ]);
+                }
+            };
+        let visible = |p: Vec3| p.z > 0.0 && p.z < 1.0;
+        if mark.kind == crate::scene::SurfaceAnnotationKind::Point {
+            if let Some(&p) = points.first().filter(|p| visible(**p)) {
+                let sample = mark.points[0];
+                let anchor = Vec3::new(sample[0] as f32, sample[1] as f32, sample[2] as f32);
+                // Orthographic rays are parallel; unproject the anchor on the near plane.
+                let ray_origin = if scene.state.projection == Projection::Orthographic {
+                    inverse.project_point3(Vec3::new(p.x, p.y, 0.0))
+                } else {
+                    camera_position
+                };
+                if !surface_anchor_visible(ray_origin, anchor, occluders) {
+                    continue;
+                }
+                let p = Vec3::new(p.x, p.y, 0.001 + depth_bias);
+                disk(&mut vertices, p, 4.5, color, None);
+            }
+        } else {
+            for (index, pair) in points.windows(2).enumerate() {
+                let normal = |i: usize| {
+                    Some(Vec3::new(
+                        mark.normals[i][0] as f32,
+                        mark.normals[i][1] as f32,
+                        mark.normals[i][2] as f32,
+                    ))
+                };
+                let a = pair[0];
+                let b = pair[1];
+                if !visible(a) || !visible(b) {
+                    continue;
+                }
+                let dx = (b.x - a.x) * width;
+                let dy = (b.y - a.y) * height;
+                let length = dx.hypot(dy);
+                if length <= f32::EPSILON {
+                    continue;
+                }
+                let x = -dy / length * ink.ink_width / 2.0;
+                let y = dx / length * ink.ink_width / 2.0;
+                vertices.extend([
+                    vertex(a, x, y, color, normal(index)),
+                    vertex(a, -x, -y, color, normal(index)),
+                    vertex(b, x, y, color, normal(index + 1)),
+                    vertex(b, x, y, color, normal(index + 1)),
+                    vertex(a, -x, -y, color, normal(index)),
+                    vertex(b, -x, -y, color, normal(index + 1)),
+                ]);
+                disk(&mut vertices, a, ink.ink_width / 2.0, color, normal(index));
+                disk(
+                    &mut vertices,
+                    b,
+                    ink.ink_width / 2.0,
+                    color,
+                    normal(index + 1),
+                );
+            }
+        }
+    }
+    Ok(vertices)
+}
+
+fn annotation_label_candidates(length: usize) -> impl Iterator<Item = usize> {
+    // A fixed query budget independent of untrusted control/sample counts.
+    [
+        length / 2,
+        0,
+        length.saturating_sub(1),
+        length / 4,
+        length * 3 / 4,
+    ]
+    .into_iter()
+    .filter(move |&i| i < length)
+}
+
+fn surface_anchor_visible(origin: Vec3, point: Vec3, occluders: &Occluders) -> bool {
+    occluders.visible(origin, point)
 }
 
 /// Mirrors `MeshViewer.updateClipping` in web/src/viewer.ts; change both in lockstep.
@@ -1076,6 +1386,61 @@ mod tests {
             .unwrap();
         let image = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
         assert_eq!((image.width(), image.height()), (64, 64));
+    }
+
+    #[tokio::test]
+    async fn image_labels_follow_annotation_names_visibility_and_occlusion() {
+        use crate::scene::{CameraState, SurfaceAnnotation, SurfaceAnnotationKind};
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tetra.ply");
+        let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
+        scene.state.axes = false;
+        scene.state.frame.width = 390;
+        scene.state.frame.height = 844;
+        scene.state.camera = Some(CameraState {
+            position: [0.3, 0.3, 3.0],
+            target: [0.3, 0.3, 0.0],
+            up: [0.0, 1.0, 0.0],
+            fov: 34.0,
+            zoom: 1.0,
+            orthographic_height: 2.0,
+        });
+        scene.state.annotations.push(SurfaceAnnotation {
+            id: "point".into(),
+            mesh: 0,
+            revision: scene.meshes[0].revision.clone(),
+            kind: SurfaceAnnotationKind::Point,
+            label: "检查位置 A".into(),
+            color: "#ff6b5e".into(),
+            visible: true,
+            closed: false,
+            points: vec![[0.3, 0.3, 0.4]],
+            normals: vec![[0.57735; 3]],
+            controls: vec![0],
+        });
+        let material: MatteShader =
+            serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
+        let input = load_scene_geometry(&scene, &material).unwrap();
+        assert_eq!(input.labels.len(), 1);
+        assert_eq!(input.labels[0].text, "1 · 检查位置 A");
+        scene.state.annotations[0].visible = false;
+        let hidden = load_scene_geometry(&scene, &material).unwrap();
+        assert!(hidden.labels.is_empty());
+        assert!(hidden.annotation_vertices.is_empty());
+        scene.state.annotations[0].visible = true;
+        scene.meshes[0].opacity = 0.0;
+        let transparent = load_scene_geometry(&scene, &material).unwrap();
+        assert!(transparent.labels.is_empty());
+        assert!(transparent.annotation_vertices.is_empty());
+        scene.meshes[0].opacity = 1.0;
+        scene.state.annotations[0].points[0] = [0.3, 0.3, 0.0];
+        let back = load_scene_geometry(&scene, &material).unwrap();
+        assert!(back.labels.is_empty());
+        assert!(back.annotation_vertices.is_empty());
+        assert_eq!(
+            annotation_label_candidates(4096).count(),
+            5,
+            "label visibility queries have a fixed budget"
+        );
     }
 
     #[test]

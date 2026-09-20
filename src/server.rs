@@ -288,7 +288,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             "/api/v1/scenes/{token}/meshes/{index}/lod",
             get(get_mesh_lod),
         )
-        .route("/api/v1/scenes/{token}/share", post(reshare))
+        .route(
+            "/api/v1/scenes/{token}/share",
+            post(reshare).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/i/{*token}", get(render_image))
         .route("/s/{token}", get(view_scene))
         .route("/v/{token}", get(view_scene))

@@ -6,6 +6,8 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { apiError, type MeshLabelGroup, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
 import { createObjectMaterial, updateObjectMaterial } from './material';
 import { MeshLabels } from './labels';
+import { SurfaceInk } from './surface-render';
+import type { SurfaceAnnotation, Vec3 } from './api';
 import { mapConcurrent } from './load-queue';
 import shader from '../../shaders/matte.json';
 
@@ -48,6 +50,10 @@ export interface MeshLoadProgress {
 
 export class MeshViewer {
   private readonly scene = new THREE.Scene();
+  private readonly surfaceInk = new SurfaceInk();
+  private annotationSelection?: string;
+  private annotationPreview?: Vec3;
+  private interactionEnabled = true;
   private readonly renderer: THREE.WebGLRenderer;
   private readonly labels: MeshLabels;
   private readonly perspective = new THREE.PerspectiveCamera(shader.camera.fov_degrees, 1, 0.001, 1_000_000);
@@ -89,7 +95,7 @@ export class MeshViewer {
     this.controls.minDistance = 0.0001;
     this.controls.maxDistance = 1_000_000;
     setHelperOpacity(this.axes, 0.78);
-    this.scene.add(this.axes);
+    this.scene.add(this.axes, this.surfaceInk.object);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(root);
@@ -105,6 +111,7 @@ export class MeshViewer {
     this.labelGroups = scene.label_groups ?? [];
     this.state = structuredClone(scene.state);
     this.state.strokes ??= [];
+    this.state.annotations ??= [];
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
     let completed = 0;
     let rawFallbacks = 0;
@@ -113,7 +120,7 @@ export class MeshViewer {
     this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
     const loaded = await mapConcurrent(scene.meshes, LOAD_CONCURRENCY, async (info) => {
       let result;
-      const requestedQuality = info.quality ?? 'lod';
+      const requestedQuality = this.annotations.some(mark => mark.mesh === scene.meshes.indexOf(info)) ? 'raw' : info.quality ?? 'lod';
       try {
         result = { quality: requestedQuality, asset: await loadObject(info, requestedQuality) };
       } catch (error) {
@@ -164,7 +171,49 @@ export class MeshViewer {
   get modelInfos(): ViewerMesh[] { return this.models.map((model) => model.info); }
   get currentState(): ViewState { return this.exportState(); }
 
-  setInteractionEnabled(enabled: boolean): void { this.controls.enabled = enabled; }
+  setInteractionEnabled(enabled: boolean): void { this.controls.enabled = enabled; this.interactionEnabled = enabled; this.pointerStart = null; }
+  get annotations(): SurfaceAnnotation[] { return this.state?.annotations ?? []; }
+  setAnnotations(marks: SurfaceAnnotation[], selected?: string, preview?: Vec3): void {
+    this.state.annotations = marks; this.annotationSelection = selected; this.annotationPreview = preview; this.dirty = true;
+  }
+  hasSurface(index: number): boolean {
+    let found = false;
+    if (this.models[index]?.info.format === 'pts') return false;
+    this.models[index]?.object.traverse(child => { if (child instanceof THREE.Mesh && child.geometry.getAttribute('position')?.count) found = true; });
+    return found;
+  }
+  projectSurface(point: Vec3): {x: number; y: number; visible: boolean} {
+    const p = new THREE.Vector3(...point).project(this.camera), rect = this.root.getBoundingClientRect();
+    return { x: rect.left + (p.x + 1) * rect.width / 2, y: rect.top + (1 - p.y) * rect.height / 2, visible: p.z > -1 && p.z < 1 };
+  }
+  pickSurface(x: number, y: number, target?: number): {point: Vec3; normal: Vec3; mesh: number} | null {
+    const rect = this.root.getBoundingClientRect();
+    this.pointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = this.raycaster.intersectObjects(this.models.filter(m => m.info.visible && m.info.opacity > 0).map(m => m.object), true)[0];
+    if (!hit || (target !== undefined && hit.object.userData.modelIndex !== target) || !(hit.object instanceof THREE.Mesh) || !hit.face) return null;
+    return {mesh: hit.object.userData.modelIndex, point: hit.point.toArray() as Vec3, normal: hit.face.normal.clone().transformDirection(hit.object.matrixWorld).toArray() as Vec3};
+  }
+  surfacePointVisible(point: Vec3, target: number): boolean {
+    const p = this.projectSurface(point); if (!p.visible) return false;
+    const hit = this.pickSurface(p.x, p.y, target); if (!hit) return false;
+    const tolerance = this.models[target].bounds.getSize(new THREE.Vector3()).length() * 0.002;
+    return new THREE.Vector3(...hit.point).distanceTo(new THREE.Vector3(...point)) <= tolerance;
+  }
+  focusAnnotation(mark: SurfaceAnnotation): void {
+    const i = Math.floor(mark.points.length / 2), point = mark.points[i];
+    const screen = this.projectSurface(point), rect = this.root.getBoundingClientRect();
+    if (this.surfacePointVisible(point, mark.mesh) && screen.x > rect.left+40 && screen.x < rect.right-40 && screen.y > rect.top+90 && screen.y < rect.bottom-280) return;
+    this.onViewChangeStart?.();
+    const anchor = new THREE.Vector3(...point), normal = new THREE.Vector3(...mark.normals[i]).normalize();
+    const distance = Math.max(this.camera.position.distanceTo(this.controls.target), this.surfaceScale(mark.mesh));
+    this.camera.position.copy(anchor).addScaledVector(normal, distance);
+    this.controls.target.copy(anchor);
+    if (Math.abs(normal.dot(this.camera.up)) > 0.95) this.camera.up.set(0,0,1);
+    this.syncCamera();
+  }
+  surfaceScale(index: number): number { return this.models[index]?.bounds.getSize(new THREE.Vector3()).length() ?? 1; }
+
   // Takes ownership of the array handed over by MarkupCanvas.exportStrokes().
   setStrokes(strokes: ScreenStroke[]): void { this.state.strokes = strokes; }
 
@@ -184,7 +233,14 @@ export class MeshViewer {
     this.onModelChange?.();
   }
 
+  private readonly qualityLoads = new Map<number, Promise<void>>();
   async setQuality(index: number, quality: MeshQuality): Promise<void> {
+    while(this.qualityLoads.has(index)) await this.qualityLoads.get(index)!.catch(()=>{});
+    const request=this.loadQuality(index,quality); this.qualityLoads.set(index,request);
+    try {await request;} finally {if(this.qualityLoads.get(index)===request)this.qualityLoads.delete(index);}
+  }
+  private async loadQuality(index: number, quality: MeshQuality): Promise<void> {
+    if (quality === 'lod' && this.annotations.some(mark => mark.mesh === index)) throw new Error('含表面标记的 Mesh 保持 Raw，以保证位置一致');
     const model = this.models[index];
     if (!model || model.info.quality === quality || model.info.loading) return;
     model.info.loading = true;
@@ -192,6 +248,9 @@ export class MeshViewer {
     this.onModelChange?.();
     try {
       const loaded = await loadObject(model.info, quality);
+      if(quality==='lod' && this.annotations.some(mark=>mark.mesh===index)) {
+        disposeObject(loaded.object); throw new Error('含表面标记的 Mesh 保持 Raw，以保证位置一致');
+      }
       this.prepareObject(loaded.object, index, model.info);
       loaded.object.visible = model.info.visible;
       this.scene.add(loaded.object);
@@ -221,7 +280,7 @@ export class MeshViewer {
   }
 
   refreshLabels(): void { this.labels.invalidateLayout(); this.dirty = true; }
-  setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); } }
+  setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); this.onModelChange?.(); } }
   setShading(shading: ViewState['shading']): void { this.state.shading = shading; this.applyMaterials(); }
   setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.dirty = true; }
   setBackground(background: ViewState['background']): void {
@@ -394,6 +453,7 @@ export class MeshViewer {
         orthographic_height: this.orthographic.userData.height ?? 2,
       },
       strokes: this.state.strokes,
+      annotations: this.annotations,
     };
   }
 
@@ -475,7 +535,7 @@ export class MeshViewer {
   }
   private pointerDown = (event: PointerEvent): void => { this.pointerStart = { x: event.clientX, y: event.clientY }; };
   private pointerUp = (event: PointerEvent): void => {
-    if (!this.pointerStart || Math.hypot(event.clientX - this.pointerStart.x, event.clientY - this.pointerStart.y) > 6) return;
+    if (!this.interactionEnabled || !this.pointerStart || Math.hypot(event.clientX - this.pointerStart.x, event.clientY - this.pointerStart.y) > 6) return;
     const rect = this.renderer.domElement.getBoundingClientRect();
     if (this.labels.focusAt(event.clientX, event.clientY, () => {
       // Picking triangles cannot distinguish a wireframe hole from a surface.
@@ -505,6 +565,7 @@ export class MeshViewer {
       // Resizing clears the drawing buffer, even at the same size. Do it only
       // when needed, immediately before rendering, never in ResizeObserver.
       if (this.rendererSize.x !== width || this.rendererSize.y !== height) this.renderer.setSize(width, height, false);
+      this.surfaceInk.update(this.annotations, this.camera, width, height, index => !!this.models[index]?.info.visible && this.models[index].info.opacity > 0, (point, index) => this.surfacePointVisible(point, index), this.annotationSelection, this.annotationPreview);
       this.renderer.render(this.scene, this.camera);
       this.labels.render(this.models, this.labelGroups, this.camera, this.selected);
       this.dirty = false;

@@ -49,6 +49,22 @@ It can cross empty space and remaps across viewport aspect ratios. The first
 rotate, pan, zoom, Fit, canonical-view, or projection action hides all marks in
 that browser session; reloading the immutable link restores the snapshot.
 
+Surface marks are stored in `state.annotations`, separately from screen strokes.
+Each entry has an `id`, zero-based `mesh`, source `revision`, `kind` (`point` or
+`line`), `label`, `color`, `visible`, `closed`, frozen 3D `points`, parallel surface
+`normals`, and ordered `controls` indexing the samples. Coordinates retain f64
+round-trip precision. A scene permits 64 marks and 16,384 samples, with at most
+4,096 samples per mark. Invalid indices, revisions, duplicate IDs, non-finite
+coordinates, invalid normals and incomplete lines are rejected before updating.
+The reshare body is limited to 8 MiB.
+
+Surface marks survive camera changes and reshares without recomputing their
+geometry. Their source Mesh is kept at Raw quality. Marks are hidden with the
+Mesh and occluded by geometry; PNG exports use the same stored samples. Editing
+handles and names are editor UI and are not included in PNGs. Legacy states
+without annotations load an empty collection. As with all scene edits, sharing
+creates a new immutable snapshot and leaves the old URL unchanged.
+
 Mesh labels stay attached as the camera changes. The interactive viewer projects
 their anchors into screen space and lays out readable text with a leader and
 attachment dot. Hidden Meshes and anchors outside the camera view hide their
@@ -120,7 +136,9 @@ The image route:
 4. Renders with the host graphics adapter into an offscreen texture.
 5. Composites the captured screen strokes with anti-aliased round joins and
    the same display widths used by the browser.
-6. Encodes PNG in memory and releases request resources.
+6. Composites numbered annotation names and Mesh/group labels using the bundled
+   CJK font, skipping hidden marks and hidden Meshes.
+7. Encodes PNG in memory and releases request resources.
 
 The response uses `Cache-Control: no-store, max-age=0`. Blind writes no rendered image to disk and bounds concurrent renders with a semaphore. Interactive WebGL and offscreen WebGPU consume the same material parameters and lighting formula, with target-specific shader adapters. Visible sources for one image request are limited to 512 MiB, 2,000,000 triangles, and 2,000,000 point-cloud points. The byte limit is checked before any visible source is read; after rendering, Blind rechecks metadata only for the visible inputs. These limits apply only to the server-side PNG renderer; the interactive browser viewer remains independent.
 

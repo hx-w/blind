@@ -3,6 +3,20 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-09-20
+
+### Added
+
+- Place points and draw smooth lines directly on visible Meshes, with editable
+  names, colors, control points, and shared undo/redo alongside screen markup.
+- Shared scenes preserve surface annotations and open their numbered list;
+  image links include annotation names and Mesh labels, including Chinese text.
+
+### Changed
+
+- Annotation tools share a compact mobile-friendly dock, and opening Details or
+  Info preserves mark visibility and the annotation list.
+
 ## [0.10.3] - 2026-09-19
 
 ### Fixed

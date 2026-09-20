@@ -13,3 +13,7 @@ pub mod service;
 pub mod source;
 pub mod token;
 pub mod update;
+
+mod render_labels;
+
+mod render_occlusion;

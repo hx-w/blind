@@ -2,6 +2,7 @@ import './styles.css';
 import { ApiError, loadScene, shareScene, type HostCandidate, type MeshQuality, type PublicScene, type ShareResponse } from './api';
 import { MarkupCanvas } from './markup';
 import { MeshViewer } from './viewer';
+import { SurfaceEditor } from './surface';
 
 const $ = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -55,11 +56,7 @@ const copyFull = $('#copy-full');
 const manualCopy = $('#manual-copy');
 const manualCopyValue = $('#manual-copy-value') as HTMLTextAreaElement;
 const toast = $('#toast');
-const brushToolbar = $('#brush-toolbar');
 const brushTool = $('#brush-tool') as HTMLButtonElement;
-const drawHint = $('#draw-hint');
-const undoBrush = $('#undo-brush') as HTMLButtonElement;
-const clearBrush = $('#clear-brush') as HTMLButtonElement;
 const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 
 // The viewer may be mounted under a configured base path, so the s/v marker
@@ -85,11 +82,15 @@ let loadProgress = { completed: 0, total: 0, rawFallbacks: 0, failed: 0 };
 let longLoadTimer = 0;
 const meshViewer = new MeshViewer(root);
 const markup = new MarkupCanvas($('#markup-canvas') as HTMLCanvasElement);
+new ResizeObserver(entries => {
+  shell.style.setProperty('--detail-panel-height', `${entries[0].target.getBoundingClientRect().height}px`);
+}).observe($('#control-panel'));
+const surface = new SurfaceEditor(meshViewer, markup, shell, {closePanel, toast: showToast, change: syncDetailControls});
 
 meshViewer.onSelectionChange = () => {
-  syncDetailControls();
+  syncDetailControls(); surface.refreshList();
 };
-meshViewer.onModelChange = () => { syncDetailControls(); syncSceneMeta(); };
+meshViewer.onModelChange = () => { syncDetailControls(); syncSceneMeta(); surface.refreshList(); };
 meshViewer.onLoadProgress = (progress) => {
   loadProgress = progress;
   renderLoadProgress();
@@ -97,7 +98,7 @@ meshViewer.onLoadProgress = (progress) => {
 meshViewer.onViewChangeStart = invalidateMarkupForViewChange;
 markup.onChange = () => {
   meshViewer.setStrokes(markup.exportStrokes());
-  syncBrushControls();
+  surface.refreshList();
 };
 markup.onActiveChange = (active) => shell.classList.toggle('drawing-stroke', active);
 
@@ -119,6 +120,7 @@ async function start(): Promise<void> {
     startLongLoadHint();
     await meshViewer.load(scene);
     markup.load(scene.state.strokes ?? []);
+    surface.load();
     owner = scene.owner ? owner : undefined;
     renderMeshOptions(); renderSwatches(); syncDetailControls(); syncSceneMeta();
     finishLoading();
@@ -207,9 +209,10 @@ function syncDetailControls(): void {
     const quality = button.dataset.quality as MeshQuality;
     button.classList.toggle('active', quality === selected.quality);
     button.setAttribute('aria-pressed', String(quality === selected.quality));
-    button.disabled = selected.loading;
+    button.disabled = selected.loading || (quality === 'lod' && meshViewer.annotations.some(mark => mark.mesh === meshViewer.selectedIndex));
   });
-  if (selected.loading) lodSaving.textContent = `正在加载 ${selected.quality === 'lod' ? 'Raw' : 'LOD'} Mesh`;
+  if (meshViewer.annotations.some(mark => mark.mesh === meshViewer.selectedIndex)) lodSaving.textContent = '表面标记使用 Raw，分享后位置保持一致';
+  else if (selected.loading) lodSaving.textContent = `正在加载 ${selected.quality === 'lod' ? 'Raw' : 'LOD'} Mesh`;
   else if (selected.lod_bytes !== undefined) {
     const { delta, percent } = savings(selected.raw_bytes, selected.lod_bytes);
     lodSaving.textContent = delta >= 0
@@ -327,20 +330,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => 
 
 $('#fullscreen').addEventListener('click', async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await shell.requestFullscreen(); });
 
-brushTool.addEventListener('click', enterDrawMode);
-$('#finish-brush').addEventListener('click', exitDrawMode);
-undoBrush.addEventListener('click', () => markup.undo());
-clearBrush.addEventListener('click', () => markup.clear());
-document.querySelectorAll<HTMLButtonElement>('[data-brush-color]').forEach((button) => button.addEventListener('click', () => {
-  const color = button.dataset.brushColor!;
-  markup.setColor(color);
-  document.querySelectorAll<HTMLButtonElement>('[data-brush-color]').forEach((candidate) => {
-    const active = candidate === button;
-    candidate.classList.toggle('active', active);
-    candidate.setAttribute('aria-pressed', String(active));
-  });
-}));
-
+brushTool.addEventListener('click', () => void surface.enter());
 $('#share-view').addEventListener('click', async () => {
   if (!token) return;
   const button = $('#share-view') as HTMLButtonElement; button.disabled = true; button.classList.add('working');
@@ -358,6 +348,7 @@ backHost.addEventListener('click', showShareMain);
 async function refreshShareLinks(origin?: string): Promise<void> {
   if (!token) return;
   markup.finishActive();
+  surface.finishForShare();
   shareLinks = await shareScene(token, meshViewer.exportUpdate(), owner, origin);
   renderShareHosts(shareLinks);
   copyFull.hidden = !shareLinks.full_text;
@@ -406,41 +397,11 @@ window.addEventListener('resize', () => {
 });
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
 
-function enterDrawMode(): void {
-  if (markup.isEnabled) return;
-  closePanel();
-  viewPopover.classList.remove('open');
-  viewPopover.setAttribute('aria-hidden', 'true');
-  axisOrb.setAttribute('aria-expanded', 'false');
-  markup.setEnabled(true);
-  meshViewer.setInteractionEnabled(false);
-  shell.classList.add('draw-mode');
-  brushToolbar.hidden = false;
-  drawHint.hidden = false;
-  brushTool.setAttribute('aria-pressed', 'true');
-  syncBrushControls();
-  meshViewer.refreshLabels();
-}
-
-function exitDrawMode(): void {
-  if (!markup.isEnabled) return;
-  markup.setEnabled(false);
-  meshViewer.setInteractionEnabled(true);
-  shell.classList.remove('draw-mode', 'drawing-stroke');
-  brushToolbar.hidden = true;
-  drawHint.hidden = true;
-  brushTool.setAttribute('aria-pressed', 'false');
-  meshViewer.refreshLabels();
-}
-
 function invalidateMarkupForViewChange(): void {
   if (!markup.hasStrokes) return;
   markup.clear();
+  surface.invalidateScreenHistory();
   showToast('视角已改变，批注已隐藏');
-}
-
-function syncBrushControls(): void {
-  undoBrush.disabled = clearBrush.disabled = !markup.hasStrokes;
 }
 
 async function copyText(value: string): Promise<boolean> {

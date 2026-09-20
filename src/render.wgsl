@@ -58,6 +58,7 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @l
   if input.color.a < camera.tone.w && !front_facing {
     discard;
   }
+  if dot(input.normal, input.normal) < 0.000001 { return input.color; }
   var normal = normalize(input.normal);
   if (!front_facing) {
     normal = -normal;

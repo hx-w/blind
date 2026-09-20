@@ -129,6 +129,81 @@ pub struct ViewState {
     pub camera: Option<CameraState>,
     #[serde(default)]
     pub strokes: Vec<ScreenStroke>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<SurfaceAnnotation>,
+}
+
+/// Frozen surface samples. Sharing never reprojects or refits these coordinates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SurfaceAnnotation {
+    pub id: String,
+    pub mesh: usize,
+    pub revision: String,
+    pub kind: SurfaceAnnotationKind,
+    pub label: String,
+    pub color: String,
+    pub visible: bool,
+    pub closed: bool,
+    pub points: Vec<[f64; 3]>,
+    pub normals: Vec<[f64; 3]>,
+    pub controls: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SurfaceAnnotationKind {
+    Point,
+    Line,
+}
+
+pub fn validate_annotations(marks: &[SurfaceAnnotation], meshes: &[MeshRef]) -> Result<()> {
+    if marks.len() > 64 || marks.iter().map(|m| m.points.len()).sum::<usize>() > 16384 {
+        bail!("surface annotations exceed the scene limit");
+    }
+    let mut ids = std::collections::HashSet::new();
+    for mark in marks {
+        let mesh = meshes
+            .get(mark.mesh)
+            .context("annotation Mesh is missing")?;
+        if mark.id.is_empty()
+            || mark.id.len() > 64
+            || !ids.insert(&mark.id)
+            || mark.revision != mesh.revision
+            || mesh.format == MeshFormat::Pts
+            || mark.label.chars().count() > 120
+            || !is_hex_color(&mark.color)
+            || mark.points.is_empty()
+            || mark.points.len() > 4096
+            || mark.normals.len() != mark.points.len()
+            || mark
+                .points
+                .iter()
+                .flatten()
+                .any(|v| !v.is_finite() || v.abs() > 1e9)
+            || mark.normals.iter().any(|n| {
+                let length = n.iter().map(|v| v * v).sum::<f64>();
+                !length.is_finite() || !(0.5..=1.5).contains(&length)
+            })
+            || mark.controls.first() != Some(&0)
+            || mark.controls.last() != Some(&(mark.points.len() - 1))
+            || mark.controls.windows(2).any(|w| w[0] >= w[1])
+            || mark.controls.iter().any(|&i| i >= mark.points.len())
+        {
+            bail!("invalid surface annotation");
+        }
+        match mark.kind {
+            SurfaceAnnotationKind::Point if mark.points.len() != 1 || mark.closed => {
+                bail!("invalid surface point")
+            }
+            SurfaceAnnotationKind::Line
+                if mark.points.len() < 2 || (mark.closed && mark.controls.len() < 3) =>
+            {
+                bail!("invalid surface line")
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -214,6 +289,7 @@ impl Default for ViewState {
             },
             camera: None,
             strokes: Vec::new(),
+            annotations: Vec::new(),
         }
     }
 }
@@ -335,6 +411,7 @@ impl SceneDescriptor {
         if update.meshes.len() != self.meshes.len() {
             bail!("Mesh style count does not match the scene");
         }
+        validate_annotations(&update.state.annotations, &self.meshes)?;
         for style in &update.meshes {
             if let Some(Some(label)) = &style.label {
                 label.validate()?;
@@ -367,6 +444,9 @@ impl SceneDescriptor {
         }
         self.schema = self.schema.max(3);
         self.state = state;
+        for mark in &self.state.annotations {
+            self.meshes[mark.mesh].quality = MeshQuality::Raw;
+        }
         Ok(())
     }
 
@@ -539,6 +619,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn surface_annotations_share_frozen_coordinates_and_validate_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mesh.ply");
+        std::fs::write(&path, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
+        let mark = SurfaceAnnotation {
+            id: "surface-1".into(),
+            mesh: 0,
+            revision: scene.meshes[0].revision.clone(),
+            kind: SurfaceAnnotationKind::Line,
+            label: "Contour".into(),
+            color: "#ff6b5e".into(),
+            visible: true,
+            closed: false,
+            points: vec![[0.123456789012345, 0.2, 0.3], [0.8, 0.2, 0.3]],
+            normals: vec![[0.0, 0.0, 1.0]; 2],
+            controls: vec![0, 1],
+        };
+        let mut state = scene.state.clone();
+        state.annotations.push(mark.clone());
+        scene
+            .apply_update(SceneUpdate {
+                meshes: scene
+                    .meshes
+                    .iter()
+                    .map(|m| MeshStyleUpdate {
+                        color: m.color.clone(),
+                        opacity: m.opacity,
+                        visible: m.visible,
+                        quality: MeshQuality::Lod,
+                        label: None,
+                    })
+                    .collect(),
+                state,
+            })
+            .unwrap();
+        assert_eq!(scene.meshes[0].quality, MeshQuality::Raw);
+        let reopened: SceneDescriptor =
+            serde_json::from_slice(&serde_json::to_vec(&scene).unwrap()).unwrap();
+        assert_eq!(reopened.state.annotations, vec![mark.clone()]);
+        let mut bad = mark.clone();
+        bad.mesh = 99;
+        assert!(validate_annotations(&[bad], &scene.meshes).is_err());
+        let mut bad = mark.clone();
+        bad.revision = "other-source".into();
+        assert!(validate_annotations(&[bad], &scene.meshes).is_err());
+        let mut bad = mark.clone();
+        bad.points[0][0] = f64::NAN;
+        assert!(validate_annotations(&[bad], &scene.meshes).is_err());
+        let mut bad = mark.clone();
+        bad.controls = vec![0, 2];
+        assert!(validate_annotations(&[bad], &scene.meshes).is_err());
+        assert!(validate_annotations(&[mark.clone(), mark], &scene.meshes).is_err());
+    }
+
     #[test]
     fn new_scenes_default_to_flat_shading() {
         assert_eq!(ViewState::default().shading, Shading::Flat);
@@ -557,6 +693,7 @@ mod tests {
         });
         let state: ViewState = serde_json::from_value(value).unwrap();
         assert!(state.strokes.is_empty());
+        assert!(state.annotations.is_empty());
     }
 
     #[tokio::test]

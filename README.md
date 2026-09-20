@@ -293,7 +293,7 @@ this contract instead of reimplementing scene or lifecycle logic.
 - PTS rings render as a continuous tube with a sphere at every original point.
 - Details also changes surface mode, projection, axes, and the gray background
   theme.
-- Brush enters a touch-locked screen-markup mode with four high-contrast
+- Annotation → Screen brush enters a touch-locked screen-markup mode with four high-contrast
   colors, undo, and clear. Strokes can cross Meshes and empty canvas space.
 - Screen markup belongs to the captured view. Any later rotate, pan, zoom,
   Fit, canonical-view, or projection action hides it immediately.
@@ -317,6 +317,35 @@ triangles or points, and uses 0.002 relative simplification error for triangle
 Meshes. There is no explicit Mesh-count ceiling; request, encrypted-descriptor,
 and per-file limits remain practical bounds. The profile is intentionally not
 exposed as a setting.
+
+## Surface annotations
+
+Open **标注** in the bottom dock and choose **点** or **线**. Points follow the
+Mesh; lines accept clicks or a continuous drag. Sparse handles guide a smooth
+curve sampled onto the visible surface. Release a drag to finish one line; the
+next drag creates another. For click-to-connect, use **完成线** or **闭合**.
+New points and completed lines keep their name field available until another
+mark or tool is chosen. **选择** lets you rename, recolor, move handles or delete.
+The **标记** list includes visible-Mesh annotations and screen strokes, with
+matching canvas numbers, selection highlighting and click-to-locate. Shared scenes
+with annotations open this list automatically while camera navigation stays active.
+Undo and redo include each complete gesture; interrupted touches are cancelled.
+
+Drawing owns the pointer. **视角** restores normal camera gestures and finishes
+the current line; **继续** resumes editing. The visible surface under the pointer
+chooses the target automatically, independent of the selected Mesh. Every line
+belongs to one Mesh. Gaps, hidden surfaces and other Meshes cannot receive samples.
+Surface tools require triangle geometry; point clouds and PTS remain viewable.
+The target loads Raw on demand; annotated Meshes stay Raw to keep geometry stable.
+
+Sharing captures frozen 3D samples, editing handles, names, colors and visibility.
+Reopening never refits the path. View and PNG links include the marks; camera
+movement keeps them attached and hidden Meshes hide their marks. Editing produces
+a new share without changing the original. PNG exports include points, paths and numbered name labels, with Chinese and
+Latin text rendered using the bundled font. Original Mesh files are never modified.
+The **画笔** tool retains view-dependent screen markup. All annotation tools
+share one dock, color palette, selection list, and undo/redo history. Moving the
+camera clears screen strokes, including their undo copies.
 
 ## Doctor and link maintenance
 

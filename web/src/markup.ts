@@ -16,6 +16,7 @@ export class MarkupCanvas {
   private strokes: ScreenStroke[] = [];
   private active: ActiveStroke | null = null;
   private enabled = false;
+  private selection?: number;
   private color = '#ff6b5e';
   private cssWidth = 1;
   private cssHeight = 1;
@@ -24,6 +25,8 @@ export class MarkupCanvas {
   private drawFrame = 0;
 
   onChange?: () => void;
+  onStrokeStart?: () => void;
+  onStrokeEnd?: () => void;
   onActiveChange?: (active: boolean) => void;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
@@ -61,6 +64,24 @@ export class MarkupCanvas {
 
   exportStrokes(): ScreenStroke[] { return structuredClone(this.strokes); }
 
+  displayPoints(index: number): Array<[number, number]> {
+    const stroke = this.strokes[index]; if (!stroke) return [];
+    const bounds = this.canvas.getBoundingClientRect();
+    const aspect = this.cssWidth / this.cssHeight;
+    return stroke.points.map(p => [bounds.left + ((p[0]*2-1)*stroke.aspect/aspect+1)*this.cssWidth/2, bounds.top+p[1]*this.cssHeight]);
+  }
+  hitTest(x: number, y: number): number | undefined {
+    for (let i=this.strokes.length-1;i>=0;i--) {
+      const points=this.displayPoints(i);
+      for (let j=1;j<points.length;j++) {
+        const a=points[j-1],b=points[j],dx=b[0]-a[0],dy=b[1]-a[1];
+        const t=Math.max(0,Math.min(1,((x-a[0])*dx+(y-a[1])*dy)/(dx*dx+dy*dy||1)));
+        if(Math.hypot(x-a[0]-dx*t,y-a[1]-dy*t)<14) return i;
+      }
+    }
+    return undefined;
+  }
+
   setEnabled(enabled: boolean): void {
     if (this.enabled === enabled) return;
     if (!enabled) this.finishActive();
@@ -68,6 +89,8 @@ export class MarkupCanvas {
     this.canvas.classList.toggle('enabled', enabled);
     this.canvas.setAttribute('aria-hidden', String(!enabled));
   }
+
+  setSelection(index?: number): void { if(this.selection===index)return;this.selection=index;this.scheduleDraw(); }
 
   setColor(color: string): void { this.color = color; }
 
@@ -95,6 +118,7 @@ export class MarkupCanvas {
     } else {
       this.scheduleDraw();
     }
+    this.onStrokeEnd?.();
   }
 
   private cancelActive(): void {
@@ -133,6 +157,7 @@ export class MarkupCanvas {
     const bounds = this.canvas.getBoundingClientRect();
     this.boundsLeft = bounds.left; this.boundsTop = bounds.top;
     const point = this.normalizedPoint(event);
+    this.onStrokeStart?.();
     this.active = {
       pointerId: event.pointerId,
       color: this.color,
@@ -224,7 +249,7 @@ export class MarkupCanvas {
       context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     }
     context.clearRect(0, 0, this.cssWidth, this.cssHeight);
-    for (const stroke of this.strokes) this.drawStroke(stroke);
+    for (const [i,stroke] of this.strokes.entries()) this.drawStroke(stroke, i===this.selection);
     if (this.active) {
       this.drawStroke({
         color: this.active.color,
@@ -234,7 +259,7 @@ export class MarkupCanvas {
     }
   }
 
-  private drawStroke(stroke: ScreenStroke): void {
+  private drawStroke(stroke: ScreenStroke, selected=false): void {
     if (stroke.points.length === 0) return;
     const context = this.context;
     const currentAspect = this.cssWidth / Math.max(this.cssHeight, 1);
@@ -246,6 +271,7 @@ export class MarkupCanvas {
     traceSmoothPath(path, displayPoints);
     context.lineCap = 'round';
     context.lineJoin = 'round';
+    if(selected) {context.strokeStyle='rgba(244,242,234,.55)';context.lineWidth=ink.ink_width+4;context.stroke(path);}
     context.strokeStyle = `rgba(${ink.outline_color.join(',')},${ink.outline_alpha})`;
     context.lineWidth = ink.outline_width;
     context.stroke(path);

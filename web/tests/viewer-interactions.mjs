@@ -46,7 +46,7 @@ after(async () => { await browser?.close(); server?.closeAllConnections(); await
 
 async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null) {
   const page = await browser.newPage({viewport, deviceScaleFactor: 2});
-  if (sceneOverride) await page.route('**/api/v1/scenes/**', route => route.fulfill({json:sceneOverride}));
+  if (sceneOverride) await page.route('**/api/v1/scenes/**', route => route.request().method() === 'GET' ? route.fulfill({json:sceneOverride}) : route.continue());
   if (markupResizeDelay) await page.addInitScript(delay => {
     const NativeResizeObserver = window.ResizeObserver;
     window.ResizeObserver = class extends NativeResizeObserver {
@@ -109,7 +109,7 @@ for (const viewport of [{width:1280,height:800},{width:390,height:844},{width:32
   test(`toolbars preserve the scene canvas at ${viewport.width}×${viewport.height}`, async () => {
     const page = await openPage(viewport);
     try {
-      for (const selector of ['.panel-trigger','#close-panel','#scene-info-toggle','#brush-tool','#finish-brush','#axis-orb','#fit-view']) {
+      for (const selector of ['.panel-trigger','#close-panel','#scene-info-toggle','#brush-tool','#surface-brush','#surface-done','#axis-orb','#fit-view']) {
         const events = await eventsDuring(page, () => page.locator(selector).click());
         assert.equal(events.filter(e=>e.type==='resize').length, 0, `${selector} cleared a scene canvas`);
       }
@@ -331,5 +331,298 @@ test('overlapping selected groups do not stack their captions', async () => {
     for(let i=0;i<rects.length;i++) for(let j=i+1;j<rects.length;j++) {
       const a=rects[i],b=rects[j];assert.ok(a.right<=b.x || b.right<=a.x || a.bottom<=b.y || b.bottom<=a.y,'selected groups must respect other captions');
     }
+  } finally {await page.close();}
+});
+
+const surfaceFixture = () => ({
+  ...structuredClone(scene), label_groups: [],
+  meshes: scene.meshes.map((mesh, i) => ({...mesh, visible: i === 0, label:null})),
+  state: {...structuredClone(scene.state), strokes: [], annotations: [], axes: false,
+    camera: {position:[0.3,0.3,3],target:[0.3,0.3,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:2}},
+});
+async function captureShare(page) {
+  await page.locator('#share-view').click(); await page.locator('#share-sheet').waitFor({state:'visible'});
+  const snapshot = structuredClone(shared); await page.locator('#close-share').click(); return snapshot;
+}
+
+test('surface points and paths survive touch editing, navigation and share reopening', async () => {
+  const page = await openPage({width:390,height:844}, 0, surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click();
+    await page.locator('#surface-input').waitFor({state:'visible'});
+    const touch = await page.context().newCDPSession(page);
+    const tap = async (x,y) => {
+      await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y}]});
+      await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+    };
+    await tap(195,400);
+    let snapshot = await captureShare(page);
+    assert.equal(snapshot.state.annotations.length,1);
+    assert.equal(snapshot.state.annotations[0].kind,'point');
+    const firstPoint = structuredClone(snapshot.state.annotations[0]);
+    await page.locator('#surface-undo').click();
+    assert.equal((await captureShare(page)).state.annotations.length,0);
+    await page.locator('#surface-redo').click();
+    assert.deepEqual((await captureShare(page)).state.annotations[0],firstPoint);
+    // A cancelled touch never commits a moved point.
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:195,y:400}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:205,y:405}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
+    assert.deepEqual((await captureShare(page)).state.annotations[0],firstPoint);
+    await page.locator('[data-surface-mode="line"]').click();
+    await tap(165,420); await tap(170,385); await tap(190,355);
+    await page.locator('#surface-end').click();
+    snapshot = await captureShare(page);
+    assert.equal(snapshot.state.annotations.length,2);
+    assert.ok(snapshot.state.annotations[1].points.length > 3);
+    assert.deepEqual(snapshot.state.camera,(await captureShare(page)).state.camera);
+    await page.locator('#surface-navigate').click();
+    await page.mouse.move(200,420); await page.mouse.down(); await page.mouse.move(240,460,{steps:8}); await page.mouse.up();
+    const rotated = await captureShare(page);
+    assert.notDeepEqual(rotated.state.camera,snapshot.state.camera);
+    assert.deepEqual(rotated.state.annotations,snapshot.state.annotations);
+    const fixture=surfaceFixture(); fixture.state=rotated.state;
+    fixture.meshes=fixture.meshes.map((m,i)=>({...m,...rotated.meshes[i]}));
+    const reopened=await openPage({width:390,height:844},0,fixture);
+    try { assert.deepEqual((await captureShare(reopened)).state.annotations,snapshot.state.annotations); }
+    finally { await reopened.close(); }
+  } finally { await page.close(); }
+});
+
+test('surface editor fits narrow screens and line closure can be undone', async () => {
+  const page = await openPage({width:320,height:700},0,surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click(); await page.locator('#surface-input').waitFor({state:'visible'});
+    await page.locator('[data-surface-mode="line"]').click();
+    for(const [x,y] of [[150,340],[190,325],[175,290]]) await page.mouse.click(x,y);
+    await page.locator('#surface-close').click();
+    let snapshot=await captureShare(page); const line=snapshot.state.annotations[0];
+    assert.equal(line.closed,true);assert.deepEqual(line.points[0],line.points.at(-1));
+    const controls=await page.locator('#surface-toolbar button:visible, #surface-toolbar input:visible').evaluateAll(elements=>elements.map(e=>{const r=e.getBoundingClientRect();return {x:r.x,right:r.right,y:r.y,bottom:r.bottom,height:r.height};}));
+    assert.ok(controls.every(r=>r.x>=0 && r.right<=320 && r.y>=0 && r.bottom<=700 && r.height>=40));
+    await page.locator('#surface-undo').click();snapshot=await captureShare(page);
+    assert.equal(snapshot.state.annotations[0].closed,false);
+    // Sharing a one-point draft cancels it instead of emitting an invalid line.
+    await page.locator('[data-surface-mode="line"]').click();await page.mouse.click(125,355);
+    assert.equal((await captureShare(page)).state.annotations.length,1);
+  } finally { await page.close(); }
+});
+
+test('a continuous surface stroke is one undo step and uses sparse editing handles', async () => {
+  const page = await openPage({width:390,height:844},0,surfaceFixture());
+  try {
+    const before = await captureShare(page);
+    await page.locator('#brush-tool').click();await page.locator('#surface-input').waitFor({state:'visible'});
+    await page.locator('[data-surface-mode="line"]').click();
+    await page.mouse.move(155,435);await page.mouse.down();
+    for(const [x,y] of [[164,420],[171,403],[183,390],[198,378],[207,365]]) await page.mouse.move(x,y,{steps:3});
+    await page.mouse.up();
+    const drawn=await captureShare(page);const line=drawn.state.annotations[0];
+    assert.equal(drawn.state.annotations.length,1);assert.ok(line.points.length>20);
+    assert.ok(line.controls.length<line.points.length/3);assert.deepEqual(drawn.state.camera,before.state.camera);
+    await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.annotations.length,0);
+    await page.locator('#surface-redo').click();assert.deepEqual((await captureShare(page)).state.annotations[0],line);
+    // Select first; drawing tools always create a new stroke.
+    await page.locator('[data-surface-mode="select"]').click();await page.mouse.click(207,365);
+    // Move an existing endpoint along the same surface; undo recovers the frozen curve.
+    await page.mouse.move(207,365);await page.mouse.down();await page.mouse.move(220,355,{steps:4});await page.mouse.up();
+    const moved=(await captureShare(page)).state.annotations[0];assert.notDeepEqual(moved.points,line.points);
+    await page.locator('#surface-undo').click();assert.deepEqual((await captureShare(page)).state.annotations[0],line);
+  } finally { await page.close(); }
+});
+
+test('surface hits choose the visible mesh independently of the mesh selection', async () => {
+  const fixture=surfaceFixture();fixture.meshes[0].visible=false;fixture.meshes[1].visible=true;
+  const page=await openPage({width:390,height:844},0,fixture);
+  try {
+    await page.locator('#brush-tool').click();
+    assert.equal(await page.locator('#surface-target').count(),0);
+    assert.equal(await page.locator('#surface-new').count(),0);
+    await page.mouse.click(195,400);
+    const snapshot=await captureShare(page);
+    assert.equal(snapshot.state.annotations.length,1);assert.equal(snapshot.state.annotations[0].mesh,1);
+    await page.locator('#surface-list-toggle').click();
+    await page.locator('.surface-list-row button').first().click();
+    assert.equal(await page.locator('#surface-name').inputValue(),'点 1');
+    await page.waitForFunction(()=>document.querySelector('.surface-badge.selected')?.textContent.includes('点 1'));
+    await page.locator('#surface-done').click();await page.locator('.panel-trigger').click();
+    await page.locator('#detail-mesh-select').selectOption('1');await page.locator('#mesh-visible-toggle').locator('..').click();
+    await page.locator('#close-panel').click();await page.locator('#brush-tool').click();
+    assert.equal(await page.locator('.surface-list-row').count(),0);
+  } finally {await page.close();}
+});
+
+test('surface and screen strokes share tools, selection and undo history', async () => {
+  const page=await openPage({width:390,height:844},0,surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click();await page.mouse.click(195,400);
+    await page.locator('#surface-brush').click();
+    await page.mouse.move(60,200);await page.mouse.down();await page.mouse.move(130,230,{steps:12});await page.mouse.up();
+    let snapshot=await captureShare(page);assert.equal(snapshot.state.annotations.length,1);assert.equal(snapshot.state.strokes.length,1);
+    await page.locator('#surface-undo').click();snapshot=await captureShare(page);assert.equal(snapshot.state.strokes.length,0);assert.equal(snapshot.state.annotations.length,1);
+    await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.annotations.length,0);
+    await page.locator('#surface-redo').click();await page.locator('#surface-redo').click();
+    await page.locator('#surface-list-toggle').click();assert.equal(await page.locator('.surface-list-row').count(),2);
+    await page.locator('.surface-list-row').nth(1).locator('button').first().click();
+    await page.waitForFunction(()=>document.querySelector('.surface-badge.selected')?.textContent.includes('画笔 1'));
+    await page.locator('#surface-color-toggle').click();await page.locator('[data-surface-color="#5fb4ff"]').click();
+    assert.equal((await captureShare(page)).state.strokes[0].color,'#5fb4ff');
+    await page.locator('#surface-delete').click();assert.equal((await captureShare(page)).state.strokes.length,0);
+    await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.strokes.length,1);
+  } finally {await page.close();}
+});
+
+test('lifting the pointer completes a surface stroke and the next drag starts a new line', async () => {
+  const page=await openPage({width:390,height:844},0,surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="line"]').click();
+    for(const [x,y,endX,endY] of [[155,435,190,380],[175,440,215,390]]) {
+      await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(endX,endY,{steps:12});await page.mouse.up();
+    }
+    const snapshot=await captureShare(page);assert.equal(snapshot.state.annotations.length,2);
+    assert.ok(snapshot.state.annotations.every(m=>m.kind==='line' && m.points.length>10));
+    await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.annotations.length,1);
+    await page.locator('[data-surface-mode="select"]').click();await page.mouse.click(190,380);
+    await page.locator('#surface-list-toggle').click();assert.equal(await page.locator('.surface-list-row.selected').count(),1);
+  } finally {await page.close();}
+});
+
+test('new point and line names remain editable after pointer release and share completion', async () => {
+  const page=await openPage({width:390,height:844},0,surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click();await page.mouse.click(195,400);
+    const name=page.locator('#surface-name');
+    assert.equal(await name.isVisible(),true);assert.equal(await name.inputValue(),'点 1');
+    await page.waitForTimeout(250);assert.equal(await name.isVisible(),true);
+    await name.fill('检查位置');await name.press('Tab');
+    assert.equal((await captureShare(page)).state.annotations[0].label,'检查位置');
+    await page.locator('[data-surface-mode="line"]').click();
+    await page.mouse.move(155,435);await page.mouse.down();await page.mouse.move(190,380,{steps:12});await page.mouse.up();
+    assert.equal(await name.isVisible(),true);assert.equal(await name.inputValue(),'线 1');
+    await name.fill('检查路径');await name.press('Tab');
+    assert.equal((await captureShare(page)).state.annotations[1].label,'检查路径');
+    assert.equal(await name.isVisible(),true);
+    // The next stroke starts another mark without an inert New action.
+    await page.mouse.move(175,440);await page.mouse.down();await page.mouse.move(215,390,{steps:12});await page.mouse.up();
+    assert.equal(await name.inputValue(),'线 2');assert.equal((await captureShare(page)).state.annotations.length,3);
+    // Click-to-connect completion also keeps the name field available.
+    await page.locator('[data-surface-mode="line"]').click();await page.mouse.click(165,420);await page.mouse.click(170,385);
+    await page.locator('#surface-end').click();assert.equal(await name.isVisible(),true);
+    await name.fill('连线路径');await name.press('Tab');assert.equal((await captureShare(page)).state.annotations[3].label,'连线路径');
+  } finally {await page.close();}
+});
+
+test('shared annotations open the list without taking over camera navigation', async () => {
+  const seed=await openPage({width:390,height:844},0,surfaceFixture());
+  let snapshot;
+  try {await seed.locator('#brush-tool').click();await seed.mouse.click(195,400);snapshot=await captureShare(seed);} finally {await seed.close();}
+  const fixture=surfaceFixture();fixture.state=snapshot.state;
+  const page=await openPage({width:390,height:844},0,fixture);
+  try {
+    assert.equal(await page.locator('.surface-list').isVisible(),true);
+    assert.equal(await page.locator('#surface-toolbar').isVisible(),false);
+    assert.equal(await page.locator('#surface-input').isVisible(),false);
+    await page.waitForFunction(()=>document.querySelectorAll('.surface-badge').length===1);
+    await page.locator('.panel-trigger').click();assert.equal(await page.locator('.surface-list').isVisible(),true);
+    assert.equal(await page.locator('.surface-badge').first().isVisible(),true);
+    await page.locator('#close-panel').click();assert.equal(await page.locator('.surface-list').isVisible(),true);
+    await page.mouse.move(200,300);await page.mouse.down();await page.mouse.move(230,325,{steps:8});await page.mouse.up();
+    assert.notDeepEqual((await captureShare(page)).state.camera,snapshot.state.camera);
+    await page.locator('.surface-list-row button').first().click();assert.equal(await page.locator('#surface-name').isVisible(),true);
+    await page.locator('#surface-list-close').click();assert.equal(await page.locator('.surface-list').isVisible(),false);
+  } finally {await page.close();}
+  const empty=await openPage({width:390,height:844},0,surfaceFixture());
+  try {assert.equal(await empty.locator('.surface-list').isVisible(),false);} finally {await empty.close();}
+});
+
+test('opening detail and info preserves visible annotation badges, list and document', async () => {
+  const fixture=surfaceFixture();fixture.state.annotations=[{id:'named-point',mesh:0,revision:'fixture',kind:'point',label:'稳定标记',color:'#ff6b5e',visible:true,closed:false,points:[[0.3,0.3,0.4]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}];
+  for(const viewport of [{width:320,height:700},{width:390,height:844},{width:1280,height:800},{width:740,height:420}]) {
+    const page=await openPage(viewport,0,fixture);
+    try {
+      await page.waitForFunction(()=>document.querySelector('.surface-badge'));
+      const before=await captureShare(page);
+      for(const trigger of ['.panel-trigger','#scene-info-toggle']) {
+        await page.locator(trigger).click();await page.waitForTimeout(300);
+        assert.equal(await page.locator('.surface-list').isVisible(),true);
+        assert.equal(await page.locator('.surface-badge').first().isVisible(),true);
+        const boxes=await page.evaluate(()=>['.surface-list','#control-panel'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};}));
+        const [a,b]=boxes;assert.ok(a.right<=b.x || b.right<=a.x || a.bottom<=b.y || b.bottom<=a.y,'panels must not overlap');
+        await page.locator('#close-panel').click();
+      }
+      const after=await captureShare(page);assert.deepEqual(after.state.annotations,before.state.annotations);assert.deepEqual(after.state.camera,before.state.camera);
+    } finally {await page.close();}
+  }
+});
+
+test('zero opacity filters annotation list and restoring opacity recovers it', async () => {
+  const fixture=surfaceFixture();fixture.meshes[0].opacity=0;
+  fixture.state.annotations=[{id:'transparent-point',mesh:0,revision:'fixture',kind:'point',label:'位置',color:'#ff6b5e',visible:true,closed:false,points:[[0.3,0.3,0.4]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}];
+  const page=await openPage({width:390,height:844},0,fixture);
+  try {
+    assert.equal(await page.locator('#surface-count').textContent(),'0');
+    await page.locator('.panel-trigger').click();await page.locator('#opacity-range').fill('100');
+    assert.equal(await page.locator('#surface-count').textContent(),'1');
+  } finally {await page.close();}
+});
+
+test('new marks refuse the scene sample limit before producing an invalid share', async () => {
+  const fixture=surfaceFixture();fixture.state.annotations=Array.from({length:4},(_,i)=>({id:`full-${i}`,mesh:0,revision:'fixture',kind:'line',label:`满 ${i}`,color:'#ff6b5e',visible:false,closed:false,points:Array.from({length:4096},()=>[0.3,0.3,0.4]),normals:Array.from({length:4096},()=>[0.57735,0.57735,0.57735]),controls:[0,4095]}));
+  const page=await openPage({width:390,height:844},0,fixture);
+  try {await page.locator('#surface-list-close').click();await page.locator('#brush-tool').click();await page.mouse.click(195,400);assert.equal((await captureShare(page)).state.annotations.length,4);} finally {await page.close();}
+});
+
+test('undo restores Raw geometry before restoring a deleted annotation', async () => {
+  const page=await openPage({width:390,height:844},0,surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click();await page.mouse.click(195,400);const original=(await captureShare(page)).state.annotations;
+    await page.locator('#surface-delete').click();await page.locator('#surface-done').click();
+    await page.locator('.panel-trigger').click();await page.locator('[data-quality="lod"]').click();
+    await page.waitForFunction(()=>document.querySelector('[data-quality="lod"]').classList.contains('active'));
+    await page.locator('#close-panel').click();await page.locator('#brush-tool').click();
+    let release;const gate=new Promise(resolve=>release=resolve);
+    await page.route('**/mesh/0',async route=>{await gate;await route.fulfill({body:await readFile(new URL('../../tests/fixtures/tetra.ply',import.meta.url)),contentType:'application/ply'});});
+    await page.locator('#surface-undo').click();await page.waitForFunction(()=>document.querySelector('#surface-hint').textContent.includes('恢复'));
+    assert.equal(await page.locator('.surface-list').evaluate(el=>el.inert),true);
+    assert.equal(await page.locator('#surface-color-toggle').isDisabled(),true);
+    assert.equal(await page.locator('#share-view').isDisabled(),true);release();
+    await page.waitForFunction(()=>document.querySelector('#surface-count').textContent==='1');
+    const restored=await captureShare(page);assert.equal(restored.meshes[0].quality,'raw');assert.deepEqual(restored.state.annotations,original);
+  } finally {await page.close();}
+});
+
+test('a second touch during Raw loading cancels the pending gesture without corrupting it', async () => {
+  const fixture=surfaceFixture();fixture.meshes[0].quality='lod';
+  const page=await openPage({width:390,height:844},0,fixture);
+  try {
+    let release;const gate=new Promise(resolve=>release=resolve);
+    await page.route('**/mesh/0',async route=>{await gate;await route.fulfill({body:await readFile(new URL('../../tests/fixtures/tetra.ply',import.meta.url)),contentType:'application/ply'});});
+    await page.locator('#brush-tool').click();const touch=await page.context().newCDPSession(page);
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:195,y:400,id:1}]});
+    await page.waitForFunction(()=>document.querySelector('#surface-hint').textContent.includes('准备'));
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:195,y:400,id:1},{x:160,y:380,id:2}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});release();
+    await page.waitForTimeout(250);assert.equal((await captureShare(page)).state.annotations.length,0);
+    await page.mouse.click(195,400);assert.equal((await captureShare(page)).state.annotations.length,1);
+  } finally {await page.close();}
+});
+
+test('undo derives the restored draft target from its original mesh', async () => {
+  const fixture=surfaceFixture();fixture.meshes[1].visible=true;
+  fixture.state.camera={position:[0.3,0.3,5],target:[0.3,0.3,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:2};
+  // Identical geometry is deliberate: swapping visibility lets the same pointer
+  // hit another owner without changing camera or relying on projected heuristics.
+  const page=await openPage({width:800,height:600},0,fixture);
+  try {
+    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="line"]').click();
+    await page.mouse.click(380,310);await page.mouse.click(400,290);await page.locator('#surface-end').click();
+    // Apply actual visibility controls without exiting the annotation editor.
+    await page.locator('.panel-trigger').dispatchEvent('click');
+    await page.locator('#mesh-visible-toggle').locator('..').click();await page.locator('#close-panel').click();
+    await page.mouse.click(400,300);
+    await page.locator('#surface-undo').click();await page.locator('#surface-undo').click();
+    await page.locator('.panel-trigger').dispatchEvent('click');await page.locator('#mesh-visible-toggle').locator('..').click();await page.locator('#close-panel').click();
+    await page.mouse.click(400,290);await page.locator('#surface-end').click();
+    const result=await captureShare(page);assert.equal(result.state.annotations.length,1);assert.equal(result.state.annotations[0].mesh,0);assert.ok(result.state.annotations[0].points.length>=2);
   } finally {await page.close();}
 });
