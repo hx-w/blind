@@ -1,6 +1,6 @@
 [package]
 name = "blind"
-version = "0.12.2"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Instant local geometry review from any device"
@@ -67,10 +67,11 @@ sha1 = "0.10"
 stl_io = "0.8"
 subtle = "2.6"
 tar = "0.4.46"
+tempfile = "3.15"
 thiserror = "2.0"
 tiny-skia = "0.12"
 tobj = "4.0"
-tokio = { version = "1.43", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.43", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tower-http = { version = "0.6", features = ["compression-full", "set-header", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -78,9 +79,6 @@ url = "2.5"
 wait-timeout = "0.2.1"
 wgpu = "0.20.1"
 zstd = "0.13"
-
-[dev-dependencies]
-tempfile = "3.15"
 
 [profile.release]
 lto = "thin"

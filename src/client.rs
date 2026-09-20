@@ -33,6 +33,9 @@ enum ClientCommand {
         stdin: bool,
         #[arg(long, conflicts_with = "stdin")]
         local: bool,
+        /// Register for OSS and plugins without installing SSH authorization.
+        #[arg(long, requires = "stdin", conflicts_with_all = ["local", "address", "port"])]
+        client_only: bool,
         /// Address the server can use to reach this machine; default: the request's source IP.
         #[arg(long)]
         address: Option<String>,
@@ -80,7 +83,7 @@ enum ClientCommand {
         #[arg(long, value_enum, default_value = "full")]
         format: OutputFormat,
     },
-    /// Show this OS user's registration, without exposing credentials.
+    /// Show local Server, Client connection, target and available plugins.
     Status {
         #[arg(long)]
         json: bool,
@@ -240,10 +243,11 @@ pub async fn run() -> Result<()> {
         ClientCommand::Join {
             stdin,
             local,
+            client_only,
             address,
             port,
             name,
-        } => join(stdin, local, address, port, name).await?,
+        } => join(stdin, local, client_only, address, port, name).await?,
         ClientCommand::Share {
             meshes,
             config,
@@ -268,25 +272,7 @@ pub async fn run() -> Result<()> {
             )
             .await?
         }
-        ClientCommand::Status { json: as_json } => {
-            let c =
-                load()?.context("not registered; run blind join --stdin or blind join --local")?;
-            let status = api(&c.server, "/api/v1/client", &c.credential, None).await?;
-            if as_json {
-                println!("{}", serde_json::to_string_pretty(&status)?);
-            } else {
-                println!(
-                    "{} → {} ({})",
-                    c.source.name,
-                    c.server,
-                    if c.source.active {
-                        "registered"
-                    } else {
-                        "pending"
-                    }
-                );
-            }
-        }
+        ClientCommand::Status { json: as_json } => status(as_json).await?,
         ClientCommand::Leave => {
             let c = load()?.context("not registered")?;
             remove_authorization(&c)?;
@@ -315,6 +301,7 @@ pub async fn run() -> Result<()> {
 async fn join(
     stdin: bool,
     local: bool,
+    client_only: bool,
     address: Option<String>,
     port: Option<u16>,
     name: Option<String>,
@@ -355,14 +342,19 @@ async fn join(
         if !stdin {
             bail!("use blind join --stdin and paste an invitation, or blind join --local");
         }
-        let host_key = local_host_key()?;
-        sftp_command()?;
+        let host_key = if client_only {
+            String::new()
+        } else {
+            sftp_command()?;
+            local_host_key()?
+        };
         let mut input = String::new();
         use std::io::Read;
         std::io::stdin().take(16_385).read_to_string(&mut input)?;
         let invitation = Invitation::decode(&input)?;
         let server = normalize_server(&invitation.server)?;
         let req = JoinRequest {
+            client_only,
             name,
             hostname,
             host: address.unwrap_or_default(),
@@ -389,7 +381,7 @@ async fn join(
     };
     // Persist the pending receipt before touching SSH so an interrupted join can resume.
     save(&c)?;
-    if !c.source.local {
+    if !c.source.active {
         finish_join(&mut c, None, None).await?;
     }
     eprintln!("Registered: {} → {}", c.source.name, c.server);
@@ -537,7 +529,7 @@ fn install_authorization(c: &ClientConfig) -> Result<()> {
     edit_authorization(c, true)
 }
 fn remove_authorization(c: &ClientConfig) -> Result<()> {
-    if c.source.local {
+    if c.source.local || c.source.client_only {
         Ok(())
     } else {
         edit_authorization(c, false)
@@ -575,6 +567,7 @@ pub struct ParsedLabels {
 }
 
 struct ShareInput {
+    manifest: Option<crate::plugin::ShareManifest>,
     meshes: Vec<PathBuf>,
     title: Option<String>,
     labels: ParsedLabels,
@@ -590,6 +583,43 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
     if metadata.len() > MAX_SHARE_CONFIG_BYTES {
         bail!("share config exceeds 4 MiB");
     }
+    let value: Value = serde_json::from_slice(&fs::read(&config_path)?)?;
+    if value.get("schema_version").is_some() {
+        let mut manifest: crate::plugin::ShareManifest = serde_json::from_value(value)?;
+        manifest.validate()?;
+        for resource in &mut manifest.resources {
+            anyhow::ensure!(
+                !crate::plugin::is_plugin(&resource.uri),
+                "versioned manifests cannot contain plugin URIs"
+            );
+            if !crate::oss::is_oss(&resource.uri) {
+                let path = Path::new(&resource.uri);
+                resource.uri = fs::canonicalize(if path.is_absolute() {
+                    path.to_owned()
+                } else {
+                    config_path.parent().unwrap().join(path)
+                })?
+                .to_string_lossy()
+                .into_owned();
+            }
+        }
+        for attachment in &manifest.attachments {
+            crate::oss::Location::parse(&attachment.uri)?;
+        }
+        return Ok(ShareInput {
+            meshes: manifest
+                .resources
+                .iter()
+                .map(|r| PathBuf::from(&r.uri))
+                .collect(),
+            title: None,
+            labels: ParsedLabels {
+                meshes: Vec::new(),
+                groups: Vec::new(),
+            },
+            manifest: Some(manifest),
+        });
+    }
     let config: ShareConfig = serde_json::from_slice(&fs::read(&config_path)?)
         .with_context(|| format!("invalid share config {}", path.display()))?;
     if config.resources.is_empty() {
@@ -603,7 +633,9 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
             bail!("resources[{}].path must not be empty", index + 1);
         }
         meshes.push(
-            if crate::oss::is_oss(&resource.path.to_string_lossy()) || resource.path.is_absolute() {
+            if crate::plugin::scheme(&resource.path.to_string_lossy()).is_some()
+                || resource.path.is_absolute()
+            {
                 resource.path
             } else {
                 base.join(resource.path)
@@ -663,6 +695,7 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
         );
     }
     Ok(ShareInput {
+        manifest: None,
         meshes,
         title: config.title,
         labels: ParsedLabels {
@@ -691,20 +724,36 @@ async fn share(
         None => {
             let labels = parse_labels(&labels, meshes.len())?;
             ShareInput {
+                manifest: None,
                 meshes,
                 title,
                 labels,
             }
         }
     };
+    if input
+        .meshes
+        .iter()
+        .any(|p| crate::plugin::is_plugin(&p.to_string_lossy()))
+    {
+        anyhow::ensure!(
+            input.meshes.len() == 1
+                && input.labels.meshes.iter().all(Option::is_none)
+                && input.labels.groups.is_empty(),
+            "a plugin share accepts one URI and no --label overrides"
+        );
+    }
     if load()?.is_none() {
-        join(false, true, None, None, None).await?;
+        join(false, true, false, None, None, None).await?;
     }
     let c = load()?.context("not registered")?;
     let paths = input
         .meshes
         .iter()
         .map(|p| {
+            if crate::plugin::is_plugin(&p.to_string_lossy()) {
+                return Ok(p.to_string_lossy().into_owned());
+            }
             if crate::oss::is_oss(&p.to_string_lossy()) {
                 let address = p.to_string_lossy().into_owned();
                 crate::oss::Location::parse(&address)?;
@@ -721,7 +770,7 @@ async fn share(
             paths.len()
         );
     }
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":paths,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless,"ttl_days":ttl_days}))).await?;
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless,"ttl_days":ttl_days}))).await?;
     let confirmed_ttl = payload["ttl_days"].as_u64();
     if confirmed_ttl.is_some_and(|days| days != u64::from(ttl_days))
         || (confirmed_ttl.is_none() && (ttl_days != crate::scene::DEFAULT_TTL_DAYS || stateless))
@@ -729,6 +778,11 @@ async fn share(
         bail!(
             "Server did not confirm the requested link lifetime; update the Blind server and retry"
         );
+    }
+    for warning in payload["warnings"].as_array().into_iter().flatten() {
+        if let Some(message) = warning["message"].as_str() {
+            eprintln!("Blind: {message}");
+        }
     }
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&payload)?),
@@ -796,6 +850,129 @@ pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {
     Ok(ParsedLabels { meshes, groups })
 }
 
+pub(crate) async fn remote_plugins() -> Result<Option<Value>> {
+    match load()? {
+        Some(c) => Ok(Some(
+            api(&c.server, "/api/v1/client/plugins", &c.credential, None).await?,
+        )),
+        None => Ok(None),
+    }
+}
+
+pub(crate) async fn status(as_json: bool) -> Result<()> {
+    let path = config_path()?;
+    let mut local = json!({"state":"unconfigured"});
+    let mut local_target = None;
+    if path.exists() {
+        match fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|b| Ok(serde_json::from_slice::<Config>(&b)?))
+        {
+            Ok(config) => {
+                let probe = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    crate::server::probe(&config),
+                )
+                .await;
+                local = match probe {
+                    Ok(Ok(Some(health))) => {
+                        local_target = Some(format!(
+                            "http://{}{}",
+                            crate::server::control_address(&config)?,
+                            config.base_path().unwrap_or_default()
+                        ));
+                        json!({"state":"running","pid":health.pid,"version":health.version})
+                    }
+                    Ok(Ok(None)) => json!({"state":"stopped"}),
+                    _ => json!({"state":"probe_failed"}),
+                };
+            }
+            Err(_) => local = json!({"state":"invalid_config"}),
+        }
+    }
+    let mut connection = json!({"state":"not_connected"});
+    let mut target = local_target
+        .clone()
+        .map(|server| json!({"kind":"local","server":server}));
+    let mut plugins = json!([]);
+    match load() {
+        Ok(Some(c)) => {
+            target =
+                Some(json!({"kind":if c.source.local{"local"}else{"remote"},"server":c.server}));
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                api(&c.server, "/api/v1/client", &c.credential, None),
+            )
+            .await;
+            let state = match result {
+                Ok(Ok(ref v)) if v["active"] == true => "connected",
+                Ok(Ok(_)) => "pending",
+                Ok(Err(ref e))
+                    if e.downcast_ref::<ApiError>()
+                        .is_some_and(|e| e.status == reqwest::StatusCode::UNAUTHORIZED) =>
+                {
+                    if c.source.active {
+                        "credential_invalid"
+                    } else {
+                        "pending"
+                    }
+                }
+                _ => "unreachable",
+            };
+            connection = json!({"state":state,"server":c.server,"source_id":c.source.id,"name":c.source.name});
+            if state == "connected" {
+                plugins = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    api(&c.server, "/api/v1/client/plugins", &c.credential, None),
+                )
+                .await
+                {
+                    Ok(Ok(v)) => v["plugins"].clone(),
+                    _ => json!({"state":"unavailable"}),
+                };
+            }
+        }
+        Ok(None) if local_target.is_some() => {
+            plugins = crate::plugin::list(path.parent().unwrap())?["plugins"].clone()
+        }
+        Ok(None) => {}
+        Err(_) => connection = json!({"state":"invalid_config"}),
+    }
+    let report = json!({"schema_version":1,"local_server":local,"connection":connection,"target":target,"plugins":plugins});
+    if as_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Local Server: {}",
+            report["local_server"]["state"].as_str().unwrap()
+        );
+        println!(
+            "Client: {}",
+            report["connection"]["state"].as_str().unwrap()
+        );
+        if let Some(target) = report["target"].as_object() {
+            println!(
+                "Target: {} ({})",
+                target["server"].as_str().unwrap(),
+                target["kind"].as_str().unwrap()
+            );
+        } else {
+            println!("Target: none");
+        }
+        if let Some(plugins) = report["plugins"].as_array() {
+            for p in plugins {
+                println!(
+                    "Plugin: {} {} ({})",
+                    p["id"].as_str().unwrap_or("?"),
+                    p["version"].as_str().unwrap_or(""),
+                    p["state"].as_str().unwrap_or("unknown")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -838,6 +1015,7 @@ mod tests {
                 user: "carol".into(),
                 host_key: String::new(),
                 local: false,
+                client_only: false,
                 active: false,
             },
             public_key: "ssh-ed25519 YWJjZA== test".into(),

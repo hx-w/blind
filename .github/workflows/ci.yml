@@ -66,3 +66,5 @@ jobs:
         run: python3 tests/integration_sftp.py target/release
       - name: Verify read-only OSS sources
         run: python3 tests/integration_oss.py target/release
+      - name: Verify Server plugins
+        run: python3 tests/integration_plugins.py target/release

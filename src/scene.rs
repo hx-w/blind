@@ -36,6 +36,10 @@ pub struct SceneDescriptor {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_groups: Vec<MeshLabelGroup>,
     pub state: ViewState,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SceneAttachment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<crate::plugin::Warning>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +60,18 @@ pub struct MeshRef {
     pub quality: MeshQuality,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<MeshLabel>,
+    #[serde(default)]
+    pub translation: [f32; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneAttachment {
+    pub id: String,
+    pub path: String,
+    pub label: String,
+    pub byte_size: Option<u64>,
+    pub revision: Option<String>,
+    pub unavailable: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -382,6 +398,7 @@ impl SceneDescriptor {
                 visible: true,
                 quality: MeshQuality::Lod,
                 label: None,
+                translation: [0.0; 3],
             });
         }
         let title = title.unwrap_or_else(|| {
@@ -401,6 +418,8 @@ impl SceneDescriptor {
                 .unwrap_or_default()
                 .as_secs(),
             meshes,
+            attachments: Vec::new(),
+            warnings: Vec::new(),
             label_groups: Vec::new(),
             state: ViewState::default(),
         })

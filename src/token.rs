@@ -96,6 +96,8 @@ mod tests {
             created_at: 1,
             ttl_days: None,
             meshes: Vec::new(),
+            attachments: Vec::new(),
+            warnings: Vec::new(),
             label_groups: Vec::new(),
             state: ViewState::default(),
         }

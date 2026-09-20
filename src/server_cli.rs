@@ -11,6 +11,11 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Manage Server-side share resolvers.
+    Plugin {
+        #[command(subcommand)]
+        command: crate::plugin::Command,
+    },
     /// Configure named OSS stores on this Server.
     Oss {
         #[command(subcommand)]
@@ -61,6 +66,7 @@ pub enum Command {
     },
     #[command(
         name = "server-status",
+        hide = true,
         about = "Report whether the local server is running"
     )]
     Status {
@@ -115,6 +121,7 @@ pub async fn run(command: Command) -> Result<()> {
         )
         .init();
     match command {
+        Command::Plugin { command } => crate::plugin::run(command).await?,
         Command::Oss { command } => {
             if !matches!(command, crate::oss::Command::List)
                 || !crate::client::list_remote_oss().await?
@@ -191,7 +198,7 @@ pub async fn run(command: Command) -> Result<()> {
             println!("{}", server::stop(&config).await?);
         }
         Command::Hosts { json } => hosts(json)?,
-        Command::Status { json } => status(json).await?,
+        Command::Status { json } => crate::client::status(json).await?,
         Command::Doctor {
             clean_invalid,
             clear_all,
@@ -396,26 +403,6 @@ fn hosts(json: bool) -> Result<()> {
                 host.origin
             );
         }
-    }
-    Ok(())
-}
-
-async fn status(json: bool) -> Result<()> {
-    let (config, _) = Config::load_or_create()?;
-    let port = config.port()?;
-    let health = server::probe(&config).await?;
-    let online = health.is_some();
-    let pid = health.map(|health| health.pid);
-    if json {
-        println!(
-            "{}",
-            serde_json::json!({ "status": if online { "running" } else { "stopped" }, "pid": pid, "configured_port": port })
-        );
-    } else {
-        println!(
-            "{} on port {port}",
-            if online { "running" } else { "stopped" }
-        );
     }
     Ok(())
 }

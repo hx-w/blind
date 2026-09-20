@@ -290,7 +290,7 @@ this contract instead of reimplementing scene or lifecycle logic.
   reported without discarding Meshes that already loaded successfully.
 - Vertex-only or zero-face PLY files render as circular GPU point sprites with
   sphere-like lighting. They are not expanded into sphere triangle Meshes.
-- PTS rings render as a continuous tube with a sphere at every original point.
+- PTS rings render as smooth, continuous curves through the original ordered samples, without point markers.
 - Details also changes surface mode, projection, axes, and the gray background
   theme.
 - Annotation → Screen brush enters a touch-locked screen-markup mode with four high-contrast
@@ -306,8 +306,9 @@ not duplicate visibility with a Solo mode.
 
 LOD generation uses meshoptimizer for PLY, STL, and OBJ triangle geometry.
 PLY point clouds are deterministically sampled across the full source order;
-PTS previews preserve every ordered source point and reduce only the procedural
-tube and marker tessellation. Generated binary PLY bytes are cached in memory
+PTS previews preserve ordered source samples when the curve budget permits,
+and otherwise resample the smooth curve by arc length before building its tube.
+Raw retains the full curve detail. Generated binary PLY bytes are cached in memory
 up to 256 MiB and disappear when the server exits; neither LODs nor Raw source
 copies are written to disk. Raw is fetched only after a client explicitly
 selects it, except for a bounded compatibility fallback: at most 32 MiB for one
@@ -440,7 +441,7 @@ its image link show the same captured marks.
 For PTS, Blind accepts Denta's `BEGIN`/`END`, numbered marker variants, and
 bare finite `x y z` rows. The ordered points form a closed ring;
 `SELECTION_SEED` metadata is retained in the source but is not rendered. Blind
-derives a mobile-visible tube and point size from the ring bounds and limits
+derives a mobile-visible tube width from the ring bounds and limits
 one PTS resource to 4,096 points.
 
 See [the sharing contract](docs/sharing.md) for the exact capability and
@@ -536,3 +537,9 @@ cargo test --locked
 ## License
 
 [MIT](LICENSE)
+
+## Server plugins
+
+Server-side resolvers extend `blind share SCHEME://INPUT` without installing
+plugins on Clients. See [plugin installation, configuration and protocol](docs/plugins.md).
+`blind status` now reports both the local Server and the current Client connection.
