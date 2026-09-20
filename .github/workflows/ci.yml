@@ -72,6 +72,11 @@ jobs:
         run: python3 tests/integration_sftp.py target/release
       - name: Verify read-only OSS sources
         run: python3 tests/integration_oss.py target/release
+      - name: Verify sandboxed Docker component export
+        if: runner.os == 'Linux'
+        run: |
+          docker build -f deploy/Dockerfile -t blind-component-test .
+          "$RUNNER_TEMP/component-tests/bin/python" tests/integration_container.py blind-component-test
       - name: Verify export network isolation
         run: cargo test --locked render_viewer::tests -- --include-ignored
       - name: Verify components and PNG export

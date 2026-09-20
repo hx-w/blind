@@ -21,7 +21,11 @@ impl ExportRequests {
         let document = url::Url::parse(document)?;
         ensure!(
             document.scheme() == "http"
-                && document.host_str() == Some("127.0.0.1")
+                && match document.host() {
+                    Some(url::Host::Ipv4(ip)) => !ip.is_unspecified(),
+                    Some(url::Host::Ipv6(ip)) => !ip.is_unspecified(),
+                    _ => false,
+                }
                 && document.username().is_empty()
                 && document.password().is_none()
                 && document.query() == Some("render=1")
@@ -400,6 +404,12 @@ mod tests {
         ));
         assert!(!policy.allows("POST", "http://127.0.0.1:7418/blind/api/v1/scenes/abc_12"));
         assert!(ExportRequests::new("https://example.org/s/token?render=1").is_err());
+        for address in ["[::1]", "192.0.2.10"] {
+            let policy =
+                ExportRequests::new(&format!("http://{address}:7400/s/token?render=1")).unwrap();
+            assert!(policy.allows("GET", &format!("http://{address}:7400/api/v1/scenes/token")));
+            assert!(!policy.allows("GET", "http://127.0.0.1:7400/api/v1/scenes/token"));
+        }
     }
     /// Execute explicitly on a host with Chrome/Chromium. The fake Viewer has a
     /// deliberately permissive CSP so this tests CDP isolation independently.

@@ -130,7 +130,10 @@ BLIND_UID=$(id -u) BLIND_GID=$(id -g) docker compose -f deploy/compose.yaml up -
 The example binds HTTP only to `127.0.0.1:7401`, keeps the container filesystem
 read-only and mounts only configuration storage. It does not mount or copy
 remote originals. SFTP needs `ssh-keygen`, provided by `openssh-client` in the
-image. Mesa's Vulkan software renderer supports PNG on hosts without a GPU.
+image. Mesa's Vulkan software renderer supports legacy geometry PNGs on hosts
+without a GPU. Chromium exports component scenes; the included seccomp profile
+permits its nested user-namespace sandbox while retaining dropped capabilities,
+no-new-privileges and the 4 GiB service limit. See [profile provenance](../deploy/seccomp-chromium.md).
 
 Adapt [the Nginx example](../deploy/nginx.conf) for your hostname and certificate
 paths. It preserves HTTPS origins, blocks local-owner API operations and

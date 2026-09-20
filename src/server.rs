@@ -1033,8 +1033,8 @@ async fn render_image(
     }
     if !scene.components.is_empty() {
         let url = format!(
-            "http://127.0.0.1:{}{}/s/{}?render=1",
-            state.config.port()?,
+            "http://{}{}/s/{}?render=1",
+            control_address(&state.config)?,
             state.config.base_path().unwrap_or_default(),
             token
         );
