@@ -2,10 +2,13 @@ import type { SurfaceAnnotation, ScreenStroke, Vec3 } from './api';
 import { CatmullRomCurve3, Vector3 } from 'three';
 import type { MeshViewer } from './viewer';
 import type { MarkupCanvas } from './markup';
+import { clamp, layoutLabel, type LabelOffset, type Rect } from './label-layout';
 
 type Hit = { point: Vec3; normal: Vec3 };
 type Mode = 'select' | 'point' | 'line' | 'screen';
 type Snapshot = { marks: SurfaceAnnotation[]; strokes: ScreenStroke[]; selected?: string; screen?: number; draft?: string };
+type BadgeView = { button: HTMLButtonElement; line: SVGLineElement; width: number; height: number; offset?: LabelOffset };
+const SVG_NS = 'http://www.w3.org/2000/svg';
 const COLORS = ['#ff6b5e', '#ffc857', '#5fb4ff', '#f4f2ea'];
 const icon = (path: string) => `<svg viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
 const undoIcon = icon('<path d="m9 8-4 4 4 4M5 12h9a5 5 0 0 1 5 5"/>');
@@ -23,11 +26,16 @@ export class SurfaceEditor {
   private selectedScreen?: number;
   private draft?: string;
   private target = 0;
-  private navigating = false;
   private busy = false;
+  private selectionPointer?: number;
+  private readonly cameraPointers = new Set<number>();
+  private readonly cancelledPointers = new Set<number>();
   private active = false;
-  private listOpen = false;
-  private paletteOpen = false;
+  private listDismissed = false;
+  private readonly badgeElements = new Map<string, BadgeView>();
+  private readonly badgeLeaders = document.createElementNS(SVG_NS, 'svg');
+  private badgeObstacles: Rect[] | null = null;
+  private badgeViewport = '';
   private hovered?: string;
   private history: Snapshot[] = [];
   private future: Snapshot[] = [];
@@ -41,7 +49,8 @@ export class SurfaceEditor {
     this.input = document.createElement('div'); this.input.id = 'surface-input'; this.input.hidden = true;
     this.input.setAttribute('aria-label', '标记画布');
     document.querySelector('#viewer')!.append(this.input);
-    this.badges = document.createElement('div'); this.badges.id = 'surface-badges'; this.badges.setAttribute('aria-hidden','true');
+    this.badges = document.createElement('div'); this.badges.id = 'surface-badges';
+    this.badgeLeaders.setAttribute('aria-hidden','true');this.badges.append(this.badgeLeaders);
     document.querySelector('#viewer')!.append(this.badges);
     this.panel = document.createElement('section'); this.panel.id = 'surface-toolbar'; this.panel.hidden = true;
     this.panel.setAttribute('aria-label', '标记工具'); this.panel.setAttribute('data-label-obstacle', '');
@@ -54,13 +63,10 @@ export class SurfaceEditor {
         <button id="surface-done" class="surface-primary" type="button">完成</button>
       </div>
       <div class="surface-actions">
-        <button id="surface-color-toggle" type="button" aria-label="标记颜色" aria-expanded="false"><i></i></button>
-        <button id="surface-undo" type="button" aria-label="撤销标记">${undoIcon}</button><button id="surface-redo" type="button" aria-label="重做标记">${redoIcon}</button>
+        <div class="surface-colors" role="group" aria-label="标记颜色">${COLORS.map((color, i) => `<button type="button" data-surface-color="${color}" aria-label="${['珊瑚红','琥珀黄','标记蓝','柔白'][i]}" style="--ink:${color}"><i></i></button>`).join('')}</div>
         <span class="surface-action-spacer"></span>
-        <button id="surface-navigate" type="button">${icon('<path d="m9 3 3-2 3 2M12 1v7M9 21l3 2 3-2M12 16v7M3 9l-2 3 2 3M1 12h7M21 9l2 3-2 3M16 12h7"/>')}<span>视角</span></button>
-        <button id="surface-list-toggle" type="button" aria-expanded="false">标记 <span id="surface-count">0</span></button>
+        <button id="surface-undo" type="button" aria-label="撤销标记">${undoIcon}</button><button id="surface-redo" type="button" aria-label="重做标记">${redoIcon}</button>
       </div>
-      <div class="surface-colors" hidden>${COLORS.map((color, i) => `<button type="button" data-surface-color="${color}" aria-label="${['珊瑚红','琥珀黄','标记蓝','柔白'][i]}" style="--ink:${color}"><i></i></button>`).join('')}</div>
       <div class="surface-selection" hidden>
         <input id="surface-name" maxlength="120" aria-label="标记名称" placeholder="标记名称" autocomplete="off"/>
         <button id="surface-close" type="button">闭合</button><button id="surface-end" type="button">完成线</button>
@@ -72,11 +78,15 @@ export class SurfaceEditor {
     this.list.setAttribute('aria-label','标记列表'); this.list.setAttribute('data-label-obstacle','');
     this.list.innerHTML = '<div class="surface-list-heading"><strong>标记</strong><span>点选定位</span><button type="button" id="surface-list-close" aria-label="收起标记列表">×</button></div><div id="surface-items"></div>';
     shell.append(this.list);
-    this.el('#surface-color-toggle').addEventListener('click',()=> {this.paletteOpen=!this.paletteOpen;this.sync();});
-    this.el('#surface-list-toggle').addEventListener('click', () => { this.listOpen=!this.listOpen; this.sync(); });
-    this.el('#surface-list-close').addEventListener('click', () => { this.listOpen=false; this.sync(); });
+    const layout = () => this.updateLayout();
+    new ResizeObserver(layout).observe(this.panel);
+    new MutationObserver(layout).observe(this.shell, {attributes:true, attributeFilter:['class']});
+    window.addEventListener('resize', layout);
+    window.visualViewport?.addEventListener('resize', layout);
+    window.visualViewport?.addEventListener('scroll', layout);
+    layout();
+    this.el('#surface-list-close').addEventListener('click', () => { this.listDismissed=true; this.updateLayout(); });
     this.el('#surface-done').addEventListener('click', () => this.exit());
-    this.el('#surface-navigate').addEventListener('click', () => this.navigate());
     this.el('#surface-end').addEventListener('click', () => { this.finishLine(); this.sync(); });
     this.el('#surface-close').addEventListener('click', () => this.closeLine());
     this.el('#surface-delete').addEventListener('click', () => this.remove());
@@ -87,10 +97,10 @@ export class SurfaceEditor {
     });
     this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-mode]').forEach(button => button.addEventListener('click', () => {
       this.markup.finishActive(); this.finishLine(); this.selected = undefined; this.selectedScreen=undefined;
-      this.mode = button.dataset.surfaceMode as Mode; this.navigating=false; this.status = ''; this.sync();
+      this.mode = button.dataset.surfaceMode as Mode; this.status = ''; this.sync();
     }));
     this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-color]').forEach(button => button.addEventListener('click', () => {
-      this.color = button.dataset.surfaceColor!; this.paletteOpen=false;
+      this.color = button.dataset.surfaceColor!;
       if (this.current) { this.remember(); this.current.color = this.color; }
       else if(this.selectedScreen!==undefined) { this.remember(); const strokes=this.markup.exportStrokes(); strokes[this.selectedScreen].color=this.color; this.markup.load(strokes); }
       this.sync();
@@ -105,25 +115,81 @@ export class SurfaceEditor {
     window.addEventListener('keydown', event => {
       if (!this.active || this.busy || event.target instanceof HTMLInputElement || document.querySelector('dialog[open]')) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? this.redo() : this.undo(); }
-      else if (event.key === 'Escape') { event.preventDefault(); if (this.gesture) this.cancelGesture(); else if(this.listOpen) {this.listOpen=false;this.sync();} else this.exit(); }
+      else if (event.key === 'Escape') { event.preventDefault(); if (this.gesture) this.cancelGesture(); else if(!this.list.hidden) {this.listDismissed=true;this.updateLayout();} else this.exit(); }
       else if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.remove(); }
-      else if (event.code === 'Space' && !event.repeat) { event.preventDefault(); this.navigate(); }
+      else if (event.code === 'Space' && !event.repeat) { event.preventDefault(); this.chooseSelection(); }
       else if (event.key === 'Enter') { event.preventDefault(); this.finishLine(); this.sync(); }
     });
-    let previousFrame=0;
-    const frame=(time:number)=> { if((this.active || this.listOpen) && time-previousFrame>100) {this.renderBadges();previousFrame=time;} requestAnimationFrame(frame); }; requestAnimationFrame(frame);
+    // Selection shares the viewer canvas with camera controls. Only a hit on a
+    // mark captures the gesture; ordinary drags and multi-touch stay with Arcball.
+    const canvas=this.el<HTMLCanvasElement>('#canvas-root canvas');
+    window.addEventListener('pointerdown',event=> {
+      // A second finger can land on a label or toolbar, outside the canvas.
+      if(!this.active || this.mode!=='select' || event.pointerId===this.selectionPointer || (!this.cancelledPointers.size && this.selectionPointer===undefined))return;
+      if(this.selectionPointer!==undefined)this.cancelledPointers.add(this.selectionPointer);
+      this.cancelledPointers.add(event.pointerId);event.stopImmediatePropagation();event.preventDefault();
+      canvas.setPointerCapture(event.pointerId);this.selectionPointer=undefined;this.cancelGesture();
+      this.status='已取消调整，松开后可双指移动与缩放';this.sync();
+    },true);
+    canvas.addEventListener('pointerdown',event=> {
+      if(!this.active || this.mode!=='select' || event.button!==0 || this.busy)return;
+      if(this.cameraPointers.size || !event.isPrimary || (!this.findMark(event.clientX,event.clientY) && this.markup.hitTest(event.clientX,event.clientY)===undefined)) {
+        this.cameraPointers.add(event.pointerId);return;
+      }
+      event.stopImmediatePropagation();this.selectionPointer=event.pointerId;
+      this.viewer.setInteractionEnabled(false);void this.down(event,canvas);
+    },true);
+    canvas.addEventListener('pointermove',event=> {
+      if(this.cancelledPointers.has(event.pointerId)){event.stopImmediatePropagation();return;}
+      if(this.selectionPointer!==event.pointerId)return;
+      event.stopImmediatePropagation();if(this.gesture)this.move(event);
+    },true);
+    canvas.addEventListener('pointerup',event=> {
+      this.cameraPointers.delete(event.pointerId);
+      if(this.cancelledPointers.delete(event.pointerId)){event.stopImmediatePropagation();this.sync();return;}
+      if(this.selectionPointer!==event.pointerId)return;
+      event.stopImmediatePropagation();this.selectionPointer=undefined;this.up(event);this.sync();
+    },true);
+    const cancel=(event:PointerEvent)=> {
+      this.cameraPointers.delete(event.pointerId);
+      if(this.cancelledPointers.delete(event.pointerId)){event.stopImmediatePropagation();this.sync();return;}
+      if(this.selectionPointer!==event.pointerId)return;
+      this.selectionPointer=undefined;this.cancelGesture();this.sync();
+    };
+    canvas.addEventListener('pointercancel',cancel,true);
+    canvas.addEventListener('lostpointercapture',cancel,true);
+    const endCamera=(event:PointerEvent)=>this.cameraPointers.delete(event.pointerId);
+    window.addEventListener('pointerup',endCamera,true);
+    window.addEventListener('pointercancel',endCamera,true);
+    window.addEventListener('blur',()=> {
+      this.cameraPointers.clear();this.cancelledPointers.clear();this.selectionPointer=undefined;
+      if(this.active){this.cancelGesture();this.sync();}
+    });
+    this.viewer.onRender = () => this.renderBadges();
   }
   private el<T extends HTMLElement = HTMLButtonElement>(selector: string): T { return document.querySelector<T>(selector)!; }
+  private updateLayout(): void {
+    const viewport = window.visualViewport;
+    const height = viewport?.height ?? window.innerHeight;
+    const inset = Math.max(0, window.innerHeight - height - (viewport?.offsetTop ?? 0));
+    this.shell.style.setProperty('--annotation-viewport-height', `${height}px`);
+    this.shell.style.setProperty('--annotation-keyboard-inset', `${inset}px`);
+    this.shell.style.setProperty('--annotation-toolbar-height', `${this.active ? this.panel.offsetHeight : 64}px`);
+    const detailWidth = this.shell.classList.contains('panel-open') ? this.el('#control-panel').offsetWidth + 16 : 0;
+    const enoughSpace = (viewport?.width ?? window.innerWidth) - detailWidth >= 900 && height >= 600;
+    this.badgeObstacles=null;this.viewer.refreshLabels();
+    this.list.hidden = this.listDismissed || !enoughSpace || (!this.visibleMarks().length && !this.markup.hasStrokes);
+  }
   private get current(): SurfaceAnnotation | undefined { return this.viewer.annotations.find(mark => mark.id === this.selected); }
   get isActive(): boolean { return this.active; }
   async enter(id?: string): Promise<void> {
-    this.callbacks.closePanel(); this.active = true; this.navigating = false;
+    this.callbacks.closePanel(); this.active = true;
     if(id) this.selectMark(id);
     this.panel.hidden = false; this.shell.classList.add('surface-mode');
     this.el('#gesture-hint').classList.add('dismissed'); this.sync();
   }
   load(): void {
-    this.listOpen=this.visibleMarks().length>0 || this.markup.hasStrokes;
+    this.listDismissed=false;
     this.refreshList();this.sync();
   }
   private selectMark(id: string): void {
@@ -131,16 +197,16 @@ export class SurfaceEditor {
     const mark=this.viewer.annotations.find(m=>m.id===id); if(!mark) return;
     this.selected=id; this.mode='select'; this.target=mark.mesh; this.color=mark.color;
     if(!mark.visible) {this.remember();mark.visible=true;}
-    this.viewer.focusAnnotation(mark); this.navigating=false; this.status=''; this.sync();
+    this.viewer.focusAnnotation(mark); this.status=''; this.sync();
   }
   exit(): void {
     this.markup.finishActive(); this.pending=undefined; this.cancelGesture(); this.finishLine(); this.active = false; this.selected = undefined; this.selectedScreen=undefined;
-    this.panel.hidden = true; this.input.hidden = true; this.shell.classList.remove('surface-mode'); this.badges.replaceChildren();
+    this.panel.hidden = true; this.input.hidden = true; this.shell.classList.remove('surface-mode');
     this.viewer.setInteractionEnabled(true); this.sync();
   }
   finishForShare(): void { this.markup.finishActive(); this.cancelGesture(); this.finishLine(); this.sync(); }
   invalidateScreenHistory(): void { for(const s of [...this.history,...this.future]) {s.strokes=[];s.screen=undefined;} this.selectedScreen=undefined; }
-  private navigate(): void { this.markup.finishActive(); this.cancelGesture(); this.finishLine(); this.navigating = !this.navigating; this.sync(); }
+  private chooseSelection(): void { this.markup.finishActive(); this.cancelGesture(); this.finishLine(); this.mode='select'; this.status=''; this.sync(); }
   private snapshot(): Snapshot { return { marks: structuredClone(this.viewer.annotations), strokes:this.markup.exportStrokes(), screen:this.selectedScreen, selected: this.selected, draft: this.draft }; }
   private async restore(snapshot: Snapshot): Promise<boolean> {
     const targets=[...new Set(snapshot.marks.map(mark=>mark.mesh))];
@@ -190,12 +256,12 @@ export class SurfaceEditor {
     return [...this.viewer.annotations].reverse().find(mark => this.viewer.modelInfos[mark.mesh]?.visible && this.viewer.modelInfos[mark.mesh]?.opacity > 0 && mark.visible && mark.points.some((point, i) =>
       (mark.kind === 'point' || i % 2 === 0) && this.nearPoint(point, x, y, mark.kind === 'point' ? 18 : 12) && this.viewer.surfacePointVisible(point, mark.mesh)));
   }
-  private async down(event: PointerEvent): Promise<void> {
+  private async down(event: PointerEvent, capture: HTMLElement = this.input): Promise<void> {
     if (event.button !== 0) return;
-    if(this.pending && event.pointerId!==this.pending.id) {this.pending=undefined;this.status='双指操作请先切换视角';this.sync();return;}
+    if(this.pending && event.pointerId!==this.pending.id) {this.pending=undefined;this.status='双指移动与缩放请切换到「选择」';this.sync();return;}
     if(this.busy)return;
-    if (this.gesture) { this.cancelGesture(); this.status = '用「调整视角」旋转、移动和缩放'; this.sync(); return; }
-    event.preventDefault(); this.input.setPointerCapture(event.pointerId);
+    if (this.gesture) { this.cancelGesture(); this.status = '用「选择」旋转、移动和缩放'; this.sync(); return; }
+    event.preventDefault(); capture.setPointerCapture(event.pointerId);
     if(this.mode==='select') {
       const screen=this.markup.hitTest(event.clientX,event.clientY);
       if(screen!==undefined) {this.selected=undefined;this.selectedScreen=screen;this.sync();return;}
@@ -379,7 +445,7 @@ export class SurfaceEditor {
   refreshList(): void {
     const container = this.el('#surface-items'); container.replaceChildren();
     const marks=this.visibleMarks(), strokes=this.markup.exportStrokes();
-    this.el('#surface-count').textContent=String(marks.length+strokes.length);
+    this.updateLayout();
     if (!marks.length && !strokes.length) { const p = document.createElement('p'); p.textContent = '点、线和画笔都收在这里。点选条目，在画布中查看。'; container.append(p); }
     const row=(number:number,label:string,color:string,kind:string,selected:boolean,click:()=>void)=> {
       const item=document.createElement('div');item.className='surface-list-row';item.classList.toggle('selected',selected);
@@ -396,27 +462,66 @@ export class SurfaceEditor {
       toggle.setAttribute('aria-label',`${mark.visible?'隐藏':'显示'} ${mark.label}`);toggle.setAttribute('aria-pressed',String(mark.visible));
       toggle.addEventListener('click',()=> {this.remember();mark.visible=!mark.visible;this.sync();});item.append(toggle);
     });
-    strokes.forEach((stroke,i)=>row(marks.length+i+1,`画笔 ${i+1}`,stroke.color,'屏幕',i===this.selectedScreen,()=> {void this.enter();this.finishLine();this.selected=undefined;this.selectedScreen=i;this.color=stroke.color;this.mode='select';this.navigating=false;this.sync();}));
+    strokes.forEach((stroke,i)=>row(marks.length+i+1,`画笔 ${i+1}`,stroke.color,'屏幕',i===this.selectedScreen,()=>this.selectScreen(i)));
+  }
+  private selectScreen(index: number): void {
+    const stroke=this.markup.exportStrokes()[index]; if(!stroke)return;
+    void this.enter();this.finishLine();this.selected=undefined;this.selectedScreen=index;
+    this.color=stroke.color;this.mode='select';this.sync();
   }
   private renderBadges(): void {
-    this.badges.replaceChildren();
-    const marks=this.visibleMarks();
-    const badge=(x:number,y:number,number:number,label:string,color:string,selected:boolean)=> {
-      const el=document.createElement('span');el.className='surface-badge';el.classList.toggle('selected',selected);
-      el.style.left=`${x}px`;el.style.top=`${y}px`;el.style.setProperty('--ink',color);
-      el.textContent=`${number}${selected?' · '+label:''}`;this.badges.append(el);
+    const retained = new Set<string>();
+    const width=window.innerWidth,height=window.innerHeight,viewport=`${width}:${height}`;
+    if(viewport!==this.badgeViewport) {
+      this.badgeViewport=viewport;this.badgeObstacles=null;
+      for(const view of this.badgeElements.values()){view.width=0;view.offset=undefined;}
+    }
+    if(!this.badgeObstacles) this.badgeObstacles=Array.from(document.querySelectorAll<HTMLElement>('[data-label-obstacle]')).filter(el=>el.getClientRects().length).map(el=>{const r=el.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};});
+    const occupied=this.badgeObstacles.slice();
+    const touchPadding=matchMedia('(pointer: coarse)').matches ? 9 : 0;
+    // Keep names away from editing handles so pointer drags reach the surface.
+    if(this.active && this.current)for(const i of this.current.controls){const p=this.viewer.projectSurface(this.current.points[i]);if(p.visible)occupied.push({x:p.x-14,y:p.y-14,width:28,height:28});}
+    const badge=(key:string,x:number,y:number,label:string,color:string,selected:boolean,click:()=>void)=> {
+      retained.add(key);
+      let view=this.badgeElements.get(key);
+      if(!view) {
+        const button=document.createElement('button');button.type='button';button.className='surface-badge';
+        const line=document.createElementNS(SVG_NS,'line');line.classList.add('surface-badge-leader');
+        button.addEventListener('click',click);view={button,line,width:0,height:0};
+        this.badgeElements.set(key,view);this.badges.append(button);this.badgeLeaders.append(line);
+      }
+      const el=view.button;
+      el.classList.toggle('selected',selected);
+      el.style.setProperty('--ink',color);
+      if(el.textContent!==label){el.textContent=label;view.width=0;view.offset=undefined;}
+      if(!view.width){view.width=el.offsetWidth;view.height=el.offsetHeight;}
+      const {rect,offset}=layoutLabel({width,height,labelWidth:view.width+touchPadding*2,labelHeight:view.height+touchPadding*2,x,y,occupied,maxLeaderLength:180},view.offset);
+      view.offset=offset;occupied.push({x:rect.x-4,y:rect.y-4,width:rect.width+8,height:rect.height+8});
+      rect.x+=touchPadding;rect.y+=touchPadding;rect.width=view.width;rect.height=view.height;
+      el.style.transform=`translate3d(${rect.x}px,${rect.y}px,0)`;
+      view.line.setAttribute('x1',String(x));view.line.setAttribute('y1',String(y));
+      view.line.setAttribute('x2',String(clamp(x,rect.x,rect.x+rect.width)));
+      view.line.setAttribute('y2',String(clamp(y,rect.y,rect.y+rect.height)));
+      view.line.style.setProperty('--ink',color);
+      el.title=label;el.setAttribute('aria-label',`编辑 ${label}`);
+      // Drawing must still reach the surface beneath an existing label.
+      el.disabled=this.busy;
+      el.style.pointerEvents=this.active && this.mode!=='select' ? 'none' : 'auto';
     };
-    marks.forEach((mark,index)=> {
-      const selected=mark.id===(this.hovered??this.selected);
-      if(!mark.visible || (!this.listOpen && !selected)) return;
-      const i=Math.floor(mark.points.length/2),point=mark.points[i];
-      if(!this.viewer.surfacePointVisible(point,mark.mesh)) return;
-      const p=this.viewer.projectSurface(point);badge(p.x,p.y,index+1,mark.label,mark.color,selected);
+    this.visibleMarks().forEach(mark=> {
+      if(!mark.visible)return;
+      const count=mark.points.length;
+      const candidates=[Math.floor(count/2),0,count-1,Math.floor(count/4),Math.floor(count*3/4)];
+      const point=[...new Set(candidates)].map(i=>mark.points[i]).find(p=>p && this.viewer.surfacePointVisible(p,mark.mesh));
+      if(!point)return;
+      const p=this.viewer.projectSurface(point);
+      badge(mark.id,p.x,p.y,mark.label||'未命名标记',mark.color,mark.id===(this.hovered??this.selected),()=>void this.enter(mark.id));
     });
     this.markup.exportStrokes().forEach((stroke,index)=> {
-      if(!this.listOpen && index!==this.selectedScreen) return;
-      const points=this.markup.displayPoints(index),p=points[Math.floor(points.length/2)];if(p) badge(p[0],p[1],marks.length+index+1,`画笔 ${index+1}`,stroke.color,index===this.selectedScreen);
+      const points=this.markup.displayPoints(index),p=points[Math.floor(points.length/2)];
+      if(p)badge(`screen:${index}`,p[0],p[1],`画笔 ${index+1}`,stroke.color,index===this.selectedScreen,()=>this.selectScreen(index));
     });
+    for(const [key,view] of this.badgeElements)if(!retained.has(key)){view.button.remove();view.line.remove();this.badgeElements.delete(key);}
   }
   private sync(refresh = true): void {
     this.panel.querySelectorAll<HTMLButtonElement>('button').forEach(button=>button.disabled=this.busy);
@@ -424,25 +529,17 @@ export class SurfaceEditor {
     this.list.inert=this.busy;
     this.el<HTMLElement>('.view-control').inert=this.busy;
     const share=this.el<HTMLButtonElement>('#share-view');if(!share.classList.contains('working'))share.disabled=this.busy;
-    this.input.hidden = !this.active || this.navigating || this.mode==='screen';
+    this.input.hidden = !this.active || this.mode==='select' || this.mode==='screen';
     this.input.style.cursor=this.mode==='select'?'default':'crosshair';
-    this.markup.setEnabled(this.active && !this.navigating && this.mode==='screen'); this.markup.setColor(this.color);
+    this.markup.setEnabled(this.active && this.mode==='screen'); this.markup.setColor(this.color);
     this.markup.setSelection(this.active?this.selectedScreen:undefined);
-    if (this.active) this.viewer.setInteractionEnabled(this.navigating && !this.busy);
+    if (this.active) this.viewer.setInteractionEnabled(this.mode==='select' && !this.busy && this.selectionPointer===undefined && !this.cancelledPointers.size);
     this.viewer.setAnnotations(this.viewer.annotations, this.active ? this.selected : undefined);
-    const hint = this.mode==='select' ? '点选标记 · 拖动控制点调整位置' : this.mode==='screen' ? '屏幕画笔 · 松手成一笔，改变视角后隐藏' : this.mode === 'point' ? '点按可见表面落点 · 拖动微调' : this.draft ? '继续点按连线，或点「完成线」' : '沿表面拖画，松手成线 · 也可逐点连线';
-    this.el('#surface-hint').textContent = this.busy ? this.status : this.navigating ? '单指旋转 · 双指移动与缩放' : this.status || hint;
-    this.el('#surface-navigate span').textContent = this.navigating ? '继续' : '视角';
-    this.el('#surface-navigate').setAttribute('aria-pressed',String(this.navigating));
+    const hint = this.mode==='select' ? '拖动旋转 · 双指移动与缩放 · 点选标记编辑' : this.mode==='screen' ? '屏幕画笔 · 松手成一笔，改变视角后隐藏' : this.mode === 'point' ? '点按可见表面落点 · 拖动微调' : this.draft ? '继续点按连线，或点「完成线」' : '沿表面拖画，松手成线 · 也可逐点连线';
+    this.el('#surface-hint').textContent = this.status || hint;
     this.el<HTMLButtonElement>('#surface-undo').disabled = !this.history.length || this.busy;
     this.el<HTMLButtonElement>('#surface-redo').disabled = !this.future.length || this.busy;
     this.el('#brush-tool').setAttribute('aria-pressed',String(this.active));
-    this.el('#surface-color-toggle').style.setProperty('--ink',this.current?.color??this.color);
-    this.el('#surface-color-toggle').setAttribute('aria-expanded',String(this.paletteOpen));
-    this.el('.surface-colors').hidden=!this.paletteOpen;
-    this.list.hidden= !this.listOpen;
-    if(!this.active && !this.listOpen) this.badges.replaceChildren();
-    this.el('#surface-list-toggle').setAttribute('aria-expanded',String(this.listOpen));
     this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-mode]').forEach(button => { const on=button.dataset.surfaceMode === this.mode; button.classList.toggle('active',on); button.setAttribute('aria-pressed',String(on)); button.disabled=this.busy; });
     this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-color]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.surfaceColor === (this.current?.color ?? this.color))));
     const selected = this.current;
@@ -453,6 +550,6 @@ export class SurfaceEditor {
     this.el('#surface-close').textContent = selected?.closed ? '打开' : '闭合';
     this.el('#surface-end').hidden = !this.draft;
     if (refresh) { this.refreshList(); this.callbacks.change(); }
-    requestAnimationFrame(()=>this.shell.style.setProperty('--annotation-toolbar-height',`${this.active?this.panel.offsetHeight:64}px`));
+    requestAnimationFrame(()=>this.updateLayout());
   }
 }

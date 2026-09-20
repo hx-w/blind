@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { MeshBVH, acceleratedRaycast, disposeBoundsTree } from 'three-mesh-bvh';
 import { ArcballControls } from 'three/addons/controls/ArcballControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
@@ -77,6 +78,7 @@ export class MeshViewer {
   onModelChange?: () => void;
   onLoadProgress?: (progress: MeshLoadProgress) => void;
   onViewChangeStart?: () => void;
+  onRender?: () => void;
 
   constructor(private readonly root: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
@@ -86,6 +88,7 @@ export class MeshViewer {
     this.root.append(this.renderer.domElement);
     this.labels = new MeshLabels(this.root, (meshes, animate) => this.focusLabelGroup(meshes, animate));
     this.camera = this.perspective;
+    this.raycaster.firstHitOnly = true;
     this.controls = new ArcballControls(this.camera, this.renderer.domElement, this.scene);
     this.controls.enableAnimations = false;
     this.controls.enableFocus = false;
@@ -416,6 +419,12 @@ export class MeshViewer {
       // which are frequently quantized or face-split in scan files.
       geometry.deleteAttribute('normal');
       geometry.computeVertexNormals();
+      // Raw meshes are immutable. Keep source triangle order while accelerating
+      // surface hits and annotation occlusion queries for every camera frame.
+      if (child instanceof THREE.Mesh) {
+        geometry.boundsTree = new MeshBVH(geometry, { indirect: true });
+        child.raycast = acceleratedRaycast;
+      }
     });
   }
 
@@ -570,6 +579,7 @@ export class MeshViewer {
       this.surfaceInk.update(this.annotations, this.camera, width, height, index => !!this.models[index]?.info.visible && this.models[index].info.opacity > 0, (point, index) => this.surfacePointVisible(point, index), this.annotationSelection, this.annotationPreview);
       this.renderer.render(this.scene, this.camera);
       this.labels.render(this.models, this.labelGroups, this.camera, this.selected);
+      this.onRender?.();
       this.dirty = false;
     }
   };
@@ -610,6 +620,7 @@ function numberHeader(response: Response, name: string): number | undefined {
 function disposeObject(object: THREE.Object3D): void {
   object.traverse((child) => {
     if (!isDrawable(child)) return;
+    disposeBoundsTree.call(child.geometry);
     child.geometry.dispose();
     const materials = Array.isArray(child.material) ? child.material : [child.material];
     materials.forEach((material) => material.dispose());

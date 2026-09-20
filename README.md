@@ -326,13 +326,16 @@ curve sampled onto the visible surface. Release a drag to finish one line; the
 next drag creates another. For click-to-connect, use **完成线** or **闭合**.
 New points and completed lines keep their name field available until another
 mark or tool is chosen. **选择** lets you rename, recolor, move handles or delete.
-The **标记** list includes visible-Mesh annotations and screen strokes, with
-matching canvas numbers, selection highlighting and click-to-locate. Shared scenes
-with annotations open this list automatically while camera navigation stays active.
+Canvas labels show annotation names directly; click a label to edit its mark.
+When the viewport has room, an annotation list opens alongside the scene for
+selection and visibility controls. Compact viewports keep the canvas clear of
+this list. Closing the list preserves marks, labels and the current selection.
+Labels follow camera movement in the same render frame.
 Undo and redo include each complete gesture; interrupted touches are cancelled.
 
-Drawing owns the pointer. **视角** restores normal camera gestures and finishes
-the current line; **继续** resumes editing. The visible surface under the pointer
+Drawing owns the pointer. **选择** finishes the current line and restores camera
+gestures on ordinary canvas drags; dragging a selected mark edits its handles.
+Colors remain visible in the toolbar. The visible surface under the pointer
 chooses the target automatically, independent of the selected Mesh. Every line
 belongs to one Mesh. Gaps, hidden surfaces and other Meshes cannot receive samples.
 Surface tools require triangle geometry; point clouds and PTS remain viewable.
@@ -341,7 +344,7 @@ The target loads Raw on demand; annotated Meshes stay Raw to keep geometry stabl
 Sharing captures frozen 3D samples, editing handles, names, colors and visibility.
 Reopening never refits the path. View and PNG links include the marks; camera
 movement keeps them attached and hidden Meshes hide their marks. Editing produces
-a new share without changing the original. PNG exports include points, paths and numbered name labels, with Chinese and
+a new share without changing the original. PNG exports include points, paths and name labels, with Chinese and
 Latin text rendered using the bundled font. Original Mesh files are never modified.
 The **画笔** tool retains view-dependent screen markup. All annotation tools
 share one dock, color palette, selection list, and undo/redo history. Moving the
@@ -357,7 +360,7 @@ this distribution:
 
 - valid: the payload decrypts, has not expired, and every source revision still
   matches;
-- expired: the absolute seven-day lifetime has ended;
+- expired: the configured lifetime has ended;
 - source gone: a source was deleted, moved, replaced, changed, or was revoked;
 - unavailable: the source host is offline, authentication fails, or access is temporarily denied; these links are retained by `--clean-invalid`;
 - tombstoned: Blind previously detected an invalid source;
@@ -381,6 +384,28 @@ row to list or delete.
 
 ## Sharing
 
+Set a link's lifetime in whole days with `--ttl` (default: `7`). Use `0` for
+a permanent link:
+
+```sh
+blind share model.ply --ttl 30
+blind share model.ply --ttl 0
+blind share --config scene.json --ttl 0 --format json
+```
+
+Permanent links have no time expiry. They remain subject to source validation:
+deleted, changed or revoked sources invalidate the link, while temporary network
+or authentication failures preserve it. Automatic expiry and capacity cleanup
+never evict a valid permanent scene. Explicit `doctor --clear-all` still removes
+all short links, including permanent ones. Permanent scenes count toward the
+active-scene limit; reaching that limit rejects new links instead of evicting old ones.
+
+Browser reshares inherit the lifetime setting and preserve annotations. A changed
+snapshot starts its own lifetime; sharing an identical active snapshot reuses its
+link without extending its expiry. `--stateless` also honors `--ttl` for newly
+created links; older stateless links keep their original no-expiry behavior.
+Non-default lifetimes require a server that confirms TTL support.
+
 The share action captures the current camera, presentation state, and visible
 screen markup, then
 offers three outputs:
@@ -392,7 +417,7 @@ offers three outputs:
 
 The scene descriptor is compressed, encrypted, and authenticated with
 XChaCha20-Poly1305, then stored in a local bounded registry. The default link
-has an absolute seven-day lifetime. Blind reuses the code for an identical
+has an absolute seven-day lifetime unless `--ttl` overrides it. Blind reuses the code for an identical
 active scene, permits at most 10,000 active scenes, and caps retained rows at
 12,000 so SQLite cannot grow without bound. It contains no PAT and no Mesh
 bytes. Every route verifies the SHA-256 revision of every source before

@@ -220,6 +220,34 @@ test('opaque geometry covers ordinary labels but the selected label stays in fro
   } finally { await page.close(); }
 });
 
+test('selecting a group member lifts only its label and group caption', async () => {
+  const fixture=structuredClone(scene);
+  fixture.meshes.push({...fixture.meshes[1],name:'Other',label:{text:'Other'}});
+  fixture.meshes[1].label={text:'Mesh two'};
+  fixture.state.selected=2;
+  const page=await openPage({width:1280,height:800},0,fixture);
+  try {
+    const layer=()=>page.evaluate(()=>({
+      captions:[...document.querySelectorAll('.mesh-label-foreground .mesh-group-label')].map(el=>el.textContent),
+      members:[...document.querySelectorAll('.mesh-label-foreground .mesh-label')].filter(el=>!el.hidden).map(el=>el.textContent),
+      frames:document.querySelectorAll('.mesh-label-foreground .mesh-group-frame').length,
+      hiddenMembers:[...document.querySelectorAll('.mesh-label-layer:not(.mesh-label-foreground) .mesh-label')].map(el=>({text:el.textContent,hidden:el.hidden})),
+    }));
+    assert.equal((await layer()).captions.length,0);
+    for(const index of [0,1,2]) {
+      await page.locator('.panel-trigger').click();await page.locator('#detail-mesh-select').selectOption(String(index));await page.locator('#close-panel').click();
+      await page.waitForTimeout(100);
+      const state=await layer();assert.equal(state.frames,0);
+      assert.deepEqual(state.members,[["Mesh one"],["Mesh two"],["Other"]][index]);
+      assert.equal(state.captions.length,index<2?1:0);
+      if(index<2){
+        assert.equal(await page.locator('.mesh-group-label.selected').evaluate(el=>getComputedStyle(el).backgroundColor==='rgba(0, 0, 0, 0)'),false);
+        assert.ok(state.hiddenMembers.every(member=>member.text==='Other'||member.hidden));
+      }
+    }
+  } finally {await page.close();}
+});
+
 test('an ordinary group label remains pointer-accessible through wireframe openings', async () => {
   const fixtureScene = structuredClone(scene);
   fixtureScene.meshes.push({...fixtureScene.meshes[1],name:'Third Mesh',label:{text:'Third Mesh'}});
@@ -376,7 +404,7 @@ test('surface points and paths survive touch editing, navigation and share reope
     assert.equal(snapshot.state.annotations.length,2);
     assert.ok(snapshot.state.annotations[1].points.length > 3);
     assert.deepEqual(snapshot.state.camera,(await captureShare(page)).state.camera);
-    await page.locator('#surface-navigate').click();
+    await page.locator('[data-surface-mode="select"]').click();
     await page.mouse.move(200,420); await page.mouse.down(); await page.mouse.move(240,460,{steps:8}); await page.mouse.up();
     const rotated = await captureShare(page);
     assert.notDeepEqual(rotated.state.camera,snapshot.state.camera);
@@ -387,6 +415,51 @@ test('surface points and paths survive touch editing, navigation and share reope
     try { assert.deepEqual((await captureShare(reopened)).state.annotations,snapshot.state.annotations); }
     finally { await reopened.close(); }
   } finally { await page.close(); }
+});
+
+test('selection supports camera gestures and the inline color palette fits a narrow toolbar', async () => {
+  const page=await openPage({width:320,height:700},0,surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click();
+    assert.equal(await page.locator('#surface-navigate').count(),0);
+    assert.equal(await page.locator('#surface-color-toggle').count(),0);
+    assert.equal(await page.locator('[data-surface-color]:visible').count(),4);
+    const palette=await page.locator('.surface-colors').boundingBox();const toolbar=await page.locator('#surface-toolbar').boundingBox();
+    assert.ok(palette.x>=toolbar.x && palette.x+palette.width<=toolbar.x+toolbar.width);
+    await page.locator('[data-surface-color="#ffc857"]').click();await page.mouse.click(160,340);
+    await page.locator('[data-surface-mode="select"]').click();
+    const before=await captureShare(page);assert.equal(before.state.annotations[0].color,'#ffc857');
+    await page.mouse.move(55,240);await page.mouse.down();await page.mouse.move(90,265,{steps:8});await page.mouse.up();
+    const rotated=await captureShare(page);assert.notDeepEqual(rotated.state.camera,before.state.camera);assert.deepEqual(rotated.state.annotations,before.state.annotations);
+    const touch=await page.context().newCDPSession(page);
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:40,y:230,id:0},{x:100,y:230,id:1}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:25,y:225,id:0},{x:120,y:240,id:1}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+    const scaled=await captureShare(page);assert.notDeepEqual(scaled.state.camera,rotated.state.camera);assert.deepEqual(scaled.state.annotations,before.state.annotations);
+  } finally {await page.close();}
+});
+
+test('selection recovers after an outside release and cancels a mixed edit-touch gesture', async () => {
+  const page=await openPage({width:390,height:844},0,surfaceFixture());
+  try {
+    await page.locator('#brush-tool').click();await page.mouse.click(195,400);
+    await page.locator('[data-surface-mode="select"]').click();
+    const box=await page.locator('#surface-toolbar').boundingBox();
+    await page.mouse.move(box.x+20,box.y-10);await page.mouse.down();
+    await page.mouse.move(box.x+20,box.y+20,{steps:8});await page.mouse.up();
+    const anchor=await page.locator('.surface-badge-leader').evaluate(el=>({x:Number(el.getAttribute('x1')),y:Number(el.getAttribute('y1'))}));
+    await page.locator('[data-surface-mode="select"]').click();await page.mouse.click(anchor.x,anchor.y);
+    assert.equal(await page.locator('#surface-name').isVisible(),true,'outside release must not leave camera ownership stuck');
+    const before=await captureShare(page);
+    const touch=await page.context().newCDPSession(page);
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:anchor.x,y:anchor.y,id:0}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:anchor.x,y:anchor.y,id:0},{x:anchor.x+50,y:anchor.y,id:1}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:anchor.x-10,y:anchor.y-10,id:0},{x:anchor.x+70,y:anchor.y+10,id:1}]});
+    await touch.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+    const after=await captureShare(page);assert.deepEqual(after.state.annotations,before.state.annotations);assert.deepEqual(after.state.camera,before.state.camera);
+    await page.mouse.move(50,280);await page.mouse.down();await page.mouse.move(80,305,{steps:8});await page.mouse.up();
+    assert.notDeepEqual((await captureShare(page)).state.camera,before.state.camera);
+  } finally {await page.close();}
 });
 
 test('surface editor fits narrow screens and line closure can be undone', async () => {
@@ -441,8 +514,8 @@ test('surface hits choose the visible mesh independently of the mesh selection',
     await page.mouse.click(195,400);
     const snapshot=await captureShare(page);
     assert.equal(snapshot.state.annotations.length,1);assert.equal(snapshot.state.annotations[0].mesh,1);
-    await page.locator('#surface-list-toggle').click();
-    await page.locator('.surface-list-row button').first().click();
+    await page.locator('[data-surface-mode="select"]').click();
+    await page.locator('.surface-badge').filter({hasText:'点 1'}).click();
     assert.equal(await page.locator('#surface-name').inputValue(),'点 1');
     await page.waitForFunction(()=>document.querySelector('.surface-badge.selected')?.textContent.includes('点 1'));
     await page.locator('#surface-done').click();await page.locator('.panel-trigger').click();
@@ -462,10 +535,10 @@ test('surface and screen strokes share tools, selection and undo history', async
     await page.locator('#surface-undo').click();snapshot=await captureShare(page);assert.equal(snapshot.state.strokes.length,0);assert.equal(snapshot.state.annotations.length,1);
     await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.annotations.length,0);
     await page.locator('#surface-redo').click();await page.locator('#surface-redo').click();
-    await page.locator('#surface-list-toggle').click();assert.equal(await page.locator('.surface-list-row').count(),2);
-    await page.locator('.surface-list-row').nth(1).locator('button').first().click();
+    await page.locator('[data-surface-mode="select"]').click();assert.equal(await page.locator('.surface-list-row').count(),2);
+    await page.locator('.surface-badge').filter({hasText:'画笔 1'}).click();
     await page.waitForFunction(()=>document.querySelector('.surface-badge.selected')?.textContent.includes('画笔 1'));
-    await page.locator('#surface-color-toggle').click();await page.locator('[data-surface-color="#5fb4ff"]').click();
+    await page.locator('[data-surface-color="#5fb4ff"]').click();
     assert.equal((await captureShare(page)).state.strokes[0].color,'#5fb4ff');
     await page.locator('#surface-delete').click();assert.equal((await captureShare(page)).state.strokes.length,0);
     await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.strokes.length,1);
@@ -483,7 +556,7 @@ test('lifting the pointer completes a surface stroke and the next drag starts a 
     assert.ok(snapshot.state.annotations.every(m=>m.kind==='line' && m.points.length>10));
     await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.annotations.length,1);
     await page.locator('[data-surface-mode="select"]').click();await page.mouse.click(190,380);
-    await page.locator('#surface-list-toggle').click();assert.equal(await page.locator('.surface-list-row.selected').count(),1);
+    assert.equal(await page.locator('.surface-list-row.selected').count(),1);
   } finally {await page.close();}
 });
 
@@ -512,27 +585,98 @@ test('new point and line names remain editable after pointer release and share c
   } finally {await page.close();}
 });
 
-test('shared annotations open the list without taking over camera navigation', async () => {
-  const seed=await openPage({width:390,height:844},0,surfaceFixture());
-  let snapshot;
-  try {await seed.locator('#brush-tool').click();await seed.mouse.click(195,400);snapshot=await captureShare(seed);} finally {await seed.close();}
-  const fixture=surfaceFixture();fixture.state=snapshot.state;
+test('annotation names stay on canvas and the list adapts to available space independently', async () => {
+  const fixture=surfaceFixture();
+  fixture.state.annotations=Array.from({length:11},(_,i)=>({id:`list-${i}`,mesh:0,revision:'fixture',kind:'point',label:`标记 ${i+1} · 参考位置`,color:'#ff6b5e',visible:true,closed:false,points:[[0.3+i*0.005,0.3,0.4-i*0.005]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}));
+  for(const viewport of [{width:390,height:666},{width:320,height:568},{width:390,height:844},{width:600,height:360},{width:759,height:481},{width:900,height:600},{width:1024,height:768},{width:1280,height:800}]) {
+    const page=await openPage(viewport,0,fixture);
+    try {
+      const roomy=viewport.width>=900 && viewport.height>=600;
+      assert.equal(await page.locator('.surface-list').isVisible(),roomy);
+      assert.equal(await page.locator('#surface-list-toggle').count(),0);
+      assert.equal(await page.locator('#surface-toolbar').isVisible(),false);
+      assert.equal(await page.locator('#surface-input').isVisible(),false);
+      assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
+      const before=await captureShare(page);
+      if(viewport.width===390 && viewport.height===844) {
+        const boxes=await page.locator('.surface-badge').evaluateAll(es=>es.map(e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};}));
+        for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++) {
+          const a=boxes[i],b=boxes[j];assert.ok(a.right<=b.x || b.right<=a.x || a.bottom<=b.y || b.bottom<=a.y,JSON.stringify({i,j,a,b}));
+        }
+        for(const index of [0,5,10]) {
+          await page.locator('.surface-badge').nth(index).click();
+          assert.equal(await page.locator('#surface-name').inputValue(),`标记 ${index+1} · 参考位置`);
+          await page.locator('#surface-done').click();
+        }
+      }
+      if(roomy) {
+        const bounds=await page.evaluate(()=>{const list=document.querySelector('.surface-list').getBoundingClientRect(),items=document.querySelector('#surface-items').getBoundingClientRect();return {bottom:list.bottom,itemsBottom:items.bottom,scrollable:document.querySelector('#surface-items').scrollHeight>document.querySelector('#surface-items').clientHeight};});
+        assert.ok(bounds.itemsBottom<=bounds.bottom-7);assert.equal(bounds.scrollable,true);
+        await page.locator('#surface-items').evaluate(el=>el.scrollTop=el.scrollHeight);
+        await page.locator('.surface-list-row').last().locator('button').first().click();
+        assert.equal(await page.locator('#surface-name').inputValue(),'标记 11 · 参考位置');
+        await page.locator('#surface-list-close').click();
+        assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
+        assert.equal(await page.locator('#surface-name').inputValue(),'标记 11 · 参考位置');
+        await page.locator('#surface-done').click();
+      }
+      await page.locator('.surface-badge').last().click();
+      assert.equal(await page.locator('#surface-name').inputValue(),'标记 11 · 参考位置');
+      if(viewport.width===390 && viewport.height===666) {
+        await page.locator('#surface-name').focus();
+        await page.evaluate(()=>{Object.defineProperty(visualViewport,'height',{configurable:true,value:320});Object.defineProperty(visualViewport,'offsetTop',{configurable:true,value:24});visualViewport.dispatchEvent(new Event('resize'));});
+        await page.waitForTimeout(100);
+        assert.ok(await page.locator('#surface-toolbar').evaluate(el=>el.getBoundingClientRect().bottom<=344));
+        assert.equal(await page.locator('.surface-list').isVisible(),false);
+        await page.locator('#surface-name').blur();
+        await page.evaluate(()=>{Object.defineProperty(visualViewport,'height',{configurable:true,value:innerHeight});Object.defineProperty(visualViewport,'offsetTop',{configurable:true,value:0});visualViewport.dispatchEvent(new Event('resize'));});
+      }
+      await page.locator('#surface-done').click();
+      for(const trigger of ['.panel-trigger','#scene-info-toggle']) {
+        await page.locator(trigger).click();await page.waitForTimeout(100);
+        assert.equal(await page.locator('.surface-list').isVisible(),false);
+        assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
+        await page.locator('#close-panel').click();
+      }
+      assert.deepEqual((await captureShare(page)).state.annotations,before.state.annotations);
+    } finally {await page.close();}
+  }
   const page=await openPage({width:390,height:844},0,fixture);
   try {
+    await page.setViewportSize({width:1280,height:800});await page.waitForTimeout(100);
     assert.equal(await page.locator('.surface-list').isVisible(),true);
-    assert.equal(await page.locator('#surface-toolbar').isVisible(),false);
-    assert.equal(await page.locator('#surface-input').isVisible(),false);
-    await page.waitForFunction(()=>document.querySelectorAll('.surface-badge').length===1);
-    await page.locator('.panel-trigger').click();assert.equal(await page.locator('.surface-list').isVisible(),true);
-    assert.equal(await page.locator('.surface-badge').first().isVisible(),true);
-    await page.locator('#close-panel').click();assert.equal(await page.locator('.surface-list').isVisible(),true);
-    await page.mouse.move(200,300);await page.mouse.down();await page.mouse.move(230,325,{steps:8});await page.mouse.up();
-    assert.notDeepEqual((await captureShare(page)).state.camera,snapshot.state.camera);
-    await page.locator('.surface-list-row button').first().click();assert.equal(await page.locator('#surface-name').isVisible(),true);
-    await page.locator('#surface-list-close').click();assert.equal(await page.locator('.surface-list').isVisible(),false);
+    await page.locator('#surface-list-close').click();
+    await page.setViewportSize({width:390,height:844});await page.setViewportSize({width:1280,height:800});
+    assert.equal(await page.locator('.surface-list').isVisible(),false);
+    assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
   } finally {await page.close();}
-  const empty=await openPage({width:390,height:844},0,surfaceFixture());
-  try {assert.equal(await empty.locator('.surface-list').isVisible(),false);} finally {await empty.close();}
+});
+
+test('a partly occluded path keeps its name on a visible sample', async () => {
+  const fixture=surfaceFixture();fixture.state.annotations=[{id:'around-edge',mesh:0,revision:'fixture',kind:'line',label:'绕面路径',color:'#ffc857',visible:true,closed:false,points:[[0.3,0.3,0.4],[0.3,0,0.3],[0.4,0.3,0.3]],normals:[[0.57735,0.57735,0.57735],[0,-1,0],[0.57735,0.57735,0.57735]],controls:[0,1,2]}];
+  const page=await openPage({width:390,height:844},0,fixture);
+  try {
+    assert.deepEqual(await page.locator('.surface-badge').allTextContents(),['绕面路径']);
+    await page.locator('.surface-badge').click();assert.equal(await page.locator('#surface-name').inputValue(),'绕面路径');
+  } finally {await page.close();}
+});
+
+test('annotation labels follow every rendered camera frame without replacing their DOM nodes', async () => {
+  const fixture=surfaceFixture();fixture.state.annotations=[{id:'tracked',mesh:0,revision:'fixture',kind:'point',label:'跟随位置',color:'#ff6b5e',visible:true,closed:false,points:[[0.3,0.3,0.4]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}];
+  const page=await openPage({width:390,height:844},0,fixture);
+  try {
+    await page.evaluate(()=>{
+      window.trackedBadge=document.querySelector('.surface-badge');window.badgeFrames=[];window.paintEvents=[];
+      let transform=window.trackedBadge.style.transform;
+      new MutationObserver(()=>{const next=window.trackedBadge.style.transform;if(next!==transform){window.badgeFrames.push(window.paintFrame);transform=next;}}).observe(window.trackedBadge,{attributes:true,attributeFilter:['style']});
+    });
+    await page.mouse.move(165,345);await page.mouse.down();
+    for(let i=1;i<=16;i++){await page.mouse.move(165+i,345+i/2);await page.waitForTimeout(20);}
+    await page.mouse.up();
+    const result=await page.evaluate(()=>({same:window.trackedBadge===document.querySelector('.surface-badge'),frames:window.badgeFrames,mesh:[...new Set(window.paintEvents.filter(e=>e.target==='mesh'&&e.type==='render').map(e=>e.frame))]}));
+    assert.equal(result.same,true);assert.ok(result.mesh.length>=8,JSON.stringify(result));
+    assert.ok(result.mesh.every(frame=>result.frames.includes(frame)),JSON.stringify(result));
+  } finally {await page.close();}
 });
 
 test('opening detail and info preserves visible annotation badges, list and document', async () => {
@@ -544,7 +688,7 @@ test('opening detail and info preserves visible annotation badges, list and docu
       const before=await captureShare(page);
       for(const trigger of ['.panel-trigger','#scene-info-toggle']) {
         await page.locator(trigger).click();await page.waitForTimeout(300);
-        assert.equal(await page.locator('.surface-list').isVisible(),true);
+        assert.equal(await page.locator('.surface-list').isVisible(),viewport.width>=1256 && viewport.height>=600);
         assert.equal(await page.locator('.surface-badge').first().isVisible(),true);
         const boxes=await page.evaluate(()=>['.surface-list','#control-panel'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};}));
         const [a,b]=boxes;assert.ok(a.right<=b.x || b.right<=a.x || a.bottom<=b.y || b.bottom<=a.y,'panels must not overlap');
@@ -560,16 +704,16 @@ test('zero opacity filters annotation list and restoring opacity recovers it', a
   fixture.state.annotations=[{id:'transparent-point',mesh:0,revision:'fixture',kind:'point',label:'位置',color:'#ff6b5e',visible:true,closed:false,points:[[0.3,0.3,0.4]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}];
   const page=await openPage({width:390,height:844},0,fixture);
   try {
-    assert.equal(await page.locator('#surface-count').textContent(),'0');
+    assert.equal(await page.locator('.surface-list-row').count(),0);
     await page.locator('.panel-trigger').click();await page.locator('#opacity-range').fill('100');
-    assert.equal(await page.locator('#surface-count').textContent(),'1');
+    assert.equal(await page.locator('.surface-list-row').count(),1);
   } finally {await page.close();}
 });
 
 test('new marks refuse the scene sample limit before producing an invalid share', async () => {
   const fixture=surfaceFixture();fixture.state.annotations=Array.from({length:4},(_,i)=>({id:`full-${i}`,mesh:0,revision:'fixture',kind:'line',label:`满 ${i}`,color:'#ff6b5e',visible:false,closed:false,points:Array.from({length:4096},()=>[0.3,0.3,0.4]),normals:Array.from({length:4096},()=>[0.57735,0.57735,0.57735]),controls:[0,4095]}));
   const page=await openPage({width:390,height:844},0,fixture);
-  try {await page.locator('#surface-list-close').click();await page.locator('#brush-tool').click();await page.mouse.click(195,400);assert.equal((await captureShare(page)).state.annotations.length,4);} finally {await page.close();}
+  try {await page.locator('#brush-tool').click();await page.mouse.click(195,400);assert.equal((await captureShare(page)).state.annotations.length,4);} finally {await page.close();}
 });
 
 test('undo restores Raw geometry before restoring a deleted annotation', async () => {
@@ -584,9 +728,9 @@ test('undo restores Raw geometry before restoring a deleted annotation', async (
     await page.route('**/mesh/0',async route=>{await gate;await route.fulfill({body:await readFile(new URL('../../tests/fixtures/tetra.ply',import.meta.url)),contentType:'application/ply'});});
     await page.locator('#surface-undo').click();await page.waitForFunction(()=>document.querySelector('#surface-hint').textContent.includes('恢复'));
     assert.equal(await page.locator('.surface-list').evaluate(el=>el.inert),true);
-    assert.equal(await page.locator('#surface-color-toggle').isDisabled(),true);
+    assert.equal(await page.locator('[data-surface-color]').first().isDisabled(),true);
     assert.equal(await page.locator('#share-view').isDisabled(),true);release();
-    await page.waitForFunction(()=>document.querySelector('#surface-count').textContent==='1');
+    await page.waitForFunction(()=>document.querySelectorAll('.surface-list-row').length===1);
     const restored=await captureShare(page);assert.equal(restored.meshes[0].quality,'raw');assert.deepEqual(restored.state.annotations,original);
   } finally {await page.close();}
 });

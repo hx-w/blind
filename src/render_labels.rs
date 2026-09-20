@@ -8,6 +8,7 @@ use image::RgbaImage;
 use tiny_skia::{FillRule, Paint, PathBuilder, PixmapMut, Stroke, Transform};
 
 pub(crate) struct RenderLabel {
+    pub flat: bool,
     /// Normalized output coordinates, with the origin at the top left.
     pub anchor: [f32; 2],
     pub text: String,
@@ -158,7 +159,7 @@ pub(crate) fn overlay_labels(
             );
         }
         let mut border = PathBuilder::new();
-        let r = 5.0;
+        let r = if label.flat { 2.0 } else { 5.0 };
         let Rect { x, y, .. } = rect;
         border.move_to(x + r, y);
         border.line_to(x + w - r, y);
@@ -175,11 +176,19 @@ pub(crate) fn overlay_labels(
             anti_alias: true,
             ..Default::default()
         };
-        if light {
-            background.set_color_rgba8(245, 246, 248, 255);
+        let base = if light {
+            [245_u8, 246, 248]
         } else {
-            background.set_color_rgba8(32, 35, 39, 255);
-        }
+            [32_u8, 35, 39]
+        };
+        let fill = if label.flat {
+            std::array::from_fn(|i| {
+                (f32::from(base[i]) * 0.72 + f32::from(label.color[i]) * 0.28).round() as u8
+            })
+        } else {
+            base
+        };
+        background.set_color_rgba8(fill[0], fill[1], fill[2], 255);
         pixmap.fill_path(
             &path,
             &background,
@@ -187,16 +196,18 @@ pub(crate) fn overlay_labels(
             Transform::identity(),
             None,
         );
-        pixmap.stroke_path(
-            &path,
-            &paint,
-            &Stroke {
-                width: 0.8,
-                ..Default::default()
-            },
-            Transform::identity(),
-            None,
-        );
+        if !label.flat {
+            pixmap.stroke_path(
+                &path,
+                &paint,
+                &Stroke {
+                    width: 0.8,
+                    ..Default::default()
+                },
+                Transform::identity(),
+                None,
+            );
+        }
         let color = if light {
             [45_u8, 49, 55]
         } else {
@@ -250,6 +261,7 @@ mod tests {
         overlay_labels(
             &mut image,
             &[RenderLabel {
+                flat: true,
                 anchor: [0.5, 0.5],
                 text: "1 · 检查位置 A".into(),
                 color: [255, 107, 94],

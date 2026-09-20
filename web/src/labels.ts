@@ -157,7 +157,9 @@ export class MeshLabels {
       if (!view.width) { view.width = view.text.offsetWidth; view.height = view.text.offsetHeight; }
       const color = averageColor(group.meshes.map(member => models[member]?.info.color).filter((value): value is string => Boolean(value)));
       const isSelected = group.meshes.includes(selected);
-      this.setLayer(isSelected, view.text, view.frame);
+      // Selection promotes only the caption, not the group frame or siblings.
+      this.setLayer(isSelected, view.text);
+      if (view.frame.parentNode !== this.leaders) this.leaders.append(view.frame);
       view.text.classList.toggle('selected', isSelected); view.frame.classList.toggle('selected', isSelected);
       view.text.style.setProperty('--group-color', color); view.frame.style.setProperty('--group-color', color);
       const placement = placeGroupLabel(frame, view.width, view.height, occupied, width, height);

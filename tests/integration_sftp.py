@@ -114,6 +114,44 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
             assert status == 200 and png.startswith(b'\x89PNG')
         print('PASS: same-host Client registration, unchanged URLs, source metadata, Raw/LOD/PNG')
 
+        # Lifetimes must survive CLI -> registry -> browser reshare, including annotations.
+        import sqlite3
+        ttl_mesh = tmp/'ttl.ply'
+        shutil.copyfile(mesh, ttl_mesh)
+        registry = sqlite3.connect(tmp/'server/scenes.sqlite3')
+        for days in [0, 1, 30]:
+            shared = json.loads(run([BIN/'blind', 'share', ttl_mesh, '--ttl', str(days), '--format', 'json'], env))
+            assert shared['ttl_days'] == days
+            ttl_token = shared['viewer_url'].rsplit('/', 1)[1]
+            status, saved = api('/api/v1/scenes/'+ttl_token)
+            assert status == 200 and saved['ttl_days'] == days
+            created, expires = registry.execute('SELECT created_at, expires_at FROM scenes WHERE code=?', (ttl_token,)).fetchone()
+            assert expires == (2**63-1 if days == 0 else created + days*86400)
+            saved['state']['annotations'] = [{'id':'ttl-mark','mesh':0,'revision':saved['meshes'][0]['revision'],'kind':'point','label':'永久标记','color':'#f46d58','visible':True,'closed':False,'points':[[0,0,0]],'normals':[[0,0,1]],'controls':[0]}]
+            update = {'meshes':[{k:m[k] for k in ['color','opacity','visible','quality']} for m in saved['meshes']], 'state':saved['state']}
+            status, reshared = api('/api/v1/scenes/'+ttl_token+'/share', body=update)
+            assert status == 200 and reshared['ttl_days'] == days
+            reshared_token = reshared['viewer_url'].rsplit('/', 1)[1]
+            status, restored = api('/api/v1/scenes/'+reshared_token)
+            assert status == 200 and restored['ttl_days'] == days
+            assert restored['state']['annotations'] == saved['state']['annotations']
+            if api('/api/v1/health')[1]['image_renderer']:
+                assert api('/i/'+reshared_token+'.png')[0] == 200
+            if days == 0:
+                permanent_token = ttl_token
+                permanent_reshare = reshared_token
+        assert output['ttl_days'] == 7 and stateless['ttl_days'] == 7
+        permanent_long = json.loads(run([BIN/'blind', 'share', ttl_mesh, '--ttl', '0', '--stateless', '--format', 'json'], env))
+        assert permanent_long['ttl_days'] == 0
+        assert api('/api/v1/scenes/'+permanent_long['viewer_url'].rsplit('/', 1)[1])[1]['ttl_days'] == 0
+        ttl_mesh.unlink()
+        assert api('/api/v1/scenes/'+permanent_token+'/meshes/0')[0] == 410
+        assert api('/api/v1/scenes/'+permanent_token)[0] == 410
+        assert api('/api/v1/control/doctor/clean-invalid', server_config['pat'], {})[0] == 200
+        assert registry.execute('SELECT count(*) FROM scenes WHERE code IN (?,?)', (permanent_token, permanent_reshare)).fetchone()[0] == 0
+        registry.close()
+        print('PASS: default/custom/permanent TTL, annotation reshare, PNG, stateless TTL and source-invalid cleanup')
+
         sshd = shutil.which('sshd') or '/usr/sbin/sshd'
         sftp_server = next(p for p in ['/usr/libexec/sftp-server', '/usr/lib/openssh/sftp-server', '/usr/lib/ssh/sftp-server'] if Path(p).is_file())
         run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', tmp/'host_key'])
@@ -173,8 +211,9 @@ LogLevel VERBOSE
         assert api('/api/v1/clients/join', envelope['token'], request)[0] != 200
         print('PASS: reusable and revocable invitations, independent identities, writable-key rejection, verified read-only SFTP')
 
-        status, output = api('/api/v1/client/scenes', a['credential'], {'paths':[str(mesh)], 'source_id':b['source']['id']})
+        status, output = api('/api/v1/client/scenes', a['credential'], {'paths':[str(mesh)], 'source_id':b['source']['id'], 'ttl_days':0})
         assert status == 200, output
+        assert output['ttl_days'] == 0
         assert output['source']['id'] == a['source']['id']
         token = output['viewer_url'].rsplit('/', 1)[1]
         assert api('/api/v1/scenes/'+token+'/meshes/0/lod')[0] == 200

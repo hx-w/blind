@@ -87,6 +87,7 @@ pub struct ServerLease {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ShareLinks {
+    pub ttl_days: u32,
     pub viewer_url: String,
     pub image_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,6 +107,8 @@ pub struct ShareResponse {
 
 #[derive(Debug, Deserialize)]
 struct CreateSceneRequest {
+    #[serde(default = "crate::scene::default_ttl_days")]
+    ttl_days: u32,
     #[serde(default)]
     manifest: Option<crate::plugin::ShareManifest>,
     #[serde(default)]
@@ -208,6 +211,7 @@ impl DoctorRegistryReport {
 
 #[derive(Debug, Serialize)]
 struct PublicScene {
+    ttl_days: u32,
     source: Option<crate::source::SceneSource>,
     title: String,
     meshes: Vec<PublicMesh>,
@@ -610,6 +614,7 @@ fn compose_links(
         .is_some()
         .then(|| scene.full_text(&viewer_url, &image_url));
     ShareLinks {
+        ttl_days: scene.link_ttl_days(route == "v"),
         viewer_url,
         image_url,
         owner_url,
@@ -730,6 +735,7 @@ async fn create_scene(
         });
     }
     let mut scene = scene_from_sources(&state, &paths, None, request.title).await?;
+    scene.ttl_days = Some(request.ttl_days);
     if let Some(labels) = request.labels.filter(|ls| ls.iter().any(Option::is_some)) {
         scene
             .set_labels(labels)
@@ -797,6 +803,7 @@ async fn get_scene(
         Json(PublicScene {
             attachments: scene.attachments.iter().enumerate().map(|(index,a)| serde_json::json!({"id":a.id,"label":a.label,"byte_size":a.byte_size,"unavailable":a.unavailable,"url":if a.revision.is_some(){Some(format!("api/v1/scenes/{token}/attachments/{index}"))}else{None}})).collect(),
             warnings: scene.warnings.clone(),
+            ttl_days: scene.link_ttl_days(!is_short_secret(&token)),
             source: scene.source.clone(),
             title: scene.title,
             meshes,
@@ -948,6 +955,9 @@ async fn reshare(
     )?;
     let owner = owner_matches(&headers, &state, &opened);
     let mut scene = opened.scene;
+    if !is_short_secret(&token) && scene.ttl_days.is_none() {
+        scene.ttl_days = Some(0);
+    }
     scene
         .apply_update(request.update)
         .map_err(|error| AppError::bad_request(&error.to_string()))?;
@@ -1144,10 +1154,18 @@ fn owner_matches(headers: &HeaderMap, state: &AppState, opened: &OpenedScene) ->
     if let Some(expected) = &opened.owner_secret {
         return state.registry.owner_matches(expected, token);
     }
-    let Ok(owner) = state.codec.open(token) else {
+    stateless_owner_matches(&state.codec, token, &opened.scene)
+}
+
+fn stateless_owner_matches(codec: &TokenCodec, token: &str, scene: &SceneDescriptor) -> bool {
+    let Ok(owner) = codec.open(token) else {
         return false;
     };
-    owner.scope == Scope::Owner && same_sources(&owner.scene, &opened.scene)
+    owner.scope == Scope::Owner
+        && !owner
+            .scene
+            .stateless_expired_at(crate::source::now() as u64)
+        && same_sources(&owner.scene, scene)
 }
 
 fn same_sources(a: &SceneDescriptor, b: &SceneDescriptor) -> bool {
@@ -1361,14 +1379,20 @@ fn open_scene(state: &AppState, token: &str, peer: IpAddr) -> Result<OpenedScene
             }
         };
     }
-    state
+    let envelope = state
         .codec
         .open(token)
-        .map(|envelope| OpenedScene {
-            scene: envelope.scene,
-            owner_secret: None,
-        })
-        .map_err(|_| AppError::not_found("Scene not found"))
+        .map_err(|_| AppError::not_found("Scene not found"))?;
+    if envelope
+        .scene
+        .stateless_expired_at(crate::source::now() as u64)
+    {
+        return Err(AppError::gone("Scene expired"));
+    }
+    Ok(OpenedScene {
+        scene: envelope.scene,
+        owner_secret: None,
+    })
 }
 
 fn allow_short_miss(state: &AppState, peer: IpAddr) -> bool {
@@ -1434,6 +1458,46 @@ impl From<axum::http::Error> for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stateless_owner_tokens_obey_ttl_without_expiring_legacy_or_permanent_tokens() {
+        let directory = tempfile::tempdir().unwrap();
+        let mesh = directory.path().join("mesh.ply");
+        fs::write(&mesh, include_bytes!("../tests/fixtures/tetra.ply")).unwrap();
+        let scene = SceneDescriptor::create(&[mesh], None).await.unwrap();
+        let codec = TokenCodec::new([7; 32]);
+        let mut owner = scene.clone();
+        owner.created_at = 1;
+        owner.ttl_days = Some(1);
+        let expired = codec.seal(Scope::Owner, &owner).unwrap();
+        assert!(!stateless_owner_matches(&codec, &expired, &scene));
+        for ttl in [None, Some(0)] {
+            owner.ttl_days = ttl;
+            assert!(stateless_owner_matches(
+                &codec,
+                &codec.seal(Scope::Owner, &owner).unwrap(),
+                &scene
+            ));
+        }
+        owner.created_at = crate::source::now() as u64;
+        owner.ttl_days = Some(1);
+        assert!(stateless_owner_matches(
+            &codec,
+            &codec.seal(Scope::Owner, &owner).unwrap(),
+            &scene
+        ));
+        assert!(!stateless_owner_matches(
+            &codec,
+            &codec.seal(Scope::Public, &owner).unwrap(),
+            &scene
+        ));
+        owner.meshes[0].revision = "changed".into();
+        assert!(!stateless_owner_matches(
+            &codec,
+            &codec.seal(Scope::Owner, &owner).unwrap(),
+            &scene
+        ));
+    }
 
     fn host(origin: &str) -> HostCandidate {
         HostCandidate {
@@ -1730,6 +1794,7 @@ async fn scene_from_sources(
         schema: 3,
         title,
         created_at: crate::source::now() as u64,
+        ttl_days: None,
         meshes,
         attachments: Vec::new(),
         warnings: Vec::new(),
@@ -1801,6 +1866,7 @@ async fn client_scene(
         )
         .await?
     };
+    scene.ttl_days = Some(request.ttl_days);
     if let Some(labels) = request.labels.filter(|ls| ls.iter().any(Option::is_some)) {
         scene
             .set_labels(labels)
@@ -2146,6 +2212,7 @@ async fn scene_from_manifest(
             .or(plan.title)
             .unwrap_or_else(|| "Plugin scene".into()),
         created_at: crate::source::now() as u64,
+        ttl_days: None,
         meshes,
         label_groups: groups,
         state: Default::default(),

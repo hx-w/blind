@@ -851,12 +851,10 @@ fn scene_labels(
             .get(index)
             .is_some_and(|m| m.visible && m.opacity > 0.0)
     };
-    let mut number = 0;
     for mark in &scene.state.annotations {
         if !visible_mesh(mark.mesh) {
             continue;
         }
-        number += 1;
         if !mark.visible {
             continue;
         }
@@ -884,7 +882,8 @@ fn scene_labels(
             };
             labels.push(RenderLabel {
                 anchor,
-                text: format!("{number} · {name}"),
+                text: name.into(),
+                flat: true,
                 color: color(&mark.color)?,
             });
             break;
@@ -900,7 +899,8 @@ fn scene_labels(
             if anchor.iter().all(|v| (0.0..=1.0).contains(v)) {
                 labels.push(RenderLabel {
                     anchor,
-                    text: format!("{} · 画笔 {}", number + i + 1, i + 1),
+                    text: format!("画笔 {}", i + 1),
+                    flat: true,
                     color: color(&stroke.color)?,
                 });
             }
@@ -922,6 +922,7 @@ fn scene_labels(
             labels.push(RenderLabel {
                 anchor,
                 text: label.text.clone(),
+                flat: false,
                 color: color(&mesh.color)?,
             });
         }
@@ -939,6 +940,7 @@ fn scene_labels(
             labels.push(RenderLabel {
                 anchor,
                 text: group.text.clone(),
+                flat: false,
                 color: [143, 169, 201],
             });
         }
@@ -1449,7 +1451,7 @@ mod tests {
             serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
         let input = load_scene_geometry(&scene, &material).unwrap();
         assert_eq!(input.labels.len(), 1);
-        assert_eq!(input.labels[0].text, "1 · 检查位置 A");
+        assert_eq!(input.labels[0].text, "检查位置 A");
         scene.state.annotations[0].visible = false;
         let hidden = load_scene_geometry(&scene, &material).unwrap();
         assert!(hidden.labels.is_empty());

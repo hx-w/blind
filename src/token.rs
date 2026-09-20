@@ -94,6 +94,7 @@ mod tests {
             schema: 1,
             title: "review".into(),
             created_at: 1,
+            ttl_days: None,
             meshes: Vec::new(),
             attachments: Vec::new(),
             warnings: Vec::new(),
@@ -111,5 +112,27 @@ mod tests {
         assert_eq!(opened.scope, Scope::Public);
         assert_eq!(opened.scene.title, "review");
         assert!(TokenCodec::new([8; 32]).open(&token).is_err());
+    }
+
+    #[test]
+    fn stateless_lifetimes_preserve_legacy_links_and_expire_at_the_boundary() {
+        let codec = TokenCodec::new([7; 32]);
+        let mut scene = scene();
+        assert!(!scene.stateless_expired_at(u64::MAX));
+        scene.ttl_days = Some(0);
+        let permanent = codec
+            .open(&codec.seal(Scope::Public, &scene).unwrap())
+            .unwrap()
+            .scene;
+        assert!(!permanent.stateless_expired_at(u64::MAX));
+        scene.ttl_days = Some(2);
+        let limited = codec
+            .open(&codec.seal(Scope::Public, &scene).unwrap())
+            .unwrap()
+            .scene;
+        assert!(!limited.stateless_expired_at(172_800));
+        assert!(limited.stateless_expired_at(172_801));
+        scene.created_at = u64::MAX;
+        assert!(scene.stateless_expired_at(u64::MAX));
     }
 }

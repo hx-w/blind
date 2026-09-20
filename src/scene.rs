@@ -16,6 +16,11 @@ pub const MAX_SCREEN_STROKE_POINTS: usize = 512;
 pub const MAX_SCREEN_POINTS: usize = 4_096;
 pub const MAX_MESH_LABEL_CHARS: usize = 120;
 pub const MAX_LABEL_GROUPS: usize = 64;
+pub const DEFAULT_TTL_DAYS: u32 = 7;
+
+pub const fn default_ttl_days() -> u32 {
+    DEFAULT_TTL_DAYS
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneDescriptor {
@@ -24,6 +29,9 @@ pub struct SceneDescriptor {
     pub schema: u8,
     pub title: String,
     pub created_at: u64,
+    /// None preserves legacy descriptors; zero explicitly disables time expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_days: Option<u32>,
     pub meshes: Vec<MeshRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_groups: Vec<MeshLabelGroup>,
@@ -311,6 +319,21 @@ impl Default for ViewState {
 }
 
 impl SceneDescriptor {
+    pub fn link_ttl_days(&self, stateless: bool) -> u32 {
+        self.ttl_days
+            .unwrap_or(if stateless { 0 } else { DEFAULT_TTL_DAYS })
+    }
+
+    pub fn stateless_expired_at(&self, now: u64) -> bool {
+        match self.ttl_days {
+            Some(days) if days > 0 => self
+                .created_at
+                .checked_add(u64::from(days) * 86_400)
+                .is_none_or(|expires| expires <= now),
+            _ => false,
+        }
+    }
+
     pub fn set_labels(&mut self, labels: Vec<Option<MeshLabel>>) -> Result<()> {
         if labels.len() != self.meshes.len() {
             bail!("Mesh label count does not match the scene");
@@ -389,6 +412,7 @@ impl SceneDescriptor {
             source: None,
             schema: 3,
             title,
+            ttl_days: None,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
