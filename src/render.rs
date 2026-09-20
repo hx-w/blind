@@ -27,7 +27,7 @@ struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
     color: [f32; 4],
-    depth_bias: f32,
+    curve: f32,
 }
 
 #[repr(C)]
@@ -42,9 +42,10 @@ struct Uniform {
     finish: [f32; 4],
     tone: [f32; 4],
     surface: [f32; 4],
+    curve_surface: [f32; 4],
+    curve_edge: [f32; 4],
     point_scale: [f32; 4],
     point_color: [f32; 4],
-    point_depth_bias: [f32; 4],
 }
 
 #[derive(Clone, Deserialize)]
@@ -62,7 +63,9 @@ struct MatteShader {
     rim_power: f32,
     specular: f32,
     shininess: f32,
-    depth_bias_step: f32,
+    curve_surface: [f32; 4],
+    curve_edge: [f32; 2],
+    annotation_lift_pixels: f32,
     point_diameter_pixels: f32,
     translucent_threshold: f32,
     contrast_pivot: f32,
@@ -318,6 +321,13 @@ impl Renderer {
                 self.material.specular,
                 self.material.shininess,
             ],
+            curve_surface: self.material.curve_surface,
+            curve_edge: [
+                self.material.curve_edge[0],
+                self.material.curve_edge[1],
+                0.0,
+                0.0,
+            ],
             point_scale: [
                 self.material.point_diameter_pixels / width as f32,
                 self.material.point_diameter_pixels / height as f32,
@@ -325,10 +335,9 @@ impl Renderer {
                 0.0,
             ],
             point_color: [0.0; 4],
-            point_depth_bias: [0.0; 4],
         };
         // Every batch gets its own uniform slot so point batches carry their
-        // shared color and depth bias without paying per point.
+        // shared color without paying per point.
         let uniform_size = mem::size_of::<Uniform>();
         let uniform_stride = align_to(
             uniform_size as u32,
@@ -337,12 +346,10 @@ impl Renderer {
         let mut uniform_bytes = vec![0_u8; uniform_stride as usize * input.batches.len().max(1)];
         for index in 0..input.batches.len().max(1) {
             let mut slot = uniform;
-            if let Some(BatchGeometry::Points {
-                color, depth_bias, ..
-            }) = input.batches.get(index).map(|batch| &batch.geometry)
+            if let Some(BatchGeometry::Points { color, .. }) =
+                input.batches.get(index).map(|batch| &batch.geometry)
             {
                 slot.point_color = *color;
-                slot.point_depth_bias = [*depth_bias, 0.0, 0.0, 0.0];
             }
             let start = index * uniform_stride as usize;
             uniform_bytes[start..start + uniform_size].copy_from_slice(bytemuck::bytes_of(&slot));
@@ -553,7 +560,6 @@ enum BatchGeometry {
     Points {
         positions: Vec<[f32; 3]>,
         color: [f32; 4],
-        depth_bias: f32,
     },
 }
 
@@ -664,19 +670,17 @@ fn load_scene_geometry_bytes(
     let mut line_vertices = Vec::new();
     let wire = scene.state.shading == Shading::Wire;
     let flat = scene.state.shading == Shading::Flat;
-    for (layer, mesh, geometry, mesh_min, mesh_max) in loaded {
+    for (_layer, mesh, geometry, mesh_min, mesh_max) in loaded {
         let color = parse_color(&mesh.color, mesh.opacity)?;
-        let depth_bias = layer as f32 * material.depth_bias_step;
         let center = (Vec3::from_array(mesh_min) + Vec3::from_array(mesh_max)) * 0.5;
         let translucent = mesh.opacity < material.translucent_threshold;
         if geometry.is_point_cloud() {
             batches.push(RenderBatch {
                 // The position vec moves straight into the batch; the shared
-                // color and depth bias live in the batch's uniform slot.
+                // color lives in the batch's uniform slot.
                 geometry: BatchGeometry::Points {
                     positions: geometry.positions,
                     color,
-                    depth_bias,
                 },
                 translucent,
                 center,
@@ -703,7 +707,11 @@ fn load_scene_geometry_bytes(
                     None => face_normal,
                 },
                 color,
-                depth_bias,
+                curve: if mesh.format == crate::scene::MeshFormat::Pts {
+                    1.0
+                } else {
+                    0.0
+                },
             };
             if wire {
                 line_vertices.extend([
@@ -828,7 +836,7 @@ fn load_scene_geometry_bytes(
             projection * view,
             position,
             &occluders,
-            material.depth_bias_step,
+            material.annotation_lift_pixels,
         )?,
         line_vertices,
         width: frame.width,
@@ -971,7 +979,7 @@ fn surface_annotation_vertices(
     vp: Mat4,
     camera_position: Vec3,
     occluders: &Occluders,
-    bias: f32,
+    lift_pixels: f32,
 ) -> Result<Vec<Vertex>> {
     let mut vertices = Vec::new();
     let ink: ScreenInk = serde_json::from_str(include_str!("../shaders/stroke.json"))?;
@@ -993,7 +1001,6 @@ fn surface_annotation_vertices(
             .iter()
             .map(|p| vp.project_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32)))
             .collect();
-        let depth_bias = (mark.mesh as f32 + 0.75) * bias;
         let vertex = |p: Vec3, x: f32, y: f32, color: [f32; 4], normal: Option<Vec3>| {
             let offset = p + Vec3::new(x * 2.0 / width, y * 2.0 / height, 0.0);
             let mut q = inverse.project_point3(offset);
@@ -1006,11 +1013,16 @@ fn surface_annotation_vertices(
                     q += direction * (anchor - q).dot(normal) / denominator;
                 }
             }
+            // Match SurfaceInk: a bounded subpixel lift along the viewing ray.
+            let projected = vp.project_point3(q);
+            let pixel = inverse.project_point3(projected + Vec3::new(2.0 / width, 0.0, 0.0));
+            let near = inverse.project_point3(Vec3::new(projected.x, projected.y, 0.0));
+            q += (near - q).normalize_or_zero() * pixel.distance(q) * lift_pixels;
             Vertex {
                 position: q.to_array(),
                 normal: [0.0; 3],
                 color,
-                depth_bias,
+                curve: 0.0,
             }
         };
         let disk =
@@ -1039,7 +1051,7 @@ fn surface_annotation_vertices(
                 if !surface_anchor_visible(ray_origin, anchor, occluders) {
                     continue;
                 }
-                let p = Vec3::new(p.x, p.y, 0.001 + depth_bias);
+                let p = Vec3::new(p.x, p.y, 0.001);
                 disk(&mut vertices, p, 4.5, color, None);
             }
         } else {
@@ -1298,7 +1310,7 @@ fn create_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled,
-            depth_compare: wgpu::CompareFunction::Less,
+            depth_compare: wgpu::CompareFunction::LessEqual,
             stencil: Default::default(),
             bias: Default::default(),
         }),
@@ -1323,13 +1335,13 @@ fn append_axes(vertices: &mut Vec<Vertex>, min: Vec3, max: Vec3) {
             position: origin.to_array(),
             normal,
             color,
-            depth_bias: 0.0,
+            curve: 0.0,
         });
         vertices.push(Vertex {
             position: (origin + direction * length).to_array(),
             normal,
             color,
-            depth_bias: 0.0,
+            curve: 0.0,
         });
     }
 }
@@ -1497,12 +1509,85 @@ mod tests {
         assert_eq!(render_dimensions(1200, 900), (1200, 900));
     }
 
-    #[test]
-    fn shared_depth_bias_separates_layers_on_16_bit_depth_buffers() {
-        let material: MatteShader =
-            serde_json::from_str(include_str!("../shaders/matte.json")).unwrap();
-        let two_depth_units_in_webgl_clip_space = 4.0 / 65_536.0;
-        assert!(material.depth_bias_step >= two_depth_units_in_webgl_clip_space);
+    #[tokio::test]
+    async fn real_depth_occludes_later_meshes_and_loops_with_a_close_near_plane() {
+        use crate::scene::CameraState;
+        let dir = tempfile::tempdir().unwrap();
+        let plane = dir.path().join("plane.ply");
+        std::fs::write(&plane, "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\nelement face 2\nproperty list uchar int vertex_indices\nend_header\n-5 -5 0\n5 -5 0\n5 5 0\n-5 5 0\n3 0 1 2\n3 0 2 3\n").unwrap();
+        let curve = dir.path().join("loop.pts");
+        std::fs::write(&curve, "-2 -2 -1\n2 -2 -1\n2 2 -1\n-2 2 -1\n").unwrap();
+        let mut scene =
+            SceneDescriptor::create(&[plane.clone(), plane.clone(), curve, plane], None)
+                .await
+                .unwrap();
+        scene.meshes[0].color = "#ff0000".into();
+        scene.meshes[1].color = "#0000ff".into();
+        scene.meshes[1].translation[2] = -1.0;
+        scene.meshes[2].color = "#00ff00".into();
+        // Another panel crosses the camera depth but remains outside the view.
+        scene.meshes[3].translation = [100.0, 0.0, 40.0];
+        scene.state.axes = false;
+        scene.state.frame.width = 512;
+        scene.state.frame.height = 512;
+        scene.state.camera = Some(CameraState {
+            position: [0.0, 0.0, 40.0],
+            target: [0.0; 3],
+            up: [0.0, 1.0, 0.0],
+            fov: 34.0,
+            zoom: 1.0,
+            orthographic_height: 24.0,
+        });
+        let renderer = Renderer::new().await.unwrap();
+        for projection in [Projection::Perspective, Projection::Orthographic] {
+            scene.state.projection = projection;
+            let sources = scene
+                .meshes
+                .iter()
+                .map(|m| Some(std::fs::read(&m.path).unwrap()))
+                .collect();
+            let bytes = renderer.render(&scene, sources).await.unwrap();
+            let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            for y in 192..320 {
+                for x in 192..320 {
+                    let p = image.get_pixel(x, y);
+                    assert!(
+                        u16::from(p[0]) > u16::from(p[1]) * 2
+                            && u16::from(p[0]) > u16::from(p[2]) * 2,
+                        "rear geometry leaked at {x},{y}: {p:?}"
+                    );
+                }
+            }
+            // A visible curve must still render after moving in front of the surface.
+            scene.meshes[2].translation[2] = 2.0;
+            let sources = scene
+                .meshes
+                .iter()
+                .map(|m| Some(std::fs::read(&m.path).unwrap()))
+                .collect();
+            let bytes = renderer.render(&scene, sources).await.unwrap();
+            let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            assert!(
+                image
+                    .pixels()
+                    .filter(|p| u16::from(p[1]) > u16::from(p[0]) * 2 && p[1] > 80)
+                    .count()
+                    > 10
+            );
+            scene.meshes[2].translation[2] = 0.0;
+
+            // Coincident surfaces retain deterministic resource precedence.
+            scene.meshes[1].translation[2] = 0.0;
+            let sources = scene
+                .meshes
+                .iter()
+                .map(|m| Some(std::fs::read(&m.path).unwrap()))
+                .collect();
+            let bytes = renderer.render(&scene, sources).await.unwrap();
+            let image = image::load_from_memory(&bytes).unwrap().to_rgba8();
+            assert!(image.get_pixel(256, 256)[2] > 200);
+            scene.meshes[1].translation[2] = -1.0;
+        }
     }
 
     #[test]

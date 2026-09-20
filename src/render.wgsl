@@ -8,9 +8,10 @@ struct Camera {
   finish: vec4<f32>,
   tone: vec4<f32>,
   surface: vec4<f32>,
+  curve_surface: vec4<f32>,
+  curve_edge: vec4<f32>,
   point_scale: vec4<f32>,
   point_color: vec4<f32>,
-  point_depth_bias: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -19,7 +20,7 @@ struct VertexInput {
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) color: vec4<f32>,
-  @location(3) depth_bias: f32,
+  @location(3) curve: f32,
 };
 
 struct VertexOutput {
@@ -27,16 +28,17 @@ struct VertexOutput {
   @location(0) normal: vec3<f32>,
   @location(1) color: vec4<f32>,
   @location(2) world_position: vec3<f32>,
+  @location(3) @interpolate(flat) curve: f32,
 };
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
   var output: VertexOutput;
   output.clip_position = camera.view_projection * vec4<f32>(input.position, 1.0);
-  output.clip_position.z -= input.depth_bias * output.clip_position.w;
   output.normal = input.normal;
   output.color = input.color;
   output.world_position = input.position;
+  output.curve = input.curve;
   return output;
 }
 
@@ -70,6 +72,14 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @l
   let light = matte_light(normal, view_direction);
   var shaded = input.color.rgb * light + vec3<f32>(specular);
   shaded *= 1.0 - rim;
+  if input.curve > 0.5 {
+    let tube_light = camera.curve_surface.x
+      + camera.curve_surface.y * max(dot(normal, normalize(camera.key_direction.xyz)), 0.0)
+      + camera.lighting.z * max(dot(normal, normalize(camera.fill_direction.xyz)), 0.0);
+    let highlight = pow(max(dot(normal, half_direction), 0.0), camera.curve_surface.w) * camera.curve_surface.z;
+    let edge = pow(1.0 - clamp(dot(normal, view_direction), 0.0, 1.0), camera.curve_edge.y);
+    shaded = (input.color.rgb * tube_light + vec3<f32>(highlight)) * (1.0 - camera.curve_edge.x * edge);
+  }
   return vec4<f32>(shaded, input.color.a);
 }
 
@@ -105,7 +115,6 @@ fn point_vs_main(input: PointInput, @builtin(vertex_index) vertex_index: u32) ->
   var clip = camera.view_projection * vec4<f32>(input.position, 1.0);
   clip.x += corner.x * camera.point_scale.x * clip.w;
   clip.y += corner.y * camera.point_scale.y * clip.w;
-  clip.z -= camera.point_depth_bias.x * clip.w;
   return PointOutput(
     clip,
     corner,

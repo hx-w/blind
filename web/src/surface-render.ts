@@ -13,7 +13,6 @@ export class SurfaceInk {
   update(marks: SurfaceAnnotation[], camera: THREE.Camera, width: number, height: number,
     visible: (index: number) => boolean, anchorVisible: (point: Vec3, index: number) => boolean, selected?: string, preview?: Vec3): void {
     const positions: number[] = [], colors: number[] = [];
-    let bias=0;
     const vertex = (p: THREE.Vector3, dx: number, dy: number, color: THREE.Color, normal?: THREE.Vector3) => {
       const q = p.clone(); q.x += dx * 2 / width; q.y += dy * 2 / height; q.unproject(camera);
       if(normal) {
@@ -24,7 +23,11 @@ export class SurfaceInk {
           q.addScaledVector(direction,anchor.sub(q).dot(normal)/denominator);
         }
       }
-      q.project(camera);q.z-=bias;q.unproject(camera);
+      // Lift by a small fraction of one screen pixel, never by NDC depth or mesh index.
+      const projected = q.clone().project(camera);
+      const pixel = projected.clone(); pixel.x += 2 / width; pixel.unproject(camera);
+      const near = projected.clone(); near.z = -1; near.unproject(camera);
+      q.addScaledVector(near.sub(q).normalize(), pixel.distanceTo(q) * shader.annotation_lift_pixels);
       positions.push(q.x, q.y, q.z); colors.push(color.r, color.g, color.b);
     };
     const disk = (p: THREE.Vector3, radius: number, color: THREE.Color, normal?: THREE.Vector3) => {
@@ -36,7 +39,6 @@ export class SurfaceInk {
     };
     for (const mark of marks) {
       if (!mark.visible || !visible(mark.mesh)) continue;
-      bias=(mark.mesh+.75)*shader.depth_bias_step;
       const color = new THREE.Color(mark.color), highlight=new THREE.Color('#f4f2ea');
       const ps = mark.points.map(point => new THREE.Vector3(...point).project(camera));
       const normals=mark.normals.map(n=>new THREE.Vector3(...n));

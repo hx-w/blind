@@ -398,8 +398,7 @@ export class MeshViewer {
     object.position.fromArray(info.translation ?? [0, 0, 0]);
     object.updateMatrixWorld(true);
     object.userData.modelIndex = index;
-    // Keep layer precedence stable while the camera moves. The depth bias resolves
-    // coplanar samples; renderOrder also makes translucent meshes deterministic.
+    // Equal-depth samples use resource order; separated surfaces retain real depth.
     object.renderOrder = index;
     object.traverse((child) => {
       if (!isDrawable(child)) return;
@@ -412,7 +411,7 @@ export class MeshViewer {
         opacity: info.opacity,
         flat: info.format !== 'pts' && this.state.shading === 'flat',
         wireframe: info.format !== 'pts' && this.state.shading === 'wire',
-        layer: index,
+        curve: info.format === 'pts',
       }, this.renderer.getPixelRatio());
       if (child instanceof THREE.Points) return;
       // Review the geometry itself rather than trusting optional exporter normals,
@@ -429,14 +428,14 @@ export class MeshViewer {
   }
 
   private applyMaterials(): void {
-    this.models.forEach((model, index) => model.object.traverse((child) => {
+    this.models.forEach((model) => model.object.traverse((child) => {
       if (!isDrawable(child)) return;
       updateObjectMaterial(child, {
         color: model.info.color,
         opacity: model.info.opacity,
         flat: model.info.format !== 'pts' && this.state.shading === 'flat',
         wireframe: model.info.format !== 'pts' && this.state.shading === 'wire',
-        layer: index,
+        curve: model.info.format === 'pts',
       });
     }));
     this.dirty = true;

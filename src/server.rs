@@ -1779,7 +1779,7 @@ async fn scene_from_sources(
             byte_size: observed.size,
             modified_ns: observed.modified_ns,
             change_ns: observed.change_ns,
-            color: crate::scene::PALETTE[i % crate::scene::PALETTE.len()].into(),
+            color: crate::scene::default_color(format, i).into(),
             opacity: 1.0,
             visible: true,
             quality: MeshQuality::Lod,
@@ -2059,8 +2059,7 @@ async fn scene_from_manifest(
                         byte_size: observed.size,
                         modified_ns: observed.modified_ns,
                         change_ns: observed.change_ns,
-                        color: crate::scene::PALETTE[ready.len() % crate::scene::PALETTE.len()]
-                            .into(),
+                        color: crate::scene::default_color(format, ready.len()).into(),
                         opacity: 1.0,
                         visible: true,
                         quality: MeshQuality::Lod,

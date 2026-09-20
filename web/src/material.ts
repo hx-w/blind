@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import shader from '../../shaders/matte.json';
 
 const vertexShader = `
-  uniform float depthBias;
   varying vec3 viewNormal;
   varying vec3 viewPosition;
 
@@ -11,12 +10,10 @@ const vertexShader = `
     viewPosition = view.xyz;
     viewNormal = normalize(normalMatrix * normal);
     gl_Position = projectionMatrix * view;
-    gl_Position.z -= depthBias * gl_Position.w;
   }
 `;
 
 const pointVertexShader = `
-  uniform float depthBias;
   uniform float pointSize;
   varying vec3 viewPosition;
 
@@ -24,7 +21,6 @@ const pointVertexShader = `
     vec4 view = modelViewMatrix * vec4(position, 1.0);
     viewPosition = view.xyz;
     gl_Position = projectionMatrix * view;
-    gl_Position.z -= depthBias * gl_Position.w;
     gl_PointSize = pointSize;
   }
 `;
@@ -61,6 +57,9 @@ const lightingChunk = `
 
 const fragmentShader = `
   uniform bool flatShading;
+  uniform bool curve;
+  uniform vec4 curveSurface;
+  uniform vec2 curveEdge;
   uniform vec4 surface;
   varying vec3 viewNormal;
   varying vec3 viewPosition;
@@ -71,13 +70,25 @@ const fragmentShader = `
     vec3 normal = flatShading
       ? normalize(cross(dFdx(viewPosition), dFdy(viewPosition)))
       : normalize(viewNormal);
-    if (!gl_FrontFacing) normal = -normal;
+    // Screen derivatives already face the camera on either side of a flat face.
+    if (!flatShading && !gl_FrontFacing) normal = -normal;
     vec3 viewDirection = normalize(-viewPosition);
     vec3 halfDirection = normalize(normalize(keyDirection) + viewDirection);
     float specular = pow(max(dot(normal, halfDirection), 0.0), surface.w) * surface.z;
     float rim = pow(1.0 - clamp(dot(normal, viewDirection), 0.0, 1.0), surface.y) * surface.x;
     vec3 shaded = baseColor * shadedLight(normal, viewDirection) + vec3(specular);
     shaded *= 1.0 - rim;
+    // A lit, polished tube: rounded diffuse falloff and a narrow white highlight.
+    // Screen/surface annotations remain flat ink and never use this material.
+    if (curve) {
+      float tubeLight = curveSurface.x
+        + curveSurface.y * max(dot(normal, normalize(keyDirection)), 0.0)
+        + lighting.z * max(dot(normal, normalize(fillDirection)), 0.0);
+      float highlight = pow(max(dot(normal, halfDirection), 0.0), curveSurface.w) * curveSurface.z;
+      // Darken the actual tube silhouette so pale curves separate from lit scans.
+      float edge = pow(1.0 - clamp(dot(normal, viewDirection), 0.0, 1.0), curveEdge.y);
+      shaded = (baseColor * tubeLight + vec3(highlight)) * (1.0 - curveEdge.x * edge);
+    }
     gl_FragColor = vec4(shaded, opacity);
     #include <tonemapping_fragment>
     #include <colorspace_fragment>
@@ -108,7 +119,7 @@ export interface MeshMaterialStyle {
   opacity: number;
   flat: boolean;
   wireframe: boolean;
-  layer: number;
+  curve: boolean;
 }
 
 function isTranslucent(opacity: number): boolean {
@@ -124,7 +135,6 @@ function baseUniforms(style: MeshMaterialStyle) {
     lighting: { value: new THREE.Vector4(shader.ambient, shader.key, shader.fill, shader.hemisphere) },
     finish: { value: new THREE.Vector3(shader.view, shader.wrap, shader.contrast) },
     tone: { value: new THREE.Vector4(shader.contrast_pivot, shader.light_min, shader.light_max, shader.translucent_threshold) },
-    depthBias: { value: style.layer * shader.depth_bias_step },
   };
 }
 
@@ -152,6 +162,9 @@ export function createObjectMaterial(
       uniforms: {
         ...baseUniforms(style),
         flatShading: { value: style.flat },
+        curve: { value: style.curve },
+        curveSurface: { value: new THREE.Vector4(...shader.curve_surface) },
+        curveEdge: { value: new THREE.Vector2(...shader.curve_edge) },
         surface: { value: new THREE.Vector4(shader.rim, shader.rim_power, shader.specular, shader.shininess) },
       },
       side: isTranslucent(style.opacity) ? THREE.FrontSide : THREE.DoubleSide,
@@ -168,10 +181,10 @@ export function updateObjectMaterial(child: THREE.Mesh | THREE.Points, style: Me
   const translucent = isTranslucent(style.opacity);
   (material.uniforms.baseColor.value as THREE.Color).set(style.color);
   material.uniforms.opacity.value = style.opacity;
-  material.uniforms.depthBias.value = style.layer * shader.depth_bias_step;
   material.depthWrite = !translucent;
   if (child instanceof THREE.Points) return;
   material.uniforms.flatShading.value = style.flat;
+  material.uniforms.curve.value = style.curve;
   material.transparent = translucent;
   material.side = translucent ? THREE.FrontSide : THREE.DoubleSide;
   material.wireframe = style.wireframe;

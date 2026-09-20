@@ -3,6 +3,16 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.2] - 2026-09-20
+
+### Fixed
+
+- Keep rear meshes and PTS loops hidden by foreground surfaces when rotating or
+  zooming close to grouped scenes, in both the viewer and PNG exports.
+- Light flat mesh back faces consistently with front faces in the viewer.
+- Distinguish PTS contours from scan surfaces and annotations with saturated
+  default colors, rounded highlights and dark edges.
+
 ## [0.13.1] - 2026-09-20
 
 ### Fixed

@@ -44,8 +44,9 @@ before(async () => {
 });
 after(async () => { await browser?.close(); server?.closeAllConnections(); await new Promise(resolve => server ? server.close(resolve) : resolve()); });
 
-async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null) {
+async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null, meshes = null) {
   const page = await browser.newPage({viewport, deviceScaleFactor: 2});
+  if (meshes) await page.route('**/mesh/*', route => route.fulfill({contentType:'application/ply', body: meshes[Number(new URL(route.request().url()).pathname.split('/').at(-1))]}));
   if (sceneOverride) await page.route('**/api/v1/scenes/**', route => route.request().method() === 'GET' ? route.fulfill({json:sceneOverride}) : route.continue());
   if (markupResizeDelay) await page.addInitScript(delay => {
     const NativeResizeObserver = window.ResizeObserver;
@@ -824,4 +825,70 @@ test('all failed mesh downloads show unavailable instead of a partial scene', as
     assert.equal(await page.locator('#scene-notice').isVisible(),false);
     assert.equal(await page.locator('#share-view').isVisible(),false);
   } finally { await page.close(); }
+});
+
+
+function planePly(size) {
+  return `ply
+format ascii 1.0
+element vertex 4
+property float x
+property float y
+property float z
+element face 2
+property list uchar int vertex_indices
+end_header
+${-size} ${-size} 0
+${size} ${-size} 0
+${size} ${size} 0
+${-size} ${size} 0
+3 0 1 2
+3 0 2 3
+`;
+}
+
+test('later meshes and curves respect real depth with another panel crossing camera depth', async () => {
+  for (const projection of ['perspective','orthographic']) {
+    const meshes=[planePly(5),planePly(5),planePly(2),planePly(5)];
+    const fixtureScene={title:'Depth regression',owner:false,label_groups:[],meshes:meshes.map((data,i)=>({
+      name:`Geometry ${i}`, format:i===2?'pts':'ply',revision:'fixture',byte_size:data.length,
+      color:['#ff0000','#0000ff','#00ff00','#ffffff'][i],opacity:1,visible:true,quality:'raw',source_url:`/mesh/${i}`,
+      translation:[[0,0,0],[0,0,-1],[0,0,-1],[100,0,40]][i],
+    })),state:{...scene.state, selected:0,projection,strokes:[],camera:{position:[0,0,40],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:24}}};
+    const page=await openPage({width:512,height:512},0,fixtureScene,meshes);
+    try {
+      const canvas=page.locator('#canvas-root canvas');
+      const png=await canvas.screenshot();
+      const leaked=await page.evaluate(async data=>{
+        const image=new Image();image.src=data;await image.decode();
+        const c=document.createElement('canvas');c.width=image.width;c.height=image.height;
+        const ctx=c.getContext('2d');ctx.drawImage(image,0,0);
+        const {data:p}=ctx.getImageData(c.width/2-12,c.height/2-12,24,24);
+        let leaked=0;for(let i=0;i<p.length;i+=4)if(!(p[i]>p[i+1]*2&&p[i]>p[i+2]*2))leaked++;
+        return leaked;
+      },`data:image/png;base64,${png.toString('base64')}`);
+      assert.equal(leaked,0,`${projection}: rear geometry covered the foreground`);
+    } finally {await page.close();}
+  }
+});
+
+test('flat scan back faces receive the same lighting as front faces', async () => {
+  const front=planePly(5), back=front.replace('3 0 1 2\n3 0 2 3','3 2 1 0\n3 3 2 0');
+  const values=[];
+  for(const geometry of [front,back]) {
+    const fixtureScene={...scene,label_groups:[],meshes:[{...scene.meshes[0],label:undefined,color:'#ffffff',quality:'raw'}],
+      state:{...scene.state,strokes:[],camera:{position:[0,0,40],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:24}}};
+    const page=await openPage({width:512,height:512},0,fixtureScene,[geometry]);
+    try {
+      const png=await page.locator('#canvas-root canvas').screenshot();
+      values.push(await page.evaluate(async data=>{
+        const image=new Image();image.src=data;await image.decode();
+        const c=document.createElement('canvas');c.width=image.width;c.height=image.height;
+        const ctx=c.getContext('2d');ctx.drawImage(image,0,0);
+        return ctx.getImageData(c.width/2,c.height/2,1,1).data[0];
+      },`data:image/png;base64,${png.toString('base64')}`));
+    } finally {await page.close();}
+  }
+  assert.ok(values[0]>200);
+  assert.ok(Math.abs(values[0]-values[1])<=1,`front/back lighting differs: ${values}`);
 });

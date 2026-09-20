@@ -11,6 +11,18 @@ use tokio::io::AsyncReadExt;
 pub const PALETTE: [&str; 6] = [
     "#8fa9c9", "#8ca49c", "#b2a4ad", "#bf8078", "#8f8bb2", "#b7b3aa",
 ];
+/// Curves need a distinct, saturated palette against the muted scan surfaces.
+pub fn default_color(format: MeshFormat, index: usize) -> &'static str {
+    const CURVES: [&str; 6] = [
+        "#ffce54", "#44d7ff", "#ff765e", "#68e0b0", "#c798ff", "#ff8dca",
+    ];
+    if format == MeshFormat::Pts {
+        CURVES[index % CURVES.len()]
+    } else {
+        PALETTE[index % PALETTE.len()]
+    }
+}
+
 pub const MAX_SCREEN_STROKES: usize = 64;
 pub const MAX_SCREEN_STROKE_POINTS: usize = 512;
 pub const MAX_SCREEN_POINTS: usize = 4_096;
@@ -393,7 +405,7 @@ impl SceneDescriptor {
                 byte_size: after.len(),
                 modified_ns: modified_nanos(&after),
                 change_ns: change_nanos(&after),
-                color: PALETTE[index % PALETTE.len()].to_string(),
+                color: default_color(format, index).to_string(),
                 opacity: 1.0,
                 visible: true,
                 quality: MeshQuality::Lod,
