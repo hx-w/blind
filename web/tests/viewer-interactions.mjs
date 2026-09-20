@@ -643,8 +643,9 @@ test('annotation names stay on canvas and the list adapts to available space ind
   }
   const page=await openPage({width:390,height:844},0,fixture);
   try {
-    await page.setViewportSize({width:1280,height:800});await page.waitForTimeout(100);
-    assert.equal(await page.locator('.surface-list').isVisible(),true);
+    await page.setViewportSize({width:1280,height:800});
+    // Resize and visualViewport events are asynchronous on CI runners.
+    await page.locator('.surface-list').waitFor({state:'visible',timeout:10_000});
     await page.locator('#surface-list-close').click();
     await page.setViewportSize({width:390,height:844});await page.setViewportSize({width:1280,height:800});
     assert.equal(await page.locator('.surface-list').isVisible(),false);
@@ -666,15 +667,21 @@ test('annotation labels follow every rendered camera frame without replacing the
   const page=await openPage({width:390,height:844},0,fixture);
   try {
     await page.evaluate(()=>{
-      window.trackedBadge=document.querySelector('.surface-badge');window.badgeFrames=[];window.paintEvents=[];
-      let transform=window.trackedBadge.style.transform;
-      new MutationObserver(()=>{const next=window.trackedBadge.style.transform;if(next!==transform){window.badgeFrames.push(window.paintFrame);transform=next;}}).observe(window.trackedBadge,{attributes:true,attributeFilter:['style']});
+      window.trackedBadge=document.querySelector('.surface-badge');window.badgeFrames=[];window.badgeMoves=0;window.paintEvents=[];
+      const style=window.trackedBadge.style;
+      // Selection redraws can keep the same projection. Observe assignments,
+      // not DOM mutations: browsers may elide identical CSS values entirely.
+      Object.defineProperty(style,'transform',{
+        get:()=>style.getPropertyValue('transform'),
+        set:value=>{window.badgeFrames.push(window.paintFrame);if(value!==style.getPropertyValue('transform'))window.badgeMoves++;style.setProperty('transform',value);},
+      });
     });
-    await page.mouse.move(165,345);await page.mouse.down();
+    await page.mouse.move(165,345);await page.mouse.down();await page.waitForTimeout(100);
     for(let i=1;i<=16;i++){await page.mouse.move(165+i,345+i/2);await page.waitForTimeout(20);}
     await page.mouse.up();
-    const result=await page.evaluate(()=>({same:window.trackedBadge===document.querySelector('.surface-badge'),frames:window.badgeFrames,mesh:[...new Set(window.paintEvents.filter(e=>e.target==='mesh'&&e.type==='render').map(e=>e.frame))]}));
+    const result=await page.evaluate(()=>({same:window.trackedBadge===document.querySelector('.surface-badge'),frames:window.badgeFrames,moves:window.badgeMoves,mesh:[...new Set(window.paintEvents.filter(e=>e.target==='mesh'&&e.type==='render').map(e=>e.frame))]}));
     assert.equal(result.same,true);assert.ok(result.mesh.length>=8,JSON.stringify(result));
+    assert.ok(result.moves>=8,JSON.stringify(result));
     assert.ok(result.mesh.every(frame=>result.frames.includes(frame)),JSON.stringify(result));
   } finally {await page.close();}
 });

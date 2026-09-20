@@ -3,6 +3,14 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.1] - 2026-09-20
+
+### Fixed
+
+- Make the viewer annotation regression check cover stationary redraws without
+  mistaking unchanged CSS positions for missed layout updates, and wait for
+  responsive layout completion instead of a fixed delay.
+
 ## [0.13.0] - 2026-09-20
 
 ### Added
