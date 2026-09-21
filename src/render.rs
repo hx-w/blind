@@ -748,7 +748,7 @@ fn load_scene_geometry_bytes(
     let horizontal_fov = 2.0 * ((default_fov * 0.5).tan() * aspect).atan();
     let fit_fov = default_fov.min(horizontal_fov);
     let default_distance = diagonal * 0.5 / (fit_fov * 0.5).sin() * camera_spec.fit_padding;
-    let position = camera
+    let mut position = camera
         .map(|value| Vec3::from_array(value.position))
         .unwrap_or(
             center
@@ -758,6 +758,9 @@ fn load_scene_geometry_bytes(
     let target = camera
         .map(|value| Vec3::from_array(value.target))
         .unwrap_or(center);
+    if matches!(scene.state.projection, Projection::Orthographic) {
+        position = orthographic_position(position, target, center, extent * 0.5, camera_spec);
+    }
     let up = camera
         .map(|value| Vec3::from_array(value.up))
         .unwrap_or(Vec3::Y);
@@ -925,7 +928,12 @@ fn scene_labels(
             if anchor.iter().all(|v| (0.0..=1.0).contains(v)) {
                 labels.push(RenderLabel {
                     anchor,
-                    text: format!("画笔 {}", i + 1),
+                    text: stroke
+                        .label
+                        .as_ref()
+                        .filter(|label| !label.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| format!("画笔 {}", i + 1)),
                     flat: true,
                     color: color(&stroke.color)?,
                 });
@@ -1113,6 +1121,24 @@ fn annotation_label_candidates(length: usize) -> impl Iterator<Item = usize> {
 
 fn surface_anchor_visible(origin: Vec3, point: Vec3, occluders: &Occluders) -> bool {
     occluders.visible(origin, point)
+}
+
+// Orthographic framing is independent of eye distance. Match the Viewer orbit safety.
+fn orthographic_position(
+    position: Vec3,
+    target: Vec3,
+    center: Vec3,
+    half: Vec3,
+    camera: &CameraSpec,
+) -> Vec3 {
+    let offset = position - target;
+    let safe_distance =
+        center.distance(target) + half.length().max(1e-6) * (1.0 + camera.clip_padding_factor);
+    if offset.length() < safe_distance {
+        target + offset.try_normalize().unwrap_or(Vec3::Z) * safe_distance
+    } else {
+        position
+    }
 }
 
 /// Mirrors `MeshViewer.updateClipping` in web/src/viewer.ts; change both in lockstep.
@@ -1496,6 +1522,20 @@ mod tests {
         let back = load_scene_geometry(&scene, &material).unwrap();
         assert!(back.labels.is_empty());
         assert!(back.annotation_vertices.is_empty());
+        scene.state.strokes.push(ScreenStroke {
+            label: Some("屏幕备注".into()),
+            color: "#ff6b5e".into(),
+            aspect: 390.0 / 844.0,
+            points: vec![[0.2, 0.2], [0.4, 0.4]],
+        });
+        let named = load_scene_geometry(&scene, &material).unwrap();
+        assert_eq!(named.labels[0].text, "屏幕备注");
+        assert_eq!(named.labels[0].anchor, [0.4, 0.4]);
+        scene.state.strokes[0].label = None;
+        assert_eq!(
+            load_scene_geometry(&scene, &material).unwrap().labels[0].text,
+            "画笔 1"
+        );
         assert_eq!(
             annotation_label_candidates(4096).count(),
             5,
@@ -1602,6 +1642,26 @@ mod tests {
             &material.camera,
         );
 
+        // A saved orthographic eye inside the scene must be moved back without
+        // changing its target or viewing direction; the entire box then fits.
+        let eye = orthographic_position(
+            Vec3::new(0.0, 0.0, 0.2),
+            Vec3::ZERO,
+            Vec3::ZERO,
+            Vec3::splat(1.0),
+            &material.camera,
+        );
+        let (ortho_near, ortho_far) = clip_planes(
+            Vec3::ZERO,
+            Vec3::splat(1.0),
+            eye,
+            Vec3::NEG_Z,
+            &material.camera,
+        );
+        assert!(eye.z - 1.0 > ortho_near && eye.z + 1.0 < ortho_far);
+        assert_eq!(eye.x, 0.0);
+        assert_eq!(eye.y, 0.0);
+
         assert!(near > 5.0, "near plane was too loose: {near}");
         assert!(far < 8.0, "far plane was too loose: {far}");
         assert!(
@@ -1618,6 +1678,7 @@ mod tests {
         overlay_screen_strokes(
             &mut image,
             &[ScreenStroke {
+                label: None,
                 color: "#ff6b5e".into(),
                 aspect: 1.0,
                 points: vec![[0.2, 0.5], [0.8, 0.5]],

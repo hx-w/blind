@@ -1,0 +1,142 @@
+name: Native checks and artifacts
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Validate a stable tag and upload tested release archives
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.task }} ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Run source/browser checks alongside the optimized binary and its
+        # integration tests; publishing waits for both on every architecture.
+        task: [verify, build]
+        runner: [macos-15, macos-15-intel, ubuntu-22.04]
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: x86_64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate stable release tag
+        if: inputs.release
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -q "^version = \"${GITHUB_REF_NAME#v}\"$" Cargo.toml
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+          package-manager-cache: false
+      - name: Install Linux runtime and integration-test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libvulkan1 mesa-vulkan-drivers openssh-server
+      - name: Build viewer
+        run: |
+          npm ci --prefix web
+          npm run build --prefix web
+      - name: Install export browser
+        working-directory: web
+        run: |
+          npx playwright install chromium
+          node --input-type=module -e 'import { chromium } from "playwright"; console.log(`BLIND_RENDER_BROWSER=${chromium.executablePath()}`)' >> "$GITHUB_ENV"
+      - name: Verify viewer interactions
+        if: matrix.task == 'verify'
+        working-directory: web
+        run: |
+          npm test
+          npm run test:browser
+      - name: Prepare component export tests
+        if: matrix.task == 'build'
+        working-directory: web
+        run: |
+          python3 -m venv "$RUNNER_TEMP/component-tests"
+          "$RUNNER_TEMP/component-tests/bin/python" -m pip install Pillow==12.2.0
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # CI and tags share dependencies, but debug and release jobs cannot
+          # overwrite each other's incomplete target directories.
+          shared-key: ${{ matrix.runner }}-${{ matrix.task }}
+          # Tags can restore main caches, but cannot reuse another tag's cache.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: false
+      - name: Verify source
+        if: matrix.task == 'verify'
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Build binary
+        if: matrix.task == 'build'
+        run: cargo build --locked --release
+      - name: Verify Client and read-only SFTP
+        if: matrix.task == 'build'
+        run: python3 tests/integration_sftp.py target/release
+      - name: Verify read-only OSS sources
+        if: matrix.task == 'build'
+        run: python3 tests/integration_oss.py target/release
+      - name: Verify sandboxed Docker component export
+        if: matrix.task == 'build' && runner.os == 'Linux'
+        run: |
+          docker build -f deploy/Dockerfile -t blind-component-test .
+          "$RUNNER_TEMP/component-tests/bin/python" tests/integration_container.py blind-component-test
+      - name: Verify export network isolation
+        if: matrix.task == 'verify'
+        run: cargo test --locked render_viewer::tests -- --include-ignored
+      - name: Verify components and PNG export
+        if: matrix.task == 'build'
+        run: '"$RUNNER_TEMP/component-tests/bin/python" tests/integration_components.py target/release'
+      - name: Verify Server plugins
+        if: matrix.task == 'build'
+        run: python3 tests/integration_plugins.py target/release
+      - name: Verify CLI
+        if: matrix.task == 'build'
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+          ./target/release/blind --version
+          ./target/release/blind --help
+          ./target/release/blind join --help
+          ./target/release/blind share --help
+          ./target/release/blind doctor --help
+          ./target/release/blind update --help
+      - name: Package
+        if: inputs.release && matrix.task == 'build'
+        run: |
+          mkdir package
+          cp target/release/blind package/blind
+          chmod 0755 package/blind
+          tar -C package -czf "blind-${{ matrix.asset }}.tar.gz" blind
+      - uses: actions/upload-artifact@v7
+        if: inputs.release && matrix.task == 'build'
+        with:
+          name: blind-${{ matrix.asset }}
+          path: blind-${{ matrix.asset }}.tar.gz
+          if-no-files-found: error

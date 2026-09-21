@@ -72,6 +72,52 @@ export class MeshViewer {
   invalidate(): void { this.dirty = true; }
   navigatePointer(event: PointerEvent): void { this.renderer.domElement.dispatchEvent(new PointerEvent('pointerdown', event)); }
   navigateWheel(event: WheelEvent): void { this.renderer.domElement.dispatchEvent(new WheelEvent('wheel', event)); }
+  renderGeometryBand(canvas: HTMLCanvasElement, minZ: number, maxZ: number): void {
+    const inBand = (bounds: THREE.Box3) => !bounds.isEmpty() && bounds.max.z >= minZ && bounds.min.z < maxZ;
+    const geometry = new Set(this.models.filter(model => model.info.visible && model.info.opacity > 0 && inBand(model.bounds)).map(model => model.object));
+    // Keep the same clipping contract for mesh annotations and scene helpers.
+    for (const object of [this.axes, this.surfaceInk.object]) {
+      if (object.visible && inBand(new THREE.Box3().setFromObject(object))) geometry.add(object);
+    }
+    if (!geometry.size) {
+      // Empty depth intervals need no viewport-sized bitmap. Release any buffer
+      // retained from a previous camera/visibility arrangement as well.
+      if (canvas.width) canvas.width = 0;
+      if (canvas.height) canvas.height = 0;
+      return;
+    }
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    if (canvas.width !== size.x) canvas.width = size.x;
+    if (canvas.height !== size.y) canvas.height = size.y;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas 2D is unavailable');
+    context.clearRect(0, 0, size.x, size.y);
+    const clippingPlanes = [];
+    if (Number.isFinite(minZ)) clippingPlanes.push(new THREE.Plane(new THREE.Vector3(0, 0, 1), -minZ));
+    // Half-open bands assign coplanar geometry to exactly one canvas. A small
+    // float-precision inset makes the upper boundary exclusive on the GPU too.
+    if (Number.isFinite(maxZ)) clippingPlanes.push(new THREE.Plane(new THREE.Vector3(0, 0, -1), maxZ - Math.max(1e-7, Math.abs(maxZ) * 1e-7)));
+    const previousClipping = this.renderer.clippingPlanes;
+    const previousTarget = this.renderer.getRenderTarget();
+    const clearColor = this.renderer.getClearColor(new THREE.Color());
+    const clearAlpha = this.renderer.getClearAlpha();
+    const visibility = this.scene.children.map(object => ({object, visible: object.visible}));
+    try {
+      for (const {object} of visibility) object.visible = geometry.has(object);
+      this.renderer.clippingPlanes = clippingPlanes;
+      this.renderer.setRenderTarget(null);
+      this.renderer.setClearColor(0, 0);
+      this.renderer.render(this.scene, this.camera);
+      // Copy immediately while the WebGL drawing buffer is valid. The browser
+      // performs the canvas transfer without a CPU pixel readback.
+      context.drawImage(this.renderer.domElement, 0, 0);
+    } finally {
+      for (const {object, visible} of visibility) object.visible = visible;
+      this.renderer.clippingPlanes = previousClipping;
+      this.renderer.setRenderTarget(previousTarget);
+      this.renderer.setClearColor(clearColor, clearAlpha);
+    }
+  }
   meshBounds(index: number): THREE.Box3 { return this.models[index]?.bounds.clone() ?? new THREE.Box3(); }
   setMeshPosition(index: number, position: Vec3): void {
     const model = this.models[index]; if (!model) return;
@@ -229,6 +275,41 @@ export class MeshViewer {
     const hit = this.raycaster.intersectObjects(this.models.filter(m => m.info.visible && m.info.opacity > 0).map(m => m.object), true)[0];
     if (!hit || (target !== undefined && hit.object.userData.modelIndex !== target) || !(hit.object instanceof THREE.Mesh) || !hit.face) return null;
     return {mesh: hit.object.userData.modelIndex, point: hit.point.toArray() as Vec3, normal: hit.face.normal.clone().transformDirection(hit.object.matrixWorld).toArray() as Vec3};
+  }
+  geometryOccludes(x: number, y: number, point: Vec3): boolean {
+    // Input must follow painted coverage, including wireframe gaps and points.
+    // Sample geometry alone before the content plane; DOM backdrops and holes
+    // must not count as occluders. Annotation picking remains triangle based.
+    const rect = this.root.getBoundingClientRect();
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    const px = Math.floor((x - rect.left) / rect.width * size.x);
+    const py = Math.floor((y - rect.top) / rect.height * size.y);
+    if (px < 0 || py < 0 || px >= size.x || py >= size.y) return false;
+    const camera = this.camera.clone();
+    const depth = -new THREE.Vector3(...point).applyMatrix4(camera.matrixWorldInverse).z;
+    camera.far = Math.min(camera.far, depth - Math.max(depth * 1e-6, 1e-7));
+    if (camera.far <= camera.near) return false;
+    camera.setViewOffset(size.x, size.y, px, py, 1, 1);
+    const target = new THREE.WebGLRenderTarget(1, 1, {samples: 4});
+    const previousTarget = this.renderer.getRenderTarget();
+    const clearColor = this.renderer.getClearColor(new THREE.Color());
+    const clearAlpha = this.renderer.getClearAlpha();
+    const geometry = new Set(this.models.filter(m => m.info.visible && m.info.opacity > 0).map(m => m.object));
+    const visibility = this.scene.children.map(object => ({object, visible: object.visible}));
+    const pixel = new Uint8Array(4);
+    try {
+      for (const {object} of visibility) object.visible = geometry.has(object);
+      this.renderer.setRenderTarget(target);
+      this.renderer.setClearColor(0, 0);
+      this.renderer.render(this.scene, camera);
+      this.renderer.readRenderTargetPixels(target, 0, 0, 1, 1, pixel);
+      return pixel[3] > 0;
+    } finally {
+      for (const {object, visible} of visibility) object.visible = visible;
+      this.renderer.setRenderTarget(previousTarget);
+      this.renderer.setClearColor(clearColor, clearAlpha);
+      target.dispose();
+    }
   }
   surfacePointVisible(point: Vec3, target: number): boolean {
     const p = this.projectSurface(point); if (!p.visible) return false;
@@ -547,11 +628,26 @@ export class MeshViewer {
     if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     const half = box.getSize(new THREE.Vector3()).multiplyScalar(0.5);
+    // Orthographic zoom changes framing, not camera distance. Keep the eye
+    // outside the bounding sphere so orbiting cannot slice through a wide scene.
+    const radius = Math.max(half.length(), 1e-6);
+    if (this.camera instanceof THREE.OrthographicCamera) {
+      const offset = this.camera.position.clone().sub(this.controls.target);
+      const distance = offset.length();
+      const safeDistance = center.distanceTo(this.controls.target) + radius * (1 + shader.camera.clip_padding_factor);
+      if (distance < safeDistance) {
+        // restoreCamera sets position/target before refreshing the rotation.
+        // Derive the saved direction from those positions, not a stale matrix.
+        if (distance < 1e-9) offset.set(0, 0, 1);
+        this.camera.position.copy(this.controls.target).addScaledVector(offset.normalize(), safeDistance);
+        this.camera.updateMatrixWorld();
+        this.controls.setCamera(this.camera);
+      }
+    }
     const forward = this.camera.getWorldDirection(new THREE.Vector3());
-    // Corner depths of an AABB span the center depth by the summed per-axis projections.
+    // Corner depths span the center depth by the summed per-axis projections.
     const span = Math.abs(half.x * forward.x) + Math.abs(half.y * forward.y) + Math.abs(half.z * forward.z);
     const centerDepth = center.sub(this.camera.position).dot(forward);
-    const radius = Math.max(half.length(), 1e-6);
     const padding = Math.max(radius * shader.camera.clip_padding_factor, 1e-6);
     const near = Math.max(radius * shader.camera.near_floor_factor, centerDepth - span - padding);
     // far must clear near by a full slack window even when the near floor wins.
@@ -612,10 +708,10 @@ export class MeshViewer {
       // when needed, immediately before rendering, never in ResizeObserver.
       if (this.rendererSize.x !== width || this.rendererSize.y !== height) this.renderer.setSize(width, height, false);
       this.surfaceInk.update(this.annotations, this.camera, width, height, index => !!this.models[index]?.info.visible && this.models[index].info.opacity > 0, (point, index) => this.surfacePointVisible(point, index), this.annotationSelection, this.annotationPreview);
+      for (const render of this.renderListeners) render();
       this.renderer.render(this.scene, this.camera);
       this.labels.render(this.models, this.labelGroups, this.camera, this.selected);
       this.onRender?.();
-      for (const render of this.renderListeners) render();
       this.dirty = false;
     }
   };

@@ -248,6 +248,8 @@ pub fn validate_annotations(marks: &[SurfaceAnnotation], meshes: &[MeshRef]) -> 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenStroke {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub color: String,
     pub aspect: f32,
     pub points: Vec<[f32; 2]>,
@@ -697,6 +699,13 @@ fn validate_screen_strokes(strokes: &[ScreenStroke]) -> Result<()> {
     }
     let mut total_points = 0_usize;
     for stroke in strokes {
+        if stroke
+            .label
+            .as_ref()
+            .is_some_and(|label| label.chars().count() > 120)
+        {
+            bail!("screen stroke label must contain at most 120 characters");
+        }
         if !is_hex_color(&stroke.color) {
             bail!("invalid screen stroke color");
         }
@@ -933,6 +942,7 @@ mod tests {
         let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
         let mut state = scene.state.clone();
         state.strokes.push(ScreenStroke {
+            label: Some("需要检查".into()),
             color: "#ff6b5e".into(),
             aspect: 1.0,
             points: vec![[0.1, 0.2], [0.4, 0.6]],
@@ -956,6 +966,12 @@ mod tests {
             .unwrap();
         assert_eq!(scene.schema, 3);
         assert_eq!(scene.state.strokes.len(), 1);
+        let saved: ViewState =
+            serde_json::from_value(serde_json::to_value(&scene.state).unwrap()).unwrap();
+        assert_eq!(saved.strokes[0].label.as_deref(), Some("需要检查"));
+        let mut oversized = saved.strokes.clone();
+        oversized[0].label = Some("字".repeat(121));
+        assert!(validate_screen_strokes(&oversized).is_err());
         assert_eq!(scene.meshes[0].quality, MeshQuality::Raw);
 
         let mut invalid = scene.state.clone();

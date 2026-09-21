@@ -77,7 +77,7 @@ export class SurfaceEditor {
     this.list = document.createElement('section'); this.list.className = 'surface-list'; this.list.hidden = true;
     this.list.setAttribute('aria-label','标记列表'); this.list.setAttribute('data-label-obstacle','');
     this.list.innerHTML = '<div class="surface-list-heading"><strong>标记</strong><span>点选定位</span><button type="button" id="surface-list-close" aria-label="收起标记列表">×</button></div><div id="surface-items"></div>';
-    shell.append(this.list);
+    this.el('#scene-panels').append(this.list);
     const layout = () => this.updateLayout();
     new ResizeObserver(layout).observe(this.panel);
     new MutationObserver(layout).observe(this.shell, {attributes:true, attributeFilter:['class']});
@@ -93,7 +93,16 @@ export class SurfaceEditor {
     this.el('#surface-undo').addEventListener('click', () => this.undo());
     this.el('#surface-redo').addEventListener('click', () => this.redo());
     this.el<HTMLInputElement>('#surface-name').addEventListener('change', event => {
-      if (!this.current) return; this.remember(); this.current.label = (event.target as HTMLInputElement).value.trim(); this.sync();
+      if (!this.current && this.selectedScreen === undefined) return;
+      this.remember();
+      const label = (event.target as HTMLInputElement).value.trim();
+      if (this.current) this.current.label = label;
+      else {
+        const strokes = this.markup.exportStrokes();
+        strokes[this.selectedScreen!].label = label || undefined;
+        this.markup.load(strokes);
+      }
+      this.sync();
     });
     this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-mode]').forEach(button => button.addEventListener('click', () => {
       this.markup.finishActive(); this.finishLine(); this.selected = undefined; this.selectedScreen=undefined;
@@ -462,7 +471,7 @@ export class SurfaceEditor {
       toggle.setAttribute('aria-label',`${mark.visible?'隐藏':'显示'} ${mark.label}`);toggle.setAttribute('aria-pressed',String(mark.visible));
       toggle.addEventListener('click',()=> {this.remember();mark.visible=!mark.visible;this.sync();});item.append(toggle);
     });
-    strokes.forEach((stroke,i)=>row(marks.length+i+1,`画笔 ${i+1}`,stroke.color,'屏幕',i===this.selectedScreen,()=>this.selectScreen(i)));
+    strokes.forEach((stroke,i)=>row(marks.length+i+1,stroke.label || `画笔 ${i+1}`,stroke.color,'屏幕',i===this.selectedScreen,()=>this.selectScreen(i)));
   }
   private selectScreen(index: number): void {
     const stroke=this.markup.exportStrokes()[index]; if(!stroke)return;
@@ -519,7 +528,7 @@ export class SurfaceEditor {
     });
     this.markup.exportStrokes().forEach((stroke,index)=> {
       const points=this.markup.displayPoints(index),p=points[Math.floor(points.length/2)];
-      if(p)badge(`screen:${index}`,p[0],p[1],`画笔 ${index+1}`,stroke.color,index===this.selectedScreen,()=>this.selectScreen(index));
+      if(p)badge(`screen:${index}`,p[0],p[1],stroke.label || `画笔 ${index+1}`,stroke.color,index===this.selectedScreen,()=>this.selectScreen(index));
     });
     for(const [key,view] of this.badgeElements)if(!retained.has(key)){view.button.remove();view.line.remove();this.badgeElements.delete(key);}
   }
@@ -543,8 +552,8 @@ export class SurfaceEditor {
     this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-color]').forEach(button => button.setAttribute('aria-pressed',String(button.dataset.surfaceColor === (this.current?.color ?? this.color))));
     const selected = this.current;
     this.el('.surface-selection').hidden = !selected && this.selectedScreen===undefined;
-    const input=this.el<HTMLInputElement>('#surface-name');input.readOnly=!selected;
-    if(document.activeElement!==input) input.value=selected?.label??`画笔 ${(this.selectedScreen??0)+1}`;
+    const input=this.el<HTMLInputElement>('#surface-name');input.readOnly=!selected && this.selectedScreen===undefined;
+    if(document.activeElement!==input) input.value=selected?.label??this.markup.exportStrokes()[this.selectedScreen ?? -1]?.label??`画笔 ${(this.selectedScreen??0)+1}`;
     this.el('#surface-close').hidden = selected?.kind !== 'line';
     this.el('#surface-close').textContent = selected?.closed ? '打开' : '闭合';
     this.el('#surface-end').hidden = !this.draft;

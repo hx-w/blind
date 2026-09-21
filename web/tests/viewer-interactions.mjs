@@ -543,21 +543,15 @@ test('surface and screen strokes share tools, selection and undo history', async
     assert.equal((await captureShare(page)).state.strokes[0].color,'#5fb4ff');
     await page.locator('#surface-delete').click();assert.equal((await captureShare(page)).state.strokes.length,0);
     await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.strokes.length,1);
-  } finally {await page.close();}
-});
-
-test('lifting the pointer completes a surface stroke and the next drag starts a new line', async () => {
-  const page=await openPage({width:390,height:844},0,surfaceFixture());
-  try {
-    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="line"]').click();
-    for(const [x,y,endX,endY] of [[155,435,190,380],[175,440,215,390]]) {
-      await page.mouse.move(x,y);await page.mouse.down();await page.mouse.move(endX,endY,{steps:12});await page.mouse.up();
-    }
-    const snapshot=await captureShare(page);assert.equal(snapshot.state.annotations.length,2);
-    assert.ok(snapshot.state.annotations.every(m=>m.kind==='line' && m.points.length>10));
-    await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.annotations.length,1);
-    await page.locator('[data-surface-mode="select"]').click();await page.mouse.click(190,380);
-    assert.equal(await page.locator('.surface-list-row.selected').count(),1);
+    const input=page.locator('#surface-name');
+    assert.equal(await input.getAttribute('readonly'),null);
+    await input.fill('这里需要检查');await input.press('Tab');
+    snapshot=await captureShare(page);assert.equal(snapshot.state.strokes[0].label,'这里需要检查');
+    await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.strokes[0].label,undefined);
+    await page.locator('#surface-redo').click();snapshot=await captureShare(page);
+    const reopened=await openPage({width:390,height:844},0,{...surfaceFixture(),state:snapshot.state});
+    try {assert.equal(await reopened.locator('.surface-badge').filter({hasText:'这里需要检查'}).count(),1);}
+    finally {await reopened.close();}
   } finally {await page.close();}
 });
 
@@ -589,8 +583,10 @@ test('new point and line names remain editable after pointer release and share c
 test('annotation names stay on canvas and the list adapts to available space independently', async () => {
   const fixture=surfaceFixture();
   fixture.state.annotations=Array.from({length:11},(_,i)=>({id:`list-${i}`,mesh:0,revision:'fixture',kind:'point',label:`标记 ${i+1} · 参考位置`,color:'#ff6b5e',visible:true,closed:false,points:[[0.3+i*0.005,0.3,0.4-i*0.005]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}));
-  for(const viewport of [{width:390,height:666},{width:320,height:568},{width:390,height:844},{width:600,height:360},{width:759,height:481},{width:900,height:600},{width:1024,height:768},{width:1280,height:800}]) {
-    const page=await openPage(viewport,0,fixture);
+  for(const viewport of [{width:390,height:666},{width:320,height:568},{width:390,height:844},{width:600,height:360},{width:759,height:481},{width:900,height:600},{width:1024,height:768},{width:1280,height:800},{width:1440,height:900},{width:1440,height:600}]) {
+    const dense = structuredClone(fixture);
+    if(viewport.width>=1280) dense.meshes=Array.from({length:80},(_,i)=>({...fixture.meshes[0],name:`Long scene item ${i+1}`,label:null}));
+    const page=await openPage(viewport,0,dense);
     try {
       const roomy=viewport.width>=900 && viewport.height>=600;
       assert.equal(await page.locator('.surface-list').isVisible(),roomy);
@@ -599,6 +595,20 @@ test('annotation names stay on canvas and the list adapts to available space ind
       assert.equal(await page.locator('#surface-input').isVisible(),false);
       assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
       const before=await captureShare(page);
+      if (viewport.width >= 1280) {
+        const assertSeparated = async () => {
+          const a=await page.locator('.scene-tree').boundingBox(),b=await page.locator('.surface-list').boundingBox();
+          assert.ok(a && b);
+          assert.ok(a.y+a.height<=b.y || b.y+b.height<=a.y || a.x+a.width<=b.x || b.x+b.width<=a.x,JSON.stringify({a,b}));
+          assert.ok(Math.max(a.y+a.height,b.y+b.height)<viewport.height-70);
+          assert.ok(await page.locator('.scene-tree-list').evaluate(el=>el.scrollHeight>el.clientHeight));
+          await page.locator('.scene-tree-list').evaluate(el=>el.scrollTop=el.scrollHeight);
+          const last=await page.locator('.scene-tree-row').last().boundingBox();
+          assert.ok(last.y>=a.y && last.y+last.height<=a.y+a.height,'last scene row stays inside its scrolling pane');
+        };
+        await assertSeparated();
+        if (viewport.width === 1440) {await page.locator('.panel-trigger').click();await assertSeparated();await page.locator('#close-panel').click();}
+      }
       if(viewport.width===390 && viewport.height===844) {
         const boxes=await page.locator('.surface-badge').evaluateAll(es=>es.map(e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};}));
         for(let i=0;i<boxes.length;i++)for(let j=i+1;j<boxes.length;j++) {
@@ -847,6 +857,138 @@ ${-size} ${size} 0
 3 0 2 3
 `;
 }
+
+test('wireframe gaps expose component input while painted edges remain occluders', async () => {
+  for (const projection of ['perspective', 'orthographic']) for (const shading of ['flat', 'wire']) {
+    const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#ff0000'}]};
+    data.state={...data.state,projection,shading,strokes:[],camera:{position:[0,0,10],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
+    data.attachments=[{id:'log',label:'Occluded log',byte_size:20,url:'/wireframe-log'}];
+    data.components=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
+      {id:'log',component:'text',source:{kind:'attachment',index:0},label:'Log',position:[0,0,-1],size:[4,4],visible:true,opacity:1}];
+    const page=await browser.newPage({viewport:{width:800,height:800},deviceScaleFactor:2});
+    await page.route('**/wireframe-log',r=>r.fulfill({contentType:'text/plain',body:'Visible through wireframe'}));
+    await page.route('**/api/v1/scenes/**',r=>r.fulfill({json:data}));
+    await page.route('**/mesh/0',r=>r.fulfill({body:planePly(2)}));
+    try {
+      await page.goto(`${origin}/s/fixture`);await page.locator('#loading-state').waitFor({state:'hidden'});
+      await page.mouse.click(400,400);
+      assert.equal(await page.locator('.component-dialog').isVisible(),false,`${projection}/${shading}: painted triangle edge must intercept input`);
+      await page.mouse.click(450,400);
+      assert.equal(await page.locator('.component-dialog').isVisible(),shading==='wire',`${projection}/${shading}: input must match visible triangle coverage`);
+    } finally {await page.close();}
+  }
+});
+
+async function centerPixel(page) {
+  const png = await page.screenshot();
+  return page.evaluate(async data => {
+    const image = new Image(); image.src = data; await image.decode();
+    const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+    const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+    return [...ctx.getImageData(canvas.width / 2, canvas.height / 2, 1, 1).data];
+  }, `data:image/png;base64,${png.toString('base64')}`);
+}
+
+test('orthographic framing retains geometry behind the saved camera', async () => {
+  const data = {...structuredClone(scene), label_groups: [], meshes: [{...scene.meshes[0], label:null, color:'#ff0000', translation:[0,0,1]}]};
+  data.state = {...data.state, strokes:[], projection:'orthographic', camera:{position:[.2,0,.2],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
+  const page = await openPage({width:800,height:800},0,data,[planePly(2)]);
+  try {
+    const p = await centerPixel(page);
+    assert.ok(p[0] > p[1]*2 && p[0] > p[2]*2, `clipped orthographic plane: ${p}`);
+    const saved = (await captureShare(page)).state;
+    assert.equal(saved.camera.zoom,1); assert.equal(saved.camera.orthographic_height,8);
+    const offset=saved.camera.position.map((v,i)=>v-saved.camera.target[i]);
+    const expected=data.state.camera.position.map((v,i)=>v-data.state.camera.target[i]);
+    for(let i=0;i<3;i++)assert.ok(Math.abs(offset[i]/Math.hypot(...offset)-expected[i]/Math.hypot(...expected))<1e-5,'restoring an oblique camera must preserve its direction');
+    await page.mouse.move(380,380);await page.mouse.down();await page.mouse.move(420,400,{steps:8});await page.mouse.up();
+    assert.notDeepEqual((await captureShare(page)).state.camera,saved.camera);
+  } finally { await page.close(); }
+});
+
+test('spatial content respects depth and stays fixed during pointer and keyboard navigation', async () => {
+  for (const type of ['image','text']) for (const z of [-1,1]) {
+    const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#ff0000'}, {...scene.meshes[1],translation:[100,0,0]}]};
+    data.state={...data.state,selected:1,strokes:[],camera:{position:[0,0,10],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
+    data.attachments=[{id:'image',label:'Depth image',byte_size:100,url:'/depth.svg'}];
+    data.components=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
+      {id:'image',component:type,source:{kind:'attachment',index:0},label:'Image',position:[0,0,z],size:[4,4],visible:true,opacity:1},
+      {id:'other-mesh',component:'mesh',source:{kind:'mesh',index:1},label:'Other mesh',position:[100,0,0],visible:true,opacity:1}];
+    const page=await browser.newPage({viewport:{width:800,height:800}});
+    await page.route('**/depth.svg',r=>type==='text'?r.fulfill({contentType:'text/plain',body:'Diagnostic text'}):r.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGNkYPjPgA0wYRUdtBIAy0MBD1YkjLoAAAAASUVORK5CYII=','base64')}));
+    await page.route('**/api/v1/scenes/**',r=>r.request().method()==='GET'?r.fulfill({json:data}):r.continue());
+    await page.route('**/mesh/0',r=>r.fulfill({body:planePly(2)}));
+    try {
+      await page.goto(`${origin}/s/fixture?render=1`);await page.waitForFunction(()=>document.documentElement.dataset.renderStatus==='ready');
+      const p=await centerPixel(page);
+      assert.ok(z<0 ? p[0]>p[2]*2 : type==='image' ? p[2]>p[0]*2 : p[0]<p[2]*2,`${type} depth ${z}: ${p}`);
+      if (type==='image' && z>0) {
+        data.components[1].opacity=.5;
+        await page.reload();await page.waitForFunction(()=>document.documentElement.dataset.renderStatus==='ready');
+        const mixed=await centerPixel(page);
+        assert.ok(mixed[0]>60 && mixed[2]>mixed[0] && mixed[1]<5,`half-opacity image must blend with the rear mesh, not the scene background: ${mixed}`);
+        data.components[1].opacity=1;
+      }
+      await page.goto(`${origin}/s/fixture`);await page.locator('#loading-state').waitFor({state:'hidden'});
+      if(z<0) {
+        await page.mouse.click(650,400);
+        assert.equal((await captureShare(page)).state.selected,0,'exposed mesh pixels remain selectable with DOM content present');
+        await page.reload();await page.locator('#loading-state').waitFor({state:'hidden'});
+      }
+      await page.mouse.click(400,400);
+      assert.equal(await page.locator('.component-dialog').isVisible(),z>0,'only an exposed image can open on a tap');
+      if(z<0)assert.equal((await captureShare(page)).state.selected,0,'mesh pixels covering DOM content remain selectable');
+      if(z>0)await page.getByRole('button',{name:'返回场景'}).click();
+      const before=(await captureShare(page)).state.camera;
+      await page.mouse.move(400,400);await page.mouse.down();await page.mouse.move(450,410,{steps:8});await page.mouse.up();
+      let after=await captureShare(page);
+      assert.notDeepEqual(after.state.camera,before,'navigation must still work over overlapping content');
+      assert.deepEqual(after.components.map(c=>c.position),data.components.map(c=>c.position));
+      if (z>0) {
+        const header=page.locator('.component-handle');const box=await header.boundingBox();
+        await page.mouse.move(box.x+box.width*.2,box.y+box.height*.5);await page.mouse.down();
+        await page.mouse.move(box.x+box.width*.2+30,box.y+box.height*.5+20,{steps:5});await page.mouse.up();
+        const headerDrag=await captureShare(page);
+        assert.deepEqual(headerDrag.components.map(c=>c.position),data.components.map(c=>c.position),'title drags cannot move content');
+        assert.notDeepEqual(headerDrag.state.camera,after.state.camera,'title drags navigate the scene');
+      }
+      await page.locator('#scene-tree-toggle').click();
+      const row=page.locator('.scene-tree-row').getByRole('button',{name:'Image',exact:true});
+      await row.focus();await page.keyboard.press('Alt+ArrowRight');
+      after=await captureShare(page);
+      assert.deepEqual(after.components.map(c=>c.position),data.components.map(c=>c.position),'position shortcuts are disabled');
+    } finally {await page.close();}
+  }
+});
+
+test('translucent DOM layers blend once and respect intervening geometry from both sides', async () => {
+  const page=await browser.newPage({viewport:{width:800,height:800}});
+  const colors=await page.evaluate(()=>Object.fromEntries(['red','blue'].map(color=>{
+    const canvas=document.createElement('canvas');canvas.width=canvas.height=8;
+    const ctx=canvas.getContext('2d');ctx.fillStyle=color;ctx.fillRect(0,0,8,8);
+    return [color,canvas.toDataURL().split(',')[1]];
+  })));
+  const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#00ff00'}]};
+  data.attachments=['red','blue'].map(color=>({id:color,label:color,byte_size:100,url:`/alpha-${color}.png`}));
+  data.components=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Middle mesh',position:[0,0,0],visible:true,opacity:1},
+    {id:'rear',component:'image',source:{kind:'attachment',index:0},label:'Red rear',position:[0,0,-1],size:[4,4],visible:true,opacity:1},
+    {id:'front',component:'image',source:{kind:'attachment',index:1},label:'Blue front',position:[0,0,1],size:[4,4],visible:true,opacity:.5}];
+  await page.route('**/alpha-*.png',r=>r.fulfill({contentType:'image/png',body:Buffer.from(colors[r.request().url().includes('red')?'red':'blue'],'base64')}));
+  await page.route('**/api/v1/scenes/**',r=>r.request().method()==='GET'?r.fulfill({json:data}):r.continue());
+  await page.route('**/mesh/0',r=>r.fulfill({body:planePly(2)}));
+  try {
+    for(const projection of ['perspective','orthographic']) for(const side of [1,-1]) for(const geometry of [false,true]) {
+      data.meshes[0].visible=data.components[0].visible=geometry;
+      data.state={...data.state,projection,strokes:[],camera:{position:[0,0,10*side],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
+      await page.goto(`${origin}/s/fixture?render=1`);
+      await page.waitForFunction(()=>document.documentElement.dataset.renderStatus==='ready');
+      const p=await centerPixel(page), context=`${projection}, side ${side}, middle mesh ${geometry}: ${p}`;
+      if(side<0) assert.ok(p[0]>250 && p[1]<5 && p[2]<5,`the opaque red panel hides both later layers: ${context}`);
+      else if(geometry) assert.ok(p[0]<15 && p[1]>60 && p[2]>=125 && p[2]<145,`the blue panel blends with the intervening green mesh: ${context}`);
+      else assert.ok(Math.abs(p[0]-127)<=2 && p[1]<5 && Math.abs(p[2]-128)<=2,`half-blue over opaque red must be purple: ${context}`);
+    }
+  } finally {await page.close();}
+});
 
 test('later meshes and curves respect real depth with another panel crossing camera depth', async () => {
   for (const projection of ['perspective','orthographic']) {

@@ -15,6 +15,7 @@ export interface CameraState {
 }
 
 export interface ScreenStroke {
+  label?: string;
   color: string;
   aspect: number;
   points: Array<[number, number]>;

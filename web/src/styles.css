@@ -182,7 +182,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .surface-selection input { width: 100%; min-width: 0; min-height: 42px; background: var(--surface-2); color: var(--text); border: 0; border-radius: var(--radius-xs); padding: 0 10px; font-size: 16px; }
 .surface-selection input[readonly] { background: transparent; color: var(--text-secondary); }
 .surface-selection button { flex: none; }
-.surface-list { display: flex; flex-direction: column; overflow: hidden; position: fixed; z-index: 41; top: 136px; right: 16px; width: 280px; max-height: calc(100dvh - 370px); padding: 8px; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: 0 10px 30px oklch(0.08 0.006 255 / .2); }
+.scene-panels { --panels-top: calc(66px + env(safe-area-inset-top)); --panels-height: max(0px, calc(var(--annotation-viewport-height, 100dvh) - var(--panels-top) - max(14px, env(safe-area-inset-bottom)) - var(--annotation-toolbar-height, 64px) - 12px)); position: fixed; z-index: 41; top: var(--panels-top); right: max(16px, env(safe-area-inset-right)); width: min(280px, calc(100vw - 32px)); max-height: var(--panels-height); display: flex; flex-direction: column; gap: 12px; pointer-events: none; }
+.scene-panels > * { pointer-events: auto; }
+.surface-list { display: flex; flex-direction: column; overflow: hidden; flex: 0 0 auto; min-height: 0; width: 100%; max-height: calc(var(--panels-height) * .45); padding: 8px; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: 0 10px 30px oklch(0.08 0.006 255 / .2); }
 .surface-list-heading { display: flex; flex: none; align-items: center; gap: 10px; padding-left: 10px; }
 .surface-list-heading strong { font-size: 13px; font-weight: 600; }
 .surface-list-heading span { color: var(--text-tertiary); font-size: 11px; }
@@ -218,7 +220,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 @media (max-width:359px) { #surface-toolbar { max-width: calc(100vw - 16px); padding: 8px; } #surface-toolbar .surface-actions > button { padding: 0 7px; } }
 
 @media (min-width:760px) {
-  .panel-open .surface-list { right: 354px; }
+  .panel-open .scene-panels { right: 354px; }
 }
 .scene-notice { position: absolute; z-index: 8; top: max(18px, env(safe-area-inset-top)); left: 16px; max-width: calc(100% - 158px); padding: 9px 12px; border: 1px solid #aa8b58; border-radius: 8px; color: #ffe0ae; background: #343028; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
 .scene-notice[hidden] { display: none; }

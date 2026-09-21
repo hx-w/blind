@@ -3,6 +3,24 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.1] - 2026-09-21
+
+### Fixed
+
+- Keep orthographic views from clipping nearby geometry when reopening or
+  rotating a scene.
+- Hide image and text surfaces behind foreground meshes and route clicks to
+  the visible geometry.
+- Keep long scene and annotation lists in separate scroll areas within the
+  viewport.
+- Let screen brush strokes keep editable notes in shared scenes and PNG exports.
+
+### Changed
+
+- Keep component positions fixed during dragging and keyboard navigation.
+- Run native release builds alongside source checks and reuse Rust dependency
+  caches, including Intel macOS builds.
+
 ## [0.15.0] - 2026-09-21
 
 ### Added

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import shader from '../../shaders/matte.json';
 
 const vertexShader = `
+  #include <clipping_planes_pars_vertex>
   varying vec3 viewNormal;
   varying vec3 viewPosition;
 
@@ -10,10 +11,13 @@ const vertexShader = `
     viewPosition = view.xyz;
     viewNormal = normalize(normalMatrix * normal);
     gl_Position = projectionMatrix * view;
+    vec4 mvPosition = view;
+    #include <clipping_planes_vertex>
   }
 `;
 
 const pointVertexShader = `
+  #include <clipping_planes_pars_vertex>
   uniform float pointSize;
   varying vec3 viewPosition;
 
@@ -22,11 +26,14 @@ const pointVertexShader = `
     viewPosition = view.xyz;
     gl_Position = projectionMatrix * view;
     gl_PointSize = pointSize;
+    vec4 mvPosition = view;
+    #include <clipping_planes_vertex>
   }
 `;
 
 // Uniform declarations shared by both fragment shaders.
 const sharedFragmentUniforms = `
+  #include <clipping_planes_pars_fragment>
   uniform vec3 baseColor;
   uniform float opacity;
   uniform vec3 keyDirection;
@@ -67,6 +74,7 @@ const fragmentShader = `
   ${lightingChunk}
 
   void main() {
+    #include <clipping_planes_fragment>
     vec3 normal = flatShading
       ? normalize(cross(dFdx(viewPosition), dFdy(viewPosition)))
       : normalize(viewNormal);
@@ -101,6 +109,7 @@ const pointFragmentShader = `
   ${lightingChunk}
 
   void main() {
+    #include <clipping_planes_fragment>
     vec2 disk = gl_PointCoord * 2.0 - 1.0;
     float radiusSquared = dot(disk, disk);
     if (radiusSquared > 1.0) discard;
@@ -173,6 +182,7 @@ export function createObjectMaterial(
       wireframe: style.wireframe,
     });
   material.forceSinglePass = true;
+  material.clipping = true;
   return material;
 }
 

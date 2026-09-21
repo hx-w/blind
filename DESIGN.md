@@ -28,7 +28,10 @@ Buttons use a 10px radius and 42px minimum hit target. The bottom dock uses a 16
 
 The canvas is full bleed. On phones, the bottom dock remains persistent while a docked sheet changes the usable 3D viewport. On landscape and desktop, settings move to a 340px right sheet.
 
-The scene tree floats over the upper-right canvas without reserving a column or
+The scene tree and annotation list share an upper-right stack bounded by the viewport and bottom tools.
+The annotation list reserves up to 45% of that height; the scene tree shrinks into the remaining space.
+Their headers stay visible and each list scrolls independently. Long lists never push either pane offscreen.
+The scene tree floats over the canvas without reserving a column or
 painting a full-height background. Its height follows its content up to the space
 above the bottom dock, capped at 65dvh. Its opaque backing is lighter than the canvas, with a fine outline and soft
 shadow to establish a floating surface. It occludes geometry and labels without
@@ -112,3 +115,9 @@ Smooth curves are sampled onto the visible surface; invalid smoothing preserves
 the valid path. Never refit a shared path on load. Camera navigation is explicit;
 interrupted touches roll back the current surface gesture. Screen strokes retain
 their view-dependent behavior, with shared undo history cleared of obsolete views.
+
+Screen brush strokes support the same editable names as surface marks; names survive undo, sharing, reopening, and PNG export. Unnamed strokes keep their numbered fallback.
+
+Component positions are fixed during review, including meshes, images, text and plugin surfaces. Preview and header drags navigate the camera; there are no position drag handles or Alt/arrow movement shortcuts. Explicit positions and automatic initial layout remain part of scene loading.
+
+Spatial content keeps its native DOM opacity. Parallel XY content planes interleave with GPU-clipped geometry bands, copied through one WebGL renderer into canvas layers. Empty bands allocate no bitmap; hidden content stays connected to preserve plugin state. Pointer routing tests painted geometry coverage, including wireframe gaps, and preserves the full pointer lifecycle for mesh selection.

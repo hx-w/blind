@@ -513,6 +513,17 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
+CI and releases share `.github/workflows/native.yml`. Each supported platform
+(Apple Silicon, Intel macOS, and Linux x86_64) runs source/browser checks in
+parallel with release compilation and binary integration tests. A tag publishes
+only after all six jobs pass; archives still come from native builds.
+
+Rust dependency caches are separated by runner and task. Successful `main`
+jobs populate them for subsequent CI and tags, including Intel macOS. Tag and
+pull-request runs only restore Rust caches, avoiding unusable per-tag copies.
+The first run, a toolchain change, or cache eviction can still require a cold
+build. Superseded CI runs are cancelled; release runs are not.
+
 ## API
 
 | Route | Access | Purpose |

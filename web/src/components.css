@@ -1,5 +1,5 @@
 /* Scene chrome shares the Viewer tokens. Content surfaces live in world coordinates. */
-.component-layer { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.component-layer { position: absolute; inset: 0; pointer-events: none; }
 .component-layer > div { pointer-events: none; }
 .scene-surface { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-xs); color: var(--text); pointer-events: auto; }
 .scene-surface.selected { border-color: var(--accent); }
@@ -22,7 +22,7 @@
 .component-status button, .component-status a { margin-left: 12px; color: var(--accent); }
 .component-group-labels { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
 .component-group-labels span { position: absolute; top: 0; left: 0; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
-.scene-tree { --tree-top: calc(66px + env(safe-area-inset-top)); position: fixed; top: var(--tree-top); right: max(14px, env(safe-area-inset-right)); width: min(280px, calc(100vw - 28px)); max-height: min(65dvh, calc(100dvh - var(--tree-top) - 96px - env(safe-area-inset-bottom))); z-index: 18; display: flex; flex-direction: column; overflow: hidden; background: color-mix(in oklch, var(--scene-background, var(--canvas)) 90%, var(--text)); border-radius: var(--radius-sm); box-shadow: 0 0 0 1px var(--line), 0 8px 24px oklch(0.08 0.006 255 / .18), 0 2px 6px oklch(0.08 0.006 255 / .10); }
+.scene-tree { flex: 0 1 auto; min-height: 0; width: 100%; max-height: min(65dvh, var(--panels-height)); z-index: 18; display: flex; flex-direction: column; overflow: hidden; background: color-mix(in oklch, var(--scene-background, var(--canvas)) 90%, var(--text)); border-radius: var(--radius-sm); box-shadow: 0 0 0 1px var(--line), 0 8px 24px oklch(0.08 0.006 255 / .18), 0 2px 6px oklch(0.08 0.006 255 / .10); }
 :root[data-theme="light"] .scene-tree { background: var(--surface-2); box-shadow: 0 0 0 1px var(--line), 0 8px 24px oklch(0.25 0.009 255 / .10), 0 2px 6px oklch(0.25 0.009 255 / .06); }
 .scene-tree header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; min-height: 44px; }
 .scene-tree h2 { font-size: 13px; font-weight: 500; margin: 0; }
@@ -38,7 +38,7 @@
 .scene-tree-row > button { flex: 1; min-width: 0; border: 0; padding: 10px 8px; background: transparent; text-align: left; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; opacity: var(--element-opacity, 1); cursor: pointer; }
 .scene-tree-row > button[aria-pressed="true"] { color: var(--accent); }
 .scene-tree-row input { flex: none; width: 16px; height: 16px; margin: 8px; accent-color: var(--text-secondary); cursor: pointer; }
-.panel-open .scene-tree { right: 354px; }
+
 @media (hover: hover) {
   .scene-tree-row:hover, .scene-tree header button:hover, .scene-tree-actions button:hover { background: color-mix(in oklch, var(--text) 6%, transparent); }
 }
@@ -58,7 +58,7 @@
 }
 .surface-mode .component-layer { pointer-events: none; }
 .surface-mode .scene-surface { pointer-events: none; }
-.surface-mode .scene-tree { visibility: hidden; }
+.surface-mode .scene-tree { display: none; }
 @media (max-width: 759px) {
   .scene-tree-row { min-height: 44px; }
   .scene-tree-row input { margin: 14px 8px; }
@@ -73,3 +73,10 @@
 /* External views leave the component's own 44px toolbar available. */
 .component-content:has(.component-external-frame) { position: relative; }
 .component-content .component-external-frame { position: absolute; top: 44px; left: 0; width: 100%; height: calc(100% - 44px); }
+
+/* GPU-clipped geometry bands interleave with DOM planes in one isolated stack. */
+.component-compositor { position: absolute; inset: 0; z-index: 1; isolation: isolate; pointer-events: none; }
+.component-geometry { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.composited-content > canvas { opacity: 0; }
+.has-spatial-content > canvas { pointer-events: none; }
+.surface-mode .has-spatial-content > canvas { pointer-events: auto; }

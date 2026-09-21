@@ -14,7 +14,7 @@ const contentInput = {spatial: 'scene', focus: 'content', fullscreen: 'content'}
 export function builtInComponents(): ComponentRegistry<Context> {
   const registry = new ComponentRegistry<Context>();
   for (const type of ['mesh', 'points']) registry.register({type,
-    capabilities: {presentations: ['spatial', 'focus', 'fullscreen'], movable: true, resizable: false, input: sceneInput},
+    capabilities: {presentations: ['spatial', 'focus', 'fullscreen'], movable: false, resizable: false, input: sceneInput},
     create(spec, {viewer}) {
       const index = spec.source.index;
       return {
@@ -28,7 +28,7 @@ export function builtInComponents(): ComponentRegistry<Context> {
     },
   });
   for (const [type, content] of Object.entries({text: textContent, html: htmlContent, image: imageContent})) {
-    registry.register({type, capabilities: {presentations: ['spatial', 'focus', 'fullscreen'], movable: true, resizable: true, input: contentInput},
+    registry.register({type, capabilities: {presentations: ['spatial', 'focus', 'fullscreen'], movable: false, resizable: true, input: contentInput},
       create: (spec, context) => new SurfaceRuntime(spec, context, content)});
   }
   return registry;
@@ -36,7 +36,9 @@ export function builtInComponents(): ComponentRegistry<Context> {
 
 export class ComponentViewer {
   readonly layer = new THREE.Scene();
-  private readonly renderer = new CSS3DRenderer();
+  private readonly compositor = document.createElement('div');
+  private readonly planes = new Map<number, {scene: THREE.Scene; renderer: CSS3DRenderer}>();
+  private readonly bands: HTMLCanvasElement[] = [];
   private readonly entries: Entry[] = [];
   private readonly tree = document.createElement('aside');
   private treeResize?: ResizeObserver;
@@ -71,41 +73,54 @@ export class ComponentViewer {
   }
 
   constructor(readonly root: HTMLElement, private readonly viewer: MeshViewer, readonly scene: PublicScene, registry = builtInComponents()) {
-    this.renderer.domElement.className = 'component-layer'; root.append(this.renderer.domElement);
+    this.compositor.className = 'component-compositor'; root.append(this.compositor);
     this.groupLabels.className = 'component-group-labels'; root.append(this.groupLabels);
     const customTypes = new Set<string>();
     for (const spec of sceneComponents(scene)) {
       if (spec.renderer && !customTypes.has(spec.component)) {
-        registry.register({type:spec.component,capabilities:{...spec.renderer.capabilities,input:contentInput},create:(spec,context)=>new SurfaceRuntime(spec,context,pluginContent)});
+        registry.register({type:spec.component,capabilities:{...spec.renderer.capabilities,movable:false,input:contentInput},create:(spec,context)=>new SurfaceRuntime(spec,context,pluginContent)});
         customTypes.add(spec.component);
       }
       const definition = registry.get(spec.component);
       this.entries.push({spec, capabilities: definition.capabilities, runtime: definition.create(spec, {viewer, host: this, scene})});
     }
+    if (this.entries.some(e => e.runtime.element)) {
+      root.classList.add('has-spatial-content');
+      root.addEventListener('pointerdown', this.routePointer, true);
+      root.addEventListener('click', this.routeClick, true);
+      root.addEventListener('wheel', this.routeWheel, {capture: true, passive: false});
+    }
     this.layout(); this.buildTree(); this.buildDialog(); this.sync();
     viewer.renderListeners.add(this.render); this.viewport.addEventListener('change', this.viewportChanged);
     viewer.componentUpdates = () => scene.components?.length ? this.entries.map(e => componentUpdate(e.spec)) : undefined;
-    this.updateBounds();
+    this.refreshBounds();
     if (!scene.state.camera && scene.components?.length) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
-    this.root.addEventListener('pointerdown', this.dragGeometry, true);
     if (this.entries[0]) this.select(this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec ?? this.entries[0].spec, false);
     this.render();
   }
   async ready(): Promise<void> { await Promise.all(this.entries.filter(e => effectiveVisibility(e.spec)).map(e => e.runtime.ready)); this.render(); }
-  private dragGeometry = (event: PointerEvent): void => {
-    const entry = this.selected;
-    if (!event.altKey || event.button !== 0 || !entry || entry.runtime.element || !entry.capabilities.movable) return;
-    if (!(event.target instanceof HTMLCanvasElement)) return;
-    event.preventDefault(); event.stopPropagation(); this.viewer.setInteractionEnabled(false);
-    const target = event.target; target.setPointerCapture(event.pointerId);
-    const camera = this.viewer.activeCamera;
-    const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), entry.runtime.bounds.getCenter(new THREE.Vector3()));
-    const rect = this.root.getBoundingClientRect();
-    const point = (e: PointerEvent) => { const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2((e.clientX-rect.left)/rect.width*2-1, -(e.clientY-rect.top)/rect.height*2+1), camera); return ray.ray.intersectPlane(plane, new THREE.Vector3()); };
-    const start = point(event); const initial = new THREE.Vector3().fromArray(entry.spec.position ?? this.viewer.modelInfos[entry.spec.source.index].translation ?? [0,0,0]);
-    const move = (e: PointerEvent) => { const next = point(e); if (start && next) this.move(entry.spec, initial.clone().add(next.sub(start)).toArray() as Vec3); };
-    const end = () => { target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', end); target.removeEventListener('pointercancel', end); target.removeEventListener('lostpointercapture', end); this.viewer.setInteractionEnabled(true); };
-    target.addEventListener('pointermove', move); target.addEventListener('pointerup', end); target.addEventListener('pointercancel', end); target.addEventListener('lostpointercapture', end);
+  // Geometry bands do not intercept DOM events. Route their covered pixels
+  // to geometry, while exposed content controls remain interactive.
+  private occluded(event: MouseEvent): boolean {
+    const element = event.target instanceof Element ? event.target.closest('.scene-surface') : null;
+    const entry = this.entries.find(e => e.runtime.element === element);
+    return entry?.runtime instanceof SurfaceRuntime && entry.runtime.occludedAt(event.clientX, event.clientY);
+  }
+  private routePointer = (event: PointerEvent): void => {
+    if (event.target === this.root || this.occluded(event)) {
+      event.preventDefault(); event.stopImmediatePropagation(); this.viewer.navigatePointer(event);
+      // Picking listens for pointerup on the canvas. Keep the native gesture
+      // there after redirecting its start, even though DOM content receives hits.
+      this.root.querySelector('canvas')?.setPointerCapture(event.pointerId);
+    }
+  };
+  private routeClick = (event: MouseEvent): void => {
+    if (this.occluded(event)) { event.preventDefault(); event.stopImmediatePropagation(); }
+  };
+  private routeWheel = (event: WheelEvent): void => {
+    if (event.target === this.root || this.occluded(event)) {
+      event.preventDefault(); event.stopImmediatePropagation(); this.viewer.navigateWheel(event);
+    }
   };
   private layout(): void {
     // Explicit positions are absolute world coordinates. Only unpositioned components are tiled.
@@ -142,11 +157,7 @@ export class ComponentViewer {
     });
   }
   private position(entry: Entry, position: Vec3): void { entry.spec.position = position; entry.runtime.setPosition(position); }
-  move(spec: SceneComponent, position: Vec3): void {
-    const entry = this.entries.find(e => e.spec === spec); if (!entry?.capabilities.movable) return;
-    this.position(entry, position); this.updateBounds();
-  }
-  private updateBounds(): void {
+  refreshBounds(): void {
     const box = new THREE.Box3();
     this.entries.filter(e => e.runtime.element && effectiveVisibility(e.spec)).forEach(e => box.union(e.runtime.bounds));
     this.viewer.setComponentBounds(box);
@@ -169,7 +180,7 @@ export class ComponentViewer {
       const row = this.rows.get(spec.id);
       if (row) { row.check.checked = effectiveVisibility(spec); row.button.textContent = spec.label; row.button.style.setProperty('--element-opacity', String(effectiveVisibility(spec) ? Math.max(.45, spec.opacity) : .35)); }
     }
-    this.syncing = false; this.updateBounds();
+    this.syncing = false; this.refreshBounds();
   }
   private setVisible(entry: Entry, visible: boolean): void {
     this.applyStyle(entry, visible, visible && entry.spec.opacity === 0 ? 1 : entry.spec.opacity);
@@ -244,13 +255,7 @@ export class ComponentViewer {
       for (const spec of specs) {
         const entry = this.entries.find(e => e.spec === spec)!;
         const row = document.createElement('div'); row.className = 'scene-tree-row';
-        const select = button(spec.label, () => this.select(spec)); select.setAttribute('aria-pressed', 'false'); select.title = `${spec.label} · 双击仅显示此元素 · Alt + 方向键移动`;
-        select.addEventListener('keydown', event => {
-          if (!event.altKey || !entry.capabilities.movable) return;
-          const delta: Record<string, Vec3> = {ArrowLeft: [-1,0,0], ArrowRight: [1,0,0], ArrowUp: [0,1,0], ArrowDown: [0,-1,0]};
-          if (!delta[event.key]) return; event.preventDefault();
-          this.move(spec, new THREE.Vector3().fromArray(spec.position ?? [0,0,0]).addScaledVector(new THREE.Vector3().fromArray(delta[event.key]), event.shiftKey ? 10 : 1).toArray() as Vec3);
-        });
+        const select = button(spec.label, () => this.select(spec)); select.setAttribute('aria-pressed', 'false'); select.title = `${spec.label} · 双击仅显示此元素`;
         select.addEventListener('dblclick', () => { this.setVisibility(candidate => candidate === entry); entry.runtime.focus(); });
         const check = document.createElement('input'); check.type = 'checkbox'; check.checked = effectiveVisibility(spec); check.setAttribute('aria-label', `显示 ${spec.label}`);
         check.addEventListener('change', () => this.setVisible(entry, check.checked)); row.append(select, check); content.append(row); this.rows.set(spec.id, {button: select, check});
@@ -259,13 +264,69 @@ export class ComponentViewer {
     this.toggle.className = 'icon-button'; this.toggle.type = 'button'; this.toggle.id = 'scene-tree-toggle'; this.toggle.setAttribute('aria-label', '场景元素'); this.toggle.setAttribute('aria-controls', this.tree.id);
     this.toggle.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M8 12h12M8 19h12M4 5v14h1"/></svg>';
     this.toggle.onclick = () => this.setOpen(!this.opened);
-    document.querySelector('.top-actions')!.prepend(this.toggle); document.querySelector('#app-shell')!.append(this.tree); this.setOpen(this.opened);
+    document.querySelector('.top-actions')!.prepend(this.toggle); document.querySelector('#scene-panels')!.prepend(this.tree); this.setOpen(this.opened);
     this.tree.addEventListener('keydown', event => { if (event.key === 'Escape') this.setOpen(false); });
   }
   private setOpen(open: boolean): void { this.opened = open; this.tree.hidden = !open; this.toggle.setAttribute('aria-expanded', String(open)); document.querySelector('#app-shell')!.classList.toggle('tree-open', open); if (!open && this.tree.contains(document.activeElement)) this.toggle.focus(); }
   private viewportChanged = (): void => this.setOpen(this.viewport.matches);
+  private renderLayers(): void {
+    const runtimes = this.entries.flatMap(entry => entry.runtime instanceof SurfaceRuntime ? [entry.runtime] : []);
+    const objects = runtimes.map(runtime => runtime.object);
+    const surfaces = runtimes.flatMap(runtime => runtime.spatialObject ? [runtime.spatialObject] : []);
+    const allDepths = [...new Set(objects.map(object => object.position.z))];
+    const depths = [...new Set(surfaces.map(object => object.position.z))].sort((a,b) => a-b);
+    this.root.classList.toggle('composited-content', depths.length > 0);
+    this.compositor.hidden = depths.length === 0;
+    for (const [z, plane] of this.planes) {
+      if (allDepths.includes(z)) continue;
+      for (const object of [...plane.scene.children]) this.layer.add(object);
+      plane.renderer.domElement.remove(); this.planes.delete(z);
+    }
+    for (const z of allDepths) {
+      let plane = this.planes.get(z);
+      if (!plane) {
+        plane = {scene: new THREE.Scene(), renderer: new CSS3DRenderer()};
+        plane.renderer.domElement.className = 'component-layer';
+        this.planes.set(z, plane); this.compositor.append(plane.renderer.domElement);
+      }
+      // Keep hidden wrappers connected so visibility toggles do not reload
+      // plugin frames or discard content state.
+      plane.renderer.domElement.hidden = !depths.includes(z);
+      for (const object of objects.filter(object => object.position.z === z)) if (object.parent !== plane.scene) plane.scene.add(object);
+      plane.renderer.setSize(this.root.clientWidth, this.root.clientHeight);
+      plane.renderer.render(plane.scene, this.viewer.activeCamera);
+    }
+    if (!depths.length) return;
+    while (this.bands.length < depths.length + 1) {
+      const canvas = document.createElement('canvas'); canvas.className = 'component-geometry';
+      this.bands.push(canvas); this.compositor.append(canvas);
+    }
+    while (this.bands.length > depths.length + 1) this.bands.pop()!.remove();
+    let order = 0;
+    const band = (index: number) => {
+      const canvas = this.bands[index]; canvas.style.zIndex = String(order++);
+      this.viewer.renderGeometryBand(canvas, depths[index-1] ?? -Infinity, depths[index] ?? Infinity);
+    };
+    const plane = (index: number) => { this.planes.get(depths[index])!.renderer.domElement.style.zIndex = String(order++); };
+    const camera = this.viewer.activeCamera;
+    if (camera instanceof THREE.OrthographicCamera) {
+      if (camera.getWorldDirection(new THREE.Vector3()).z <= 0) {
+        for (let i=0;i<=depths.length;i++) { band(i); if(i<depths.length) plane(i); }
+      } else {
+        for (let i=depths.length;i>=0;i--) { band(i); if(i>0) plane(i-1); }
+      }
+    } else {
+      // If the eye lies between planes, rays on opposite sides never share a
+      // pixel. Paint both far branches first, then the band containing the eye.
+      const split = depths.findIndex(z => z > camera.position.z);
+      const middle = split < 0 ? depths.length : split;
+      for (let i=0;i<middle;i++) { band(i); plane(i); }
+      for (let i=depths.length;i>middle;i--) { band(i); plane(i-1); }
+      band(middle);
+    }
+  }
   private render = (): void => {
-    this.renderer.setSize(this.root.clientWidth, this.root.clientHeight); this.renderer.render(this.layer, this.viewer.activeCamera);
+    this.renderLayers();
     for (const caption of this.captions) {
       const box = new THREE.Box3(); caption.entries.filter(e => effectiveVisibility(e.spec)).forEach(e => box.union(e.runtime.bounds));
       caption.element.hidden = box.isEmpty(); if (box.isEmpty()) continue;
@@ -275,18 +336,19 @@ export class ComponentViewer {
       caption.element.style.transform = `translate(${(p.x + 1) * this.root.clientWidth / 2}px,${(1 - p.y) * this.root.clientHeight / 2 - 32}px)`;
     }
   };
-  dispose(): void { this.close(); this.treeResize?.disconnect(); this.root.removeEventListener('pointerdown', this.dragGeometry, true); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.componentUpdates = undefined; this.renderer.domElement.remove(); this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
+  dispose(): void { this.root.classList.remove('has-spatial-content'); this.root.removeEventListener('pointerdown', this.routePointer, true); this.root.removeEventListener('click', this.routeClick, true); this.root.removeEventListener('wheel', this.routeWheel, true); this.close(); this.treeResize?.disconnect(); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.componentUpdates = undefined; this.root.classList.remove('composited-content'); this.compositor.remove(); this.planes.clear(); this.bands.length = 0; this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
 }
 
 class SurfaceRuntime implements ComponentRuntime {
   readonly element = document.createElement('section');
   private readonly wrapper = document.createElement('div');
-  private readonly object = new CSS3DObject(this.wrapper);
+  readonly object = new CSS3DObject(this.wrapper);
+  get spatialObject(): CSS3DObject | undefined { return this.mode === 'spatial' && this.object.visible ? this.object : undefined; }
   private readonly content;
   private mode: Presentation = 'spatial';
   constructor(private readonly spec: SceneComponent, private readonly context: Context, factory: ContentFactory) {
     const {host, scene} = context; this.element.className = 'scene-surface'; this.element.dataset.component = spec.component;
-    const header = document.createElement('header'); header.className = 'component-handle'; header.tabIndex = 0; header.title = '拖动标题移动；方向键微调，Shift 加速';
+    const header = document.createElement('header'); header.className = 'component-handle'; header.title = spec.label;
     const label = document.createElement('span'); label.textContent = spec.label;
     const capabilities = spec.renderer?.capabilities;
     header.append(label);
@@ -316,13 +378,10 @@ class SurfaceRuntime implements ComponentRuntime {
     this.content.element.inert = true;
     this.element.append(header, body); this.wrapper.append(this.element); host.layer.add(this.object);
     this.setPosition(spec.position ?? [0, 0, 0]); this.setOpacity(spec.opacity); this.size();
-    header.addEventListener('pointerdown', this.drag);
-    header.addEventListener('keydown', event => {
-      if (event.target !== header || this.mode !== 'spatial') return;
-      const directions: Record<string, Vec3> = {ArrowLeft: [-1, 0, 0], ArrowRight: [1, 0, 0], ArrowUp: [0, 1, 0], ArrowDown: [0, -1, 0]};
-      const direction = directions[event.key]; if (!direction) return; event.preventDefault();
-      host.move(spec, new THREE.Vector3().fromArray(spec.position ?? [0,0,0]).addScaledVector(new THREE.Vector3().fromArray(direction), event.shiftKey ? 10 : 1).toArray() as Vec3);
+    header.addEventListener('pointerdown', event => {
+      if (!(event.target as Element).closest('button')) context.viewer.navigatePointer(event);
     });
+    header.addEventListener('wheel', event => {event.preventDefault(); context.viewer.navigateWheel(event);}, {passive: false});
     const resize = button('调整大小', () => {}); resize.className = 'component-resize'; resize.setAttribute('aria-label', '调整宽度，方向键或拖动');
     resize.addEventListener('pointerdown', event => this.resize(event));
     resize.addEventListener('keydown', event => { if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) return; event.preventDefault(); const factor = ['ArrowRight','ArrowUp'].includes(event.key) ? 1.1 : 1 / 1.1; this.resizeBy(factor); });
@@ -336,30 +395,23 @@ class SurfaceRuntime implements ComponentRuntime {
   setPosition(position: Vec3): void { this.object.position.fromArray(position); }
   setVisible(visible: boolean): void { this.object.visible = visible; }
   setOpacity(opacity: number): void { this.element.style.opacity = String(opacity); }
+  occludedAt(x: number, y: number): boolean {
+    if (this.mode !== 'spatial') return false;
+    const rect = this.context.host.root.getBoundingClientRect();
+    const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2((x-rect.left)/rect.width*2-1, 1-(y-rect.top)/rect.height*2), this.context.viewer.activeCamera);
+    const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,0,1), -this.object.position.z), new THREE.Vector3());
+    return !!point && this.context.viewer.geometryOccludes(x, y, point.toArray() as Vec3);
+  }
   select(): void { this.element.classList.add('selected'); }
   focus(): void { this.context.viewer.focusBounds(this.bounds); }
   setPresentation(mode: Presentation): void {
-    this.mode = mode; this.element.classList.toggle('expanded', mode !== 'spatial');
+    this.mode = mode; this.context.viewer.invalidate(); this.element.classList.toggle('expanded', mode !== 'spatial');
     this.content.element.inert = mode === 'spatial';
     if (mode === 'spatial') moveElement(this.wrapper, this.element);
     this.content.present?.(mode);
   }
   private size(): void { const [w,h] = this.spec.size ?? [110,70]; this.wrapper.style.width = '800px'; this.wrapper.style.height = `${800 * h / w}px`; this.object.scale.setScalar(w / 800); this.context.viewer.invalidate(); }
-  private drag = (event: PointerEvent): void => {
-    if (this.spec.renderer?.capabilities.movable === false || this.mode !== 'spatial' || event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
-    event.preventDefault(); this.context.host.select(this.spec); this.context.viewer.setInteractionEnabled(false);
-    const header = event.currentTarget as HTMLElement; header.setPointerCapture(event.pointerId);
-    const plane = new THREE.Plane(new THREE.Vector3(0,0,1), -this.object.position.z); const start = this.onPlane(event, plane); const initial = this.object.position.clone();
-    const move = (e: PointerEvent) => { const point = this.onPlane(e, plane); if (start && point) this.context.host.move(this.spec, initial.clone().add(point.sub(start)).toArray() as Vec3); };
-    const end = () => { header.removeEventListener('pointermove', move); header.removeEventListener('pointerup', end); header.removeEventListener('pointercancel', end); header.removeEventListener('lostpointercapture', end); this.context.viewer.setInteractionEnabled(true); };
-    header.addEventListener('pointermove', move); header.addEventListener('pointerup', end); header.addEventListener('pointercancel', end); header.addEventListener('lostpointercapture', end);
-  };
-  private onPlane(event: PointerEvent, plane: THREE.Plane): THREE.Vector3 | null {
-    const rect = this.context.host.root.getBoundingClientRect(); const ray = new THREE.Raycaster();
-    ray.setFromCamera(new THREE.Vector2((event.clientX - rect.left) / rect.width * 2 - 1, -(event.clientY - rect.top) / rect.height * 2 + 1), this.context.viewer.activeCamera);
-    return ray.ray.intersectPlane(plane, new THREE.Vector3());
-  }
-  private resizeBy(factor: number): void { const [w,h] = this.spec.size ?? [110,70]; const width = Math.max(20, Math.min(500, w * factor)); this.spec.size = [width, h / w * width]; this.size(); this.context.host.move(this.spec, this.spec.position ?? [0,0,0]); }
+  private resizeBy(factor: number): void { const [w,h] = this.spec.size ?? [110,70]; const width = Math.max(20, Math.min(500, w * factor)); this.spec.size = [width, h / w * width]; this.size(); this.context.host.refreshBounds(); }
   private resize(event: PointerEvent): void {
     if (this.mode !== 'spatial') return; event.preventDefault(); this.context.viewer.setInteractionEnabled(false);
     const target = event.currentTarget as HTMLElement; target.setPointerCapture(event.pointerId); let x = event.clientX;
