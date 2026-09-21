@@ -178,7 +178,7 @@ export class MeshViewer {
     this.resizeObserver.observe(root);
     this.renderer.domElement.addEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
-    this.controls.addEventListener('start', () => { this.cancelFit(); this.onViewChangeStart?.(); });
+    this.controls.addEventListener('start', () => { this.cancelFit(); this.prepareOrbit(); this.onViewChangeStart?.(); });
     this.controls.addEventListener('change', () => { this.updateClipping(); this.dirty = true; });
     this.animate();
   }
@@ -502,6 +502,7 @@ export class MeshViewer {
   private relayout(): void {
     this.refreshVisibleBounds();
     this.resizeHelpers();
+    this.prepareOrbit();
     this.updateClipping();
     this.dirty = true;
   }
@@ -642,28 +643,40 @@ export class MeshViewer {
     } else apply(1);
   }
 
+  // A pan changes Arcball's internal pivot without changing controls.target.
+  // Preserve that framing when bounds change or before a new gesture starts.
+  private prepareOrbit(): void {
+    if (!(this.camera instanceof THREE.OrthographicCamera)) return;
+    const pose = this.captureCameraPose();
+    if (this.ensureOrbitDistance(pose.target)) {
+      this.controls.target.copy(pose.target); this.camera.up.copy(pose.up);
+      this.syncCamera();
+    }
+  }
+
+  // Move the orthographic eye before a gesture or when framing/bounds change,
+  // never during a drag: resetting Arcball there replaces its baseline but retains the cursor
+  // origin, applying the accumulated rotation again on the next pointer move.
+  private ensureOrbitDistance(target: THREE.Vector3): boolean {
+    if (!(this.camera instanceof THREE.OrthographicCamera) || this.visibleBounds.isEmpty()) return false;
+    const center = this.visibleBounds.getCenter(new THREE.Vector3());
+    const radius = Math.max(this.visibleBounds.getSize(new THREE.Vector3()).length() * 0.5, 1e-6);
+    const offset = this.camera.position.clone().sub(target);
+    const distance = offset.length();
+    const safeDistance = center.distanceTo(target) + radius * (1 + shader.camera.clip_padding_factor);
+    if (distance >= safeDistance) return false;
+    if (distance < 1e-9) offset.set(0, 0, 1);
+    this.camera.position.copy(target).addScaledVector(offset.normalize(), safeDistance);
+    return true;
+  }
+
   // Cross-renderer contract with clip_planes in src/render.rs; change both in lockstep.
   private updateClipping(): void {
     const box = this.visibleBounds;
     if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     const half = box.getSize(new THREE.Vector3()).multiplyScalar(0.5);
-    // Orthographic zoom changes framing, not camera distance. Keep the eye
-    // outside the bounding sphere so orbiting cannot slice through a wide scene.
     const radius = Math.max(half.length(), 1e-6);
-    if (this.camera instanceof THREE.OrthographicCamera) {
-      const offset = this.camera.position.clone().sub(this.controls.target);
-      const distance = offset.length();
-      const safeDistance = center.distanceTo(this.controls.target) + radius * (1 + shader.camera.clip_padding_factor);
-      if (distance < safeDistance) {
-        // restoreCamera sets position/target before refreshing the rotation.
-        // Derive the saved direction from those positions, not a stale matrix.
-        if (distance < 1e-9) offset.set(0, 0, 1);
-        this.camera.position.copy(this.controls.target).addScaledVector(offset.normalize(), safeDistance);
-        this.camera.updateMatrixWorld();
-        this.controls.setCamera(this.camera);
-      }
-    }
     const forward = this.camera.getWorldDirection(new THREE.Vector3());
     // Corner depths span the center depth by the summed per-axis projections.
     const span = Math.abs(half.x * forward.x) + Math.abs(half.y * forward.y) + Math.abs(half.z * forward.z);
@@ -678,10 +691,14 @@ export class MeshViewer {
   }
 
   private syncCamera(): void {
+    this.ensureOrbitDistance(this.controls.target);
     this.camera.lookAt(this.controls.target);
     this.camera.updateMatrixWorld();
     this.updateClipping();
     this.controls.setCamera(this.camera);
+    // setCamera calculates its radius before moving the gizmo to the new
+    // target. Refresh via the public API so the first drag matches later zooms.
+    this.controls.update();
     this.dirty = true;
   }
 

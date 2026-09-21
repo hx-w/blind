@@ -1181,3 +1181,46 @@ for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
     } finally {await page.close();}
   });
 }
+
+async function horizontalOrbitAngle(page, wheel = 0) {
+  const unzoomed=wheel ? (await captureShare(page)).state.camera : null;
+  await page.mouse.move(400,400);
+  if(wheel) { await page.mouse.wheel(0,wheel); await page.waitForTimeout(100); }
+  const before=(await captureShare(page)).state.camera;
+  if(unzoomed) assert.ok(Math.abs(before.zoom-unzoomed.zoom)>1e-6 || Math.hypot(...before.position.map((x,i)=>x-unzoomed.position[i]))>1e-6,'wheel must actually change magnification');
+  await page.mouse.move(400,400); await page.mouse.down();
+  await page.mouse.move(440,400,{steps:20}); await page.mouse.up();
+  const after=(await captureShare(page)).state.camera;
+  const direction=c=>{const d=c.target.map((x,i)=>x-c.position[i]);const n=Math.hypot(...d);return d.map(x=>x/n);};
+  const a=direction(before),b=direction(after);
+  return Math.acos(Math.max(-1,Math.min(1,a.reduce((sum,x,i)=>sum+x*b[i],0))));
+}
+
+test('spread-out scene keeps rotation sensitivity after zoom and fit', async () => {
+  const data={...structuredClone(scene),label_groups:[],
+    meshes:Array.from({length:10},(_,i)=>({...scene.meshes[0],label:null,translation:[50+i*2,-26,0]})),
+    state:{...scene.state,strokes:[],camera:{position:[60,-26,60],target:[60,-26,0],up:[0,1,0],fov:40,zoom:1,orthographic_height:20}}};
+  const page=await openPage({width:800,height:800},0,data);
+  try {
+    const initial=await horizontalOrbitAngle(page);
+    const zoomed=await horizontalOrbitAngle(page,-1000);
+    assert.ok(initial>.01,'drag must actually rotate the camera');
+    assert.ok(Math.abs(zoomed/initial-1)<.01,`zoom changed orbit sensitivity: ${initial} -> ${zoomed}`);
+    await page.emulateMedia({reducedMotion:'reduce'}); await page.locator('#fit-view').click();
+    const fitted=await horizontalOrbitAngle(page);
+    const fittedZoomed=await horizontalOrbitAngle(page,-1000);
+    assert.ok(Math.abs(fittedZoomed/fitted-1)<.01,`zoom after fit changed orbit sensitivity: ${fitted} -> ${fittedZoomed}`);
+  } finally { await page.close(); }
+});
+
+test('orthographic rotation stays continuous at the clipping safety boundary', async () => {
+  const angles=[];
+  for(const distance of [5,.1]) {
+    const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null}],
+      state:{...scene.state,projection:'orthographic',strokes:[],camera:{position:[.3,.3,distance],target:[.3,.3,0],up:[0,1,0],fov:34,zoom:10,orthographic_height:2}}};
+    const page=await openPage({width:800,height:800},0,data);
+    try { angles.push(await horizontalOrbitAngle(page)); } finally { await page.close(); }
+  }
+  assert.ok(angles[0]>.01,'drag must actually rotate the camera');
+  assert.ok(Math.abs(angles[1]/angles[0]-1)<.01,`clipping changed a continuous drag: ${angles}`);
+});

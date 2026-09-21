@@ -3,6 +3,13 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.3] - 2026-09-21
+
+### Fixed
+
+- Keep rotation speed consistent after zooming or fitting large scenes, and
+  prevent orthographic views from jumping during a drag.
+
 ## [0.15.2] - 2026-09-21
 
 ### Fixed
