@@ -585,7 +585,8 @@ test('annotation names stay on canvas and the list adapts to available space ind
   fixture.state.annotations=Array.from({length:11},(_,i)=>({id:`list-${i}`,mesh:0,revision:'fixture',kind:'point',label:`标记 ${i+1} · 参考位置`,color:'#ff6b5e',visible:true,closed:false,points:[[0.3+i*0.005,0.3,0.4-i*0.005]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}));
   for(const viewport of [{width:390,height:666},{width:320,height:568},{width:390,height:844},{width:600,height:360},{width:759,height:481},{width:900,height:600},{width:1024,height:768},{width:1280,height:800},{width:1440,height:900},{width:1440,height:600}]) {
     const dense = structuredClone(fixture);
-    if(viewport.width>=1280) dense.meshes=Array.from({length:80},(_,i)=>({...fixture.meshes[0],name:`Long scene item ${i+1}`,label:null}));
+    // List overflow needs 80 rows, not 80 overlapping render/annotation occluders.
+    if(viewport.width>=1280) dense.meshes=Array.from({length:80},(_,i)=>({...fixture.meshes[0],name:`Long scene item ${i+1}`,label:null,visible:i===0}));
     const page=await openPage(viewport,0,dense);
     try {
       const roomy=viewport.width>=900 && viewport.height>=600;

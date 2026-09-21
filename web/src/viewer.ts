@@ -161,6 +161,7 @@ export class MeshViewer {
     this.root.append(this.renderer.domElement);
     this.labels = new MeshLabels(this.root, (meshes, animate) => this.focusLabelGroup(meshes, animate));
     this.camera = this.perspective;
+    this.camera.position.fromArray(shader.camera.default_view_direction);
     this.raycaster.firstHitOnly = true;
     this.controls = new ArcballControls(this.camera, this.renderer.domElement, this.scene);
     this.controls.enableAnimations = false;
