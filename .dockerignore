@@ -4,3 +4,5 @@
 !target/
 !target/release/
 !target/release/blind
+!target/debug/
+!target/debug/blind

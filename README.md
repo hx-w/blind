@@ -513,17 +513,17 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-CI runs `.github/workflows/native.yml` on Apple Silicon, Intel macOS and Linux
-x86_64. Source/browser checks run in parallel with release compilation and binary
-integration tests. Successful `main` jobs populate Rust dependency caches for all
-three platforms, separated by runner and task. Superseded PR checks are cancelled;
-main runs finish populating caches.
+CI runs verification on Apple Silicon, Intel macOS and Linux x86_64. Each
+platform checks source, browser interactions and binary integrations. Integration
+tests use a debug executable; CI does not compile or package release binaries.
+Successful `main` jobs cache Rust verification dependencies per runner.
+Superseded PR checks are cancelled; main runs finish populating caches.
 
 Release has one responsibility: build and publish. A stable tag builds the viewer
 and native binaries, packages the three archives, generates SHA-256 checksums and
-publishes the GitHub Release. It restores the CI build caches and does not rerun
-tests or wait for CI. The first build, a toolchain change, or cache eviction can
-still require a cold compilation.
+publishes the GitHub Release. It restores available build caches and does not
+rerun tests or wait for CI. The first build, a toolchain change, or cache eviction
+can still require a cold compilation.
 
 ## API
 

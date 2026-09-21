@@ -8,11 +8,96 @@ on:
 permissions:
   contents: read
 
-# Replace stale PR checks, but let main finish populating release caches.
+# Replace stale PR checks, but let main finish populating verification caches.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
-    uses: ./.github/workflows/native.yml
+    name: verify ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel, ubuntu-22.04]
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+          package-manager-cache: false
+      - name: Install Linux runtime and integration-test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libvulkan1 mesa-vulkan-drivers openssh-server
+      - name: Build viewer
+        run: |
+          npm ci --prefix web
+          npm run build --prefix web
+      - name: Install export browser
+        working-directory: web
+        run: |
+          npx playwright install chromium
+          node --input-type=module -e 'import { chromium } from "playwright"; console.log(`BLIND_RENDER_BROWSER=${chromium.executablePath()}`)' >> "$GITHUB_ENV"
+      - name: Verify viewer interactions
+        working-directory: web
+        run: |
+          npm test
+          npm run test:browser
+      - name: Prepare component export tests
+        working-directory: web
+        run: |
+          python3 -m venv "$RUNNER_TEMP/component-tests"
+          "$RUNNER_TEMP/component-tests/bin/python" -m pip install Pillow==12.2.0
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: ${{ matrix.runner }}-verify
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-bin: false
+      - name: Verify source
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+      - name: Prepare integration-test executable
+        run: cargo build --locked
+      - name: Verify Client and read-only SFTP
+        run: python3 tests/integration_sftp.py target/debug
+      - name: Verify read-only OSS sources
+        run: python3 tests/integration_oss.py target/debug
+      - name: Verify sandboxed Docker component export
+        if: runner.os == 'Linux'
+        run: |
+          docker build -f deploy/Dockerfile --build-arg BLIND_BINARY=target/debug/blind -t blind-component-test .
+          "$RUNNER_TEMP/component-tests/bin/python" tests/integration_container.py blind-component-test
+      - name: Verify export network isolation
+        run: cargo test --locked render_viewer::tests -- --include-ignored
+      - name: Verify components and PNG export
+        run: '"$RUNNER_TEMP/component-tests/bin/python" tests/integration_components.py target/debug'
+      - name: Verify Server plugins
+        run: python3 tests/integration_plugins.py target/debug
+      - name: Verify CLI
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+          ./target/debug/blind --version
+          ./target/debug/blind --help
+          ./target/debug/blind join --help
+          ./target/debug/blind share --help
+          ./target/debug/blind doctor --help
+          ./target/debug/blind update --help

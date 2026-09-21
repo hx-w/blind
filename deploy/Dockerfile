@@ -11,7 +11,8 @@ ARG BLIND_GID=1000
 RUN groupadd --non-unique --gid "$BLIND_GID" blind \
     && useradd --uid "$BLIND_UID" --gid blind --no-create-home \
        --home-dir /config --shell /usr/sbin/nologin blind
-COPY target/release/blind /usr/local/bin/blind
+ARG BLIND_BINARY=target/release/blind
+COPY ${BLIND_BINARY} /usr/local/bin/blind
 ENV BLIND_CONFIG_DIR=/config XDG_RUNTIME_DIR=/tmp WGPU_BACKEND=vulkan
 USER blind
 EXPOSE 7400
