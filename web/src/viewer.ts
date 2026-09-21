@@ -144,6 +144,7 @@ export class MeshViewer {
   private state!: ViewState;
   private selected = 0;
   private dirty = true;
+  private fitAnimation?: number;
   private pointerStart: { x: number; y: number } | null = null;
   private lastTap = { index: -1, time: 0 };
   onSelectionChange?: (index: number) => void;
@@ -176,7 +177,7 @@ export class MeshViewer {
     this.resizeObserver.observe(root);
     this.renderer.domElement.addEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
-    this.controls.addEventListener('start', () => this.onViewChangeStart?.());
+    this.controls.addEventListener('start', () => { this.cancelFit(); this.onViewChangeStart?.(); });
     this.controls.addEventListener('change', () => { this.updateClipping(); this.dirty = true; });
     this.animate();
   }
@@ -415,7 +416,7 @@ export class MeshViewer {
 
   setProjection(projection: ViewState['projection']): void {
     if (projection === this.state.projection) return;
-    this.onViewChangeStart?.();
+    this.cancelFit(); this.onViewChangeStart?.();
     const position = this.camera.position.clone();
     const target = this.controls.target.clone();
     if (projection === 'orthographic') {
@@ -595,31 +596,49 @@ export class MeshViewer {
     return { position, target, up };
   }
 
+  private cancelFit(): void {
+    if (this.fitAnimation !== undefined) cancelAnimationFrame(this.fitAnimation);
+    this.fitAnimation = undefined;
+  }
+
   private fitBox(box: THREE.Box3, animate: boolean): void {
-    // Every fit flows through here, including double-tap-to-focus.
-    this.onViewChangeStart?.();
-    const center = box.getCenter(new THREE.Vector3()); const size = box.getSize(new THREE.Vector3()); const radius = size.length() * 0.5;
-    const verticalFov = THREE.MathUtils.degToRad(this.perspective.fov);
+    // Every fit resets framing, including double-tap and component/group focus.
+    // Keep the actual camera basis (including roll), independent of old zoom.
+    this.cancelFit(); this.onViewChangeStart?.();
+    const center = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
+    const direction = this.camera.getWorldDirection(new THREE.Vector3()).negate();
+    const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
     const aspect = Math.max(this.root.clientWidth / Math.max(this.root.clientHeight, 1), 0.1);
+    const fov = shader.camera.fov_degrees;
+    const verticalFov = THREE.MathUtils.degToRad(fov);
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
-    const fitFov = Math.min(verticalFov, horizontalFov);
-    const distance = Math.max(radius / Math.sin(fitFov / 2), 0.001) * shader.camera.fit_padding;
-    const direction = this.camera.position.clone().sub(this.controls.target).normalize();
-    if (!Number.isFinite(direction.x) || direction.lengthSq() < 1e-12) {
-      const [x, y, z] = shader.camera.default_view_direction;
-      direction.set(x, y, z).normalize();
-    }
+    const distance = Math.max(size.length() * 0.5 / Math.sin(Math.min(verticalFov, horizontalFov) / 2), 0.001) * shader.camera.fit_padding;
+    const projectedSpan = (axis: THREE.Vector3) => Math.abs(axis.x)*size.x + Math.abs(axis.y)*size.y + Math.abs(axis.z)*size.z;
+    const height = Math.max(projectedSpan(up), projectedSpan(right) / aspect, 0.001) * shader.camera.fit_padding;
     const destination = center.clone().addScaledVector(direction, distance);
+    const startPosition = this.camera.position.clone(), startTarget = this.captureCameraPose().target;
+    const startHeight = (this.orthographic.userData.height ?? height) / this.orthographic.zoom;
+    const startFov = this.perspective.fov;
+    this.orthographic.zoom = 1; this.perspective.zoom = 1;
+    this.camera.up.copy(up);
+    const apply = (t: number) => {
+      this.camera.position.lerpVectors(startPosition, destination, t);
+      this.controls.target.lerpVectors(startTarget, center, t);
+      this.orthographic.userData.height = THREE.MathUtils.lerp(startHeight, height, t);
+      this.perspective.fov = THREE.MathUtils.lerp(startFov, fov, t);
+      this.resize(); this.syncCamera();
+    };
     if (animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      const startPosition = this.camera.position.clone(); const startTarget = this.controls.target.clone(); const start = performance.now();
+      const start = performance.now();
+      apply(0);
       const tick = (now: number) => {
-        const t = Math.min((now - start) / 260, 1); const eased = 1 - Math.pow(1 - t, 4);
-        this.camera.position.lerpVectors(startPosition, destination, eased); this.controls.target.lerpVectors(startTarget, center, eased); this.syncCamera();
-        if (t < 1) requestAnimationFrame(tick);
-      }; requestAnimationFrame(tick);
-    } else { this.camera.position.copy(destination); this.controls.target.copy(center); this.syncCamera(); }
-    this.orthographic.userData.height = Math.max(size.y, size.x / Math.max(this.root.clientWidth / this.root.clientHeight, 0.2)) * 1.25;
-    this.resize();
+        const t = Math.min((now - start) / 260, 1);
+        apply(1 - Math.pow(1 - t, 4));
+        this.fitAnimation = t < 1 ? requestAnimationFrame(tick) : undefined;
+      };
+      this.fitAnimation = requestAnimationFrame(tick);
+    } else apply(1);
   }
 
   // Cross-renderer contract with clip_planes in src/render.rs; change both in lockstep.

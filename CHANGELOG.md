@@ -8,7 +8,7 @@ All notable changes to Blind are documented here. This project follows
 ### Fixed
 
 - Keep orthographic views from clipping nearby geometry when reopening or
-  rotating a scene.
+  rotating a scene, and reset zoom on fit while preserving the viewing angle.
 - Hide image and text surfaces behind foreground meshes and route clicks to
   the visible geometry.
 - Keep long scene and annotation lists in separate scroll areas within the

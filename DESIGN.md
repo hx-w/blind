@@ -121,3 +121,5 @@ Screen brush strokes support the same editable names as surface marks; names sur
 Component positions are fixed during review, including meshes, images, text and plugin surfaces. Preview and header drags navigate the camera; there are no position drag handles or Alt/arrow movement shortcuts. Explicit positions and automatic initial layout remain part of scene loading.
 
 Spatial content keeps its native DOM opacity. Parallel XY content planes interleave with GPU-clipped geometry bands, copied through one WebGL renderer into canvas layers. Empty bands allocate no bitmap; hidden content stays connected to preserve plugin state. Pointer routing tests painted geometry coverage, including wireframe gaps, and preserves the full pointer lifecycle for mesh selection.
+
+Global fit and mesh/component focus reset zoom and lens framing while preserving the current viewing direction and roll. Orthographic fit uses bounds projected onto the current camera axes, so rotated geometry fits the same way after either zooming in or out. New camera gestures cancel an unfinished fit transition.

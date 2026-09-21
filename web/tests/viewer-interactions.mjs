@@ -906,6 +906,82 @@ test('orthographic framing retains geometry behind the saved camera', async () =
   } finally { await page.close(); }
 });
 
+test('fit resets orthographic zoom while preserving oblique rotation and roll', async () => {
+  const corners=[[-1,-.5,-6],[1,-.5,-6],[1,.5,-6],[-1,.5,-6],[-1,-.5,6],[1,-.5,6],[1,.5,6],[-1,.5,6]];
+  const faces=[[0,2,1],[0,3,2],[4,5,6],[4,6,7],[0,1,5],[0,5,4],[3,7,6],[3,6,2],[0,4,7],[0,7,3],[1,2,6],[1,6,5]];
+  const mesh=`ply\nformat ascii 1.0\nelement vertex 8\nproperty float x\nproperty float y\nproperty float z\nelement face 12\nproperty list uchar int vertex_indices\nend_header\n${corners.map(p=>p.join(' ')).join('\n')}\n${faces.map(f=>`3 ${f.join(' ')}`).join('\n')}\n`;
+  const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null}],
+    state:{...scene.state,projection:'orthographic',strokes:[],camera:{position:[14,14,14],target:[0,0,0],up:[1,-1,0],fov:34,zoom:1,orthographic_height:20}}};
+  const page=await openPage({width:800,height:800},0,data,[mesh]);
+  const unit=v=>{const n=Math.hypot(...v);return v.map(x=>x/n);};
+  const direction=c=>unit(c.position.map((v,i)=>v-c.target[i]));
+  const close=(actual,expected,message)=>actual.forEach((v,i)=>assert.ok(Math.abs(v-expected[i])<1e-5,`${message}: ${actual} vs ${expected}`));
+  try {
+    await page.emulateMedia({reducedMotion:'reduce'});
+    const original=(await captureShare(page)).state.camera;
+    await page.locator('#fit-view').click();
+    const baseline=(await captureShare(page)).state.camera;
+    close(direction(baseline),direction(original),'global fit preserves viewing direction');
+    close(unit(baseline.up),unit(original.up),'global fit preserves camera roll');
+    for(const action of ['global','double-click']) for(const delta of [-500,500]) {
+      await page.mouse.move(400,400);await page.mouse.wheel(0,delta);await page.waitForTimeout(150);
+      const zoomed=(await captureShare(page)).state.camera;
+      assert.ok(Math.abs(zoomed.zoom-1)>.1,'wheel actually changes orthographic magnification');
+      if(action==='global')await page.locator('#fit-view').click();
+      else await page.mouse.dblclick(400,400,{delay:80});
+      const fitted=(await captureShare(page)).state.camera;
+      assert.equal(fitted.zoom,1,`${action} resets zoom after wheel ${delta}`);
+      assert.ok(Math.abs(fitted.orthographic_height/fitted.zoom-baseline.orthographic_height/baseline.zoom)<1e-5,`${action} restores stable framing`);
+      close(direction(fitted),direction(zoomed),`${action} preserves viewing direction`);
+      close(unit(fitted.up),unit(zoomed.up),`${action} preserves camera roll`);
+      const backward=direction(fitted),up=unit(fitted.up);
+      const right=unit([up[1]*backward[2]-up[2]*backward[1],up[2]*backward[0]-up[0]*backward[2],up[0]*backward[1]-up[1]*backward[0]]);
+      const halfHeight=fitted.orthographic_height/fitted.zoom/2;
+      for(const point of corners)for(const axis of [right,up]) {
+        const projected=point.reduce((sum,v,i)=>sum+(v-fitted.target[i])*axis[i],0);
+        assert.ok(Math.abs(projected)<halfHeight*.99,`${action} includes the rotated depth extent with padding`);
+      }
+    }
+    data.state.projection='perspective';
+    await page.reload();await page.locator('#loading-state').waitFor({state:'hidden'});
+    await page.locator('#fit-view').click();
+    const perspectiveBaseline=(await captureShare(page)).state.camera;
+    for(const [action,shift,delta] of [['global',false,-500],['global',true,500],['double-click',false,500],['double-click',true,-500]]) {
+      await page.mouse.move(400,400);
+      if(shift)await page.keyboard.down('Shift');
+      await page.mouse.wheel(0,delta);
+      if(shift)await page.keyboard.up('Shift');
+      await page.waitForTimeout(150);
+      const zoomed=(await captureShare(page)).state.camera;
+      if(shift)assert.ok(Math.abs(zoomed.fov-perspectiveBaseline.fov)>.1,'Shift+wheel actually changes perspective FOV');
+      else assert.ok(Math.hypot(...zoomed.position.map((v,i)=>v-perspectiveBaseline.position[i]))>.1,'wheel actually changes perspective distance');
+      if(action==='global')await page.locator('#fit-view').click();
+      else await page.mouse.dblclick(400,400,{delay:80});
+      const fitted=(await captureShare(page)).state.camera;
+      assert.equal(fitted.fov,perspectiveBaseline.fov,`${action} resets perspective FOV`);
+      close(fitted.position,perspectiveBaseline.position,`${action} restores perspective framing`);
+      close(direction(fitted),direction(zoomed),`${action} preserves perspective rotation`);
+      close(unit(fitted.up),unit(zoomed.up),`${action} preserves perspective roll`);
+    }
+    // Pan updates Arcball's live view before its public target is refreshed.
+    // Animated fits must preserve that view throughout the transition as well.
+    await page.mouse.move(400,400);await page.mouse.down({button:'right'});
+    await page.mouse.move(440,430,{steps:5});await page.mouse.up({button:'right'});
+    const panned=(await captureShare(page)).state.camera;
+    assert.ok(Math.hypot(...panned.position.map((v,i)=>v-perspectiveBaseline.position[i]))>.1,'the view was actually panned');
+    await page.emulateMedia({reducedMotion:'no-preference'});
+    await page.locator('#fit-view').click();await page.waitForTimeout(60);
+    const during=(await captureShare(page)).state.camera;
+    close(direction(during),direction(panned),'animated fit preserves rotation after pan');
+    close(unit(during.up),unit(panned.up),'animated fit preserves roll after pan');
+    await page.waitForTimeout(300);
+    const settled=(await captureShare(page)).state.camera;
+    close(direction(settled),direction(panned),'completed fit preserves rotation after pan');
+    close(unit(settled.up),unit(panned.up),'completed fit preserves roll after pan');
+    close(settled.position,perspectiveBaseline.position,'completed fit recenters a panned view');
+  } finally {await page.close();}
+});
+
 test('spatial content respects depth and stays fixed during pointer and keyboard navigation', async () => {
   for (const type of ['image','text']) for (const z of [-1,1]) {
     const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#ff0000'}, {...scene.meshes[1],translation:[100,0,0]}]};
