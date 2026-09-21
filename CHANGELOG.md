@@ -3,7 +3,7 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.15.1] - 2026-09-21
+## [0.15.2] - 2026-09-21
 
 ### Fixed
 
@@ -18,8 +18,8 @@ All notable changes to Blind are documented here. This project follows
 ### Changed
 
 - Keep component positions fixed during dragging and keyboard navigation.
-- Run native release builds alongside source checks and reuse Rust dependency
-  caches, including Intel macOS builds.
+- Keep tests in CI and limit releases to cached native builds and publication,
+  including Intel macOS.
 
 ## [0.15.0] - 2026-09-21
 

@@ -8,10 +8,10 @@ on:
 permissions:
   contents: read
 
-# Superseded branch/PR checks should not hold scarce macOS runners.
+# Replace stale PR checks, but let main finish populating release caches.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:

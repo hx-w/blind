@@ -9,9 +9,66 @@ permissions:
 
 jobs:
   build:
-    uses: ./.github/workflows/native.yml
-    with:
-      release: true
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            asset: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: x86_64-apple-darwin
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate stable release tag
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          grep -q "^version = \"${GITHUB_REF_NAME#v}\"$" Cargo.toml
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+          package-manager-cache: false
+      - name: Build viewer
+        run: |
+          npm ci --prefix web
+          npm run build --prefix web
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: ${{ matrix.runner }}-build
+          save-if: false
+          cache-bin: false
+      - name: Build binary
+        run: cargo build --locked --release
+      - name: Package
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "${{ matrix.target }}"
+          ./target/release/blind --version
+          mkdir package
+          cp target/release/blind package/blind
+          chmod 0755 package/blind
+          tar -C package -czf "blind-${{ matrix.asset }}.tar.gz" blind
+      - uses: actions/upload-artifact@v7
+        with:
+          name: blind-${{ matrix.asset }}
+          path: blind-${{ matrix.asset }}.tar.gz
+          if-no-files-found: error
 
   publish:
     needs: build

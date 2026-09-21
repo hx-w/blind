@@ -1,12 +1,7 @@
-name: Native checks and artifacts
+name: Native CI checks
 
 on:
   workflow_call:
-    inputs:
-      release:
-        description: Validate a stable tag and upload tested release archives
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -19,31 +14,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Run source/browser checks alongside the optimized binary and its
-        # integration tests; publishing waits for both on every architecture.
+        # Source/browser checks run alongside binary integration tests.
+        # Release builds restore the main branch build caches.
         task: [verify, build]
         runner: [macos-15, macos-15-intel, ubuntu-22.04]
         include:
           - runner: macos-15
             target: aarch64-apple-darwin
-            asset: aarch64-apple-darwin
           - runner: macos-15-intel
             target: x86_64-apple-darwin
-            asset: x86_64-apple-darwin
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            asset: linux-x86_64
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Validate stable release tag
-        if: inputs.release
-        shell: bash
-        run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          grep -q "^version = \"${GITHUB_REF_NAME#v}\"$" Cargo.toml
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -127,16 +110,3 @@ jobs:
           ./target/release/blind share --help
           ./target/release/blind doctor --help
           ./target/release/blind update --help
-      - name: Package
-        if: inputs.release && matrix.task == 'build'
-        run: |
-          mkdir package
-          cp target/release/blind package/blind
-          chmod 0755 package/blind
-          tar -C package -czf "blind-${{ matrix.asset }}.tar.gz" blind
-      - uses: actions/upload-artifact@v7
-        if: inputs.release && matrix.task == 'build'
-        with:
-          name: blind-${{ matrix.asset }}
-          path: blind-${{ matrix.asset }}.tar.gz
-          if-no-files-found: error
