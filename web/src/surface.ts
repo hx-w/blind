@@ -115,7 +115,17 @@ export class SurfaceEditor {
       this.sync();
     }));
     this.markup.onStrokeStart=()=> { this.selected=undefined; this.selectedScreen=undefined; this.screenBefore=this.snapshot(); };
-    this.markup.onStrokeEnd=()=> { if(this.screenBefore) { if(JSON.stringify(this.screenBefore.strokes)!==JSON.stringify(this.markup.exportStrokes())) this.remember(this.screenBefore); this.screenBefore=undefined; } this.sync(); };
+    this.markup.onStrokeEnd=()=> {
+      if(this.screenBefore) {
+        const strokes=this.markup.exportStrokes();
+        if(strokes.length>this.screenBefore.strokes.length) {
+          this.remember(this.screenBefore);
+          this.selectedScreen=strokes.length-1;
+        }
+        this.screenBefore=undefined;
+      }
+      this.sync();
+    };
     this.input.addEventListener('pointerdown', event => void this.down(event));
     this.input.addEventListener('pointermove', event => this.move(event));
     this.input.addEventListener('pointerup', event => this.up(event));

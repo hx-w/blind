@@ -555,7 +555,7 @@ test('surface and screen strokes share tools, selection and undo history', async
   } finally {await page.close();}
 });
 
-test('new point and line names remain editable after pointer release and share completion', async () => {
+test('new point, line and screen brush names remain editable after pointer release and share completion', async () => {
   const page=await openPage({width:390,height:844},0,surfaceFixture());
   try {
     await page.locator('#brush-tool').click();await page.mouse.click(195,400);
@@ -577,6 +577,24 @@ test('new point and line names remain editable after pointer release and share c
     await page.locator('[data-surface-mode="line"]').click();await page.mouse.click(165,420);await page.mouse.click(170,385);
     await page.locator('#surface-end').click();assert.equal(await name.isVisible(),true);
     await name.fill('连线路径');await name.press('Tab');assert.equal((await captureShare(page)).state.annotations[3].label,'连线路径');
+    await page.locator('#surface-brush').click();
+    await page.mouse.move(60,200);await page.mouse.down();await page.mouse.move(130,230,{steps:12});await page.mouse.up();
+    assert.equal(await name.isVisible(),true,'new screen stroke exposes its name immediately');
+    assert.equal(await name.inputValue(),'画笔 1');
+    await name.fill('检查边缘');await name.press('Tab');
+    assert.equal((await captureShare(page)).state.strokes[0].label,'检查边缘');
+    assert.equal(await name.isVisible(),true);
+    await page.locator('#surface-undo').click();assert.equal((await captureShare(page)).state.strokes[0].label,undefined);
+    await page.locator('#surface-redo').click();assert.equal((await captureShare(page)).state.strokes[0].label,'检查边缘');
+    await page.mouse.move(60,260);await page.mouse.down();await page.mouse.move(130,290,{steps:12});await page.mouse.up();
+    assert.equal(await name.inputValue(),'画笔 2');
+    await name.fill('第二处');await name.press('Tab');
+    const strokes=(await captureShare(page)).state.strokes;
+    assert.deepEqual(strokes.map(s=>s.label),['检查边缘','第二处']);
+    await page.locator('#surface-undo').click();await page.locator('#surface-undo').click();
+    assert.equal((await captureShare(page)).state.strokes.length,1);
+    await page.locator('#surface-redo').click();assert.equal(await name.inputValue(),'画笔 2');
+
   } finally {await page.close();}
 });
 
