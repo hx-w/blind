@@ -327,6 +327,7 @@ export class MeshViewer {
     this.renderer.setClearColor(theme, 0);
     this.root.style.backgroundColor = theme;
     document.documentElement.dataset.theme = background;
+    document.documentElement.style.setProperty('--scene-background', theme);
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme);
     this.dirty = true;
   }

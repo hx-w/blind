@@ -25,15 +25,6 @@
         <div id="canvas-root" class="canvas-root" aria-label="可交互 3D 场景"></div>
         <canvas id="markup-canvas" class="markup-canvas" aria-label="屏幕批注画布" aria-hidden="true"></canvas>
         <button id="scene-notice" class="scene-notice" type="button" hidden data-viewer-chrome data-label-obstacle aria-label="查看场景异常详情"></button>
-        <div class="view-control" data-viewer-chrome data-label-obstacle>
-          <button class="axis-orb" id="axis-orb" type="button" aria-label="打开标准视角" aria-expanded="false">
-            <span class="axis-y">Y</span><span class="axis-x">X</span><span class="axis-z">Z</span><span class="axis-center"></span>
-          </button>
-          <div class="view-popover" id="view-popover" aria-hidden="true">
-            <button data-view="py" type="button">上</button><button data-view="pz" type="button">前</button><button data-view="px" type="button">右</button>
-            <button data-view="nx" type="button">左</button><button data-view="nz" type="button">后</button><button data-view="ny" type="button">下</button>
-          </div>
-        </div>
         <div class="gesture-hint" id="gesture-hint" role="status" data-viewer-chrome><span>单指旋转</span><i></i><span>双指移动</span><i></i><span>捏合缩放</span></div>
         <div class="loading-state" id="loading-state">
           <span class="loading-spinner" aria-hidden="true"></span>

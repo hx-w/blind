@@ -527,7 +527,6 @@ export class SurfaceEditor {
     this.panel.querySelectorAll<HTMLButtonElement>('button').forEach(button=>button.disabled=this.busy);
     this.el<HTMLInputElement>('#surface-name').disabled=this.busy;
     this.list.inert=this.busy;
-    this.el<HTMLElement>('.view-control').inert=this.busy;
     const share=this.el<HTMLButtonElement>('#share-view');if(!share.classList.contains('working'))share.disabled=this.busy;
     this.input.hidden = !this.active || this.mode==='select' || this.mode==='screen';
     this.input.style.cursor=this.mode==='select'?'default':'crosshair';

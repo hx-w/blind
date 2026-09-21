@@ -39,6 +39,7 @@ export class ComponentViewer {
   private readonly renderer = new CSS3DRenderer();
   private readonly entries: Entry[] = [];
   private readonly tree = document.createElement('aside');
+  private treeResize?: ResizeObserver;
   private readonly rows = new Map<string, {button: HTMLButtonElement; check: HTMLInputElement}>();
   private readonly toggle = document.createElement('button');
   private readonly dialog = document.createElement('dialog');
@@ -173,6 +174,20 @@ export class ComponentViewer {
   private setVisible(entry: Entry, visible: boolean): void {
     this.applyStyle(entry, visible, visible && entry.spec.opacity === 0 ? 1 : entry.spec.opacity);
   }
+  private setVisibility(visible: (entry: Entry) => boolean): void {
+    this.syncing = true;
+    try {
+      for (const entry of this.entries) {
+        entry.spec.visible = visible(entry);
+        if (entry.spec.visible && entry.spec.opacity === 0) {
+          entry.spec.opacity = 1;
+          entry.runtime.setOpacity(1);
+        }
+        entry.runtime.setVisible(effectiveVisibility(entry.spec));
+      }
+    } finally { this.syncing = false; }
+    this.sync(); this.onChange?.();
+  }
 
   present(spec: SceneComponent, mode: Presentation): void {
     const entry = this.entries.find(e => e.spec === spec); if (!entry || !entry.capabilities.presentations.includes(mode)) return;
@@ -214,22 +229,31 @@ export class ComponentViewer {
     this.tree.className = 'scene-tree'; this.tree.id = 'scene-tree'; this.tree.setAttribute('aria-label', '场景元素'); this.tree.dataset.labelObstacle = '';
     const heading = document.createElement('header'); const title = document.createElement('h2'); title.textContent = '场景';
     const close = button('收起', () => this.setOpen(false)); heading.append(title, close); this.tree.append(heading);
-    const list = document.createElement('div'); list.className = 'scene-tree-list'; this.tree.append(list);
+    const actions = document.createElement('div'); actions.className = 'scene-tree-actions'; actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', '场景显示');
+    actions.append(button('全部显示', () => this.setVisibility(() => true)), button('全部隐藏', () => this.setVisibility(() => false))); this.tree.append(actions);
+    const list = document.createElement('div'); list.className = 'scene-tree-list'; list.tabIndex = 0; list.setAttribute('role', 'region'); list.setAttribute('aria-label', '场景元素列表'); this.tree.append(list);
+    const content = document.createElement('div'); list.append(content);
+    const updateEdges = () => {
+      list.style.setProperty('--scroll-fade-top', `${Math.min(16, Math.max(0, list.scrollTop))}px`);
+      list.style.setProperty('--scroll-fade-bottom', `${Math.min(16, Math.max(0, list.scrollHeight - list.clientHeight - list.scrollTop))}px`);
+    };
+    list.addEventListener('scroll', updateEdges, {passive: true});
+    this.treeResize = new ResizeObserver(updateEdges); this.treeResize.observe(list); this.treeResize.observe(content);
     for (const [group, specs] of componentGroups(this.entries.map(e => e.spec))) {
-      if (group) { const label = document.createElement('h3'); label.textContent = group; list.append(label); }
+      if (group) { const label = document.createElement('h3'); label.textContent = group; content.append(label); }
       for (const spec of specs) {
         const entry = this.entries.find(e => e.spec === spec)!;
         const row = document.createElement('div'); row.className = 'scene-tree-row';
-        const select = button(spec.label, () => this.select(spec)); select.setAttribute('aria-pressed', 'false'); select.title = `${spec.label} · ${spec.component} · Alt + 方向键移动`;
+        const select = button(spec.label, () => this.select(spec)); select.setAttribute('aria-pressed', 'false'); select.title = `${spec.label} · 双击仅显示此元素 · Alt + 方向键移动`;
         select.addEventListener('keydown', event => {
           if (!event.altKey || !entry.capabilities.movable) return;
           const delta: Record<string, Vec3> = {ArrowLeft: [-1,0,0], ArrowRight: [1,0,0], ArrowUp: [0,1,0], ArrowDown: [0,-1,0]};
           if (!delta[event.key]) return; event.preventDefault();
           this.move(spec, new THREE.Vector3().fromArray(spec.position ?? [0,0,0]).addScaledVector(new THREE.Vector3().fromArray(delta[event.key]), event.shiftKey ? 10 : 1).toArray() as Vec3);
         });
-        select.addEventListener('dblclick', () => entry.runtime.focus());
+        select.addEventListener('dblclick', () => { this.setVisibility(candidate => candidate === entry); entry.runtime.focus(); });
         const check = document.createElement('input'); check.type = 'checkbox'; check.checked = effectiveVisibility(spec); check.setAttribute('aria-label', `显示 ${spec.label}`);
-        check.addEventListener('change', () => this.setVisible(entry, check.checked)); row.append(select, check); list.append(row); this.rows.set(spec.id, {button: select, check});
+        check.addEventListener('change', () => this.setVisible(entry, check.checked)); row.append(select, check); content.append(row); this.rows.set(spec.id, {button: select, check});
       }
     }
     this.toggle.className = 'icon-button'; this.toggle.type = 'button'; this.toggle.id = 'scene-tree-toggle'; this.toggle.setAttribute('aria-label', '场景元素'); this.toggle.setAttribute('aria-controls', this.tree.id);
@@ -251,7 +275,7 @@ export class ComponentViewer {
       caption.element.style.transform = `translate(${(p.x + 1) * this.root.clientWidth / 2}px,${(1 - p.y) * this.root.clientHeight / 2 - 32}px)`;
     }
   };
-  dispose(): void { this.close(); this.root.removeEventListener('pointerdown', this.dragGeometry, true); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.componentUpdates = undefined; this.renderer.domElement.remove(); this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
+  dispose(): void { this.close(); this.treeResize?.disconnect(); this.root.removeEventListener('pointerdown', this.dragGeometry, true); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.componentUpdates = undefined; this.renderer.domElement.remove(); this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
 }
 
 class SurfaceRuntime implements ComponentRuntime {

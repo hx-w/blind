@@ -110,7 +110,7 @@ for (const viewport of [{width:1280,height:800},{width:390,height:844},{width:32
   test(`toolbars preserve the scene canvas at ${viewport.width}×${viewport.height}`, async () => {
     const page = await openPage(viewport);
     try {
-      for (const selector of ['.panel-trigger','#close-panel','#scene-info-toggle','#brush-tool','#surface-brush','#surface-done','#axis-orb','#fit-view']) {
+      for (const selector of ['.panel-trigger','#close-panel','#scene-info-toggle','#brush-tool','#surface-brush','#surface-done','#fit-view']) {
         const events = await eventsDuring(page, () => page.locator(selector).click());
         assert.equal(events.filter(e=>e.type==='resize').length, 0, `${selector} cleared a scene canvas`);
       }
@@ -908,3 +908,57 @@ test('PNG export does not read hidden unavailable geometry', async () => {
     assert.equal(hiddenReads,0,'hidden sources must not invalidate or block the exported scene');
   } finally {await page.close();}
 });
+
+for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
+  test(`scene tree isolates and restores every component type at ${viewport.width}×${viewport.height}`, async () => {
+    const mixed=structuredClone(scene); mixed.label_groups=[]; mixed.state.strokes=[];
+    mixed.meshes=mixed.meshes.map((m,i)=>({...m,name:i?'Margin':'Scan',label:undefined,format:i?'pts':'ply',opacity:i?0:.37,visible:true}));
+    mixed.attachments=['Log','Trace'].map((label,i)=>({id:`a${i}`,label,byte_size:16,url:`/test/attachments/${i}`,unavailable:null}));
+    mixed.components=['mesh','points','text','example:trace'].map((component,i)=>({id:`c${i}`,component,
+      source:{kind:i<2?'mesh':'attachment',index:i<2?i:i-2},label:['Scan','Margin','Log','Trace'][i],group:i<2?'Geometry':'Diagnostics',
+      position:[i*4,0,0],size:i<2?null:[3,2],visible:i!==3,opacity:[.37,0,.6,0][i],
+      ...(i===3?{renderer:{plugin:'example',revision:'fixture',name:'trace',capabilities:{movable:true,resizable:true,presentations:['spatial','focus','fullscreen']}}}:{})}));
+    const openMixed=async data=>{
+      const page=await browser.newPage({viewport});
+      await page.route('**/api/v1/scenes/**',r=>r.request().method()==='GET'?r.fulfill({json:data}):r.continue());
+      await page.route('**/test/attachments/*',r=>r.fulfill({contentType:'text/plain',body:'test diagnostic'}));
+      await page.route('**/test/renderers/*',r=>r.fulfill({contentType:'text/html',body:`<!doctype html><p>Trace fixture</p><script>addEventListener('message',e=>{if(e.data?.type==='blind:init')e.ports[0].postMessage({version:1,type:'ready'});});</script>`}));
+      await page.goto(`${origin}/s/fixture`); await page.locator('#loading-state').waitFor({state:'hidden'});
+      assert.equal(await page.locator('#invalid-state').isVisible(),false);
+      const toggle=page.locator('#scene-tree-toggle'); if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
+      return page;
+    };
+    const page=await openMixed(mixed);
+    const checks=()=>page.locator('.scene-tree-row input').evaluateAll(inputs=>inputs.map(input=>input.checked));
+    const row=name=>page.locator('.scene-tree-row').getByRole('button',{name,exact:true});
+    try {
+      // A hidden, zero-opacity geometry must become visible when isolated.
+      await row('Margin').dblclick(); assert.deepEqual(await checks(),[false,true,false,false]);
+      let snapshot=await captureShare(page);
+      assert.deepEqual(snapshot.components.map(c=>c.visible),[false,true,false,false]);
+      assert.equal(snapshot.meshes[0].opacity,.37);assert.equal(snapshot.meshes[1].opacity,1);
+      assert.deepEqual(snapshot.meshes.map(m=>m.visible),[false,true]);
+      await row('Log').dblclick(); assert.deepEqual(await checks(),[false,false,true,false]);
+      await page.getByRole('button',{name:'全部隐藏',exact:true}).click();assert.deepEqual(await checks(),[false,false,false,false]);
+      await page.waitForFunction(()=>[...document.querySelectorAll('.scene-surface')].every(e=>!e.checkVisibility()));
+      snapshot=await captureShare(page);assert.ok(snapshot.components.every(c=>!c.visible));assert.ok(snapshot.meshes.every(m=>!m.visible));
+      await page.getByRole('button',{name:'全部显示',exact:true}).click();assert.deepEqual(await checks(),[true,true,true,true]);
+      await page.waitForFunction(()=>[...document.querySelectorAll('.scene-surface')].every(e=>e.checkVisibility()));
+      snapshot=await captureShare(page);assert.deepEqual(snapshot.components.map(c=>c.opacity),[.37,1,.6,1]);
+      assert.ok(snapshot.components.every(c=>c.visible));assert.ok(snapshot.meshes.every(m=>m.visible));
+      await page.getByRole('button',{name:'全部隐藏',exact:true}).click();
+      await row('Trace').dblclick();assert.deepEqual(await checks(),[false,false,false,true]);
+      await page.waitForFunction(()=>!document.querySelector('[data-component="text"]').checkVisibility()&&document.querySelector('[data-component="example:trace"]').checkVisibility());
+      snapshot=await captureShare(page);assert.deepEqual(snapshot.components.map(c=>c.visible),[false,false,false,true]);
+      const saved={...mixed,state:snapshot.state,meshes:mixed.meshes.map((m,i)=>({...m,...snapshot.meshes[i]})),components:mixed.components.map((c,i)=>({...c,...snapshot.components[i]}))};
+      const reopened=await openMixed(saved);
+      try {assert.deepEqual(await reopened.locator('.scene-tree-row input').evaluateAll(inputs=>inputs.map(input=>input.checked)),[false,false,false,true]);}
+      finally {await reopened.close();}
+      if(process.env.BLIND_TEST_SCREENSHOTS) {
+        await page.getByRole('button',{name:'全部显示',exact:true}).click();await page.mouse.move(0,0);
+        await mkdir(process.env.BLIND_TEST_SCREENSHOTS,{recursive:true});
+        await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/tree-actions-${viewport.width}.png`});
+      }
+    } finally {await page.close();}
+  });
+}

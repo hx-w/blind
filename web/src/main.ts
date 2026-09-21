@@ -384,10 +384,6 @@ document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((butto
 axesToggle.addEventListener('change', () => meshViewer.setAxes(axesToggle.checked));
 lightToggle.addEventListener('change', () => meshViewer.setBackground(lightToggle.checked ? 'light' : 'dark'));
 
-const axisOrb = $('#axis-orb'); const viewPopover = $('#view-popover');
-axisOrb.addEventListener('click', () => { const open = !viewPopover.classList.contains('open'); viewPopover.classList.toggle('open', open); viewPopover.setAttribute('aria-hidden', String(!open)); axisOrb.setAttribute('aria-expanded', String(open)); });
-document.querySelectorAll<HTMLButtonElement>('[data-view]').forEach((button) => button.addEventListener('click', () => { meshViewer.setCanonicalView(button.dataset.view!); viewPopover.classList.remove('open'); }));
-
 $('#fullscreen').addEventListener('click', async () => { if (document.fullscreenElement) await document.exitFullscreen(); else await shell.requestFullscreen(); });
 
 brushTool.addEventListener('click', () => void surface.enter());

@@ -3,6 +3,19 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-09-21
+
+### Added
+
+- Double-click a scene element to show it alone, or show and hide all elements
+  with the scene tree's global controls, preserving visibility in shared scenes.
+
+### Changed
+
+- Float the scene tree over the canvas with a distinct background, wrapped names
+  and inset scrolling edges that keep long lists readable.
+- Remove the direction orb and its standard-view menu.
+
 ## [0.14.0] - 2026-09-20
 
 ### Added

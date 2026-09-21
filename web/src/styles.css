@@ -93,16 +93,6 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .mesh-label-editor p { margin: 0; color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
 .markup-canvas { position: absolute; z-index: 7; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; touch-action: none; }
 .markup-canvas.enabled { pointer-events: auto; cursor: crosshair; }
-.view-control { position: absolute; z-index: 8; top: calc(70px + env(safe-area-inset-top)); right: max(14px, env(safe-area-inset-right)); display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
-.axis-orb { position: relative; width: 52px; height: 52px; padding: 0; border: 0; border-radius: 50%; background: var(--surface-2); color: var(--text-secondary); box-shadow: inset 0 0 0 1px var(--line), 0 6px 18px oklch(0.08 0.006 255 / 0.18); cursor: pointer; transition: transform 150ms cubic-bezier(.16,1,.3,1); }
-.axis-orb span { position: absolute; font-size: 8px; font-weight: 720; }
-.axis-center { top: 25px; left: 25px; width: 3px; height: 3px; border-radius: 50%; background: var(--text); }
-.axis-y { top: 7px; left: 23px; color: oklch(0.72 0.12 145); }.axis-x { right: 7px; bottom: 9px; color: oklch(0.7 0.16 30); }.axis-z { bottom: 7px; left: 8px; color: oklch(0.7 0.12 250); }
-.axis-orb::before, .axis-orb::after { position: absolute; top: 25px; left: 11px; width: 30px; height: 1px; background: var(--line); content: ""; }.axis-orb::before { transform: rotate(-34deg); }.axis-orb::after { transform: rotate(90deg); }
-.view-popover { width: 150px; display: grid; grid-template-columns: repeat(3,1fr); gap: 3px; padding: 5px; border-radius: var(--radius-md); background: var(--surface-2); box-shadow: 0 14px 36px oklch(0.08 0.006 255 / 0.25); opacity: 0; transform: translateY(-6px) scale(.96); transform-origin: top right; pointer-events: none; transition: transform 160ms cubic-bezier(.16,1,.3,1), opacity 130ms; }
-.view-popover.open { opacity: 1; transform: none; pointer-events: auto; }
-.view-popover button { min-height: 40px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); cursor: pointer; }
-
 .gesture-hint { position: absolute; z-index: 6; bottom: 92px; left: 50%; display: flex; align-items: center; gap: 8px; padding: 8px 12px; transform: translateX(-50%); border-radius: var(--radius-pill); background: color-mix(in oklch, var(--surface-1) 92%, transparent); color: var(--text-tertiary); font-size: 10px; white-space: nowrap; transition: transform 160ms, opacity 160ms; }
 .gesture-hint i { width: 2px; height: 2px; border-radius: 50%; background: currentColor; opacity: .55; }.gesture-hint.dismissed { opacity: 0; transform: translate(-50%,6px); pointer-events: none; }
 .loading-state, .invalid-state, .empty-state { position: absolute; z-index: 10; inset: 0; display: grid; place-content: center; justify-items: center; padding: 24px; text-align: center; background: var(--canvas); }
@@ -138,12 +128,11 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 @media (hover:hover) {
   .icon-button:hover, .close-panel:hover, .share-heading button:hover { background: var(--surface-3); }
   .share-button:hover { background: color-mix(in oklch, var(--accent) 88%, var(--text)); }
-  .dock-tool:hover, .view-popover button:hover, .share-options > button:hover, .share-host-row:hover { background: var(--surface-2); }
+  .dock-tool:hover, .share-options > button:hover, .share-host-row:hover { background: var(--surface-2); }
 }
 
 @media (min-width:760px) {
   .app-shell { --sheet-height: 0px !important; }
-  .panel-open .view-control { right: 354px; }
   .control-panel { top: 0; right: 0; bottom: 0; left: auto; width: 340px; height: 100%; border-radius: 0; opacity: 1; transform: translateX(100%); transition: transform 220ms cubic-bezier(.16,1,.3,1); }.panel-open .control-panel { transform: none; }
   .panel-drag-zone { display: none; }.panel-heading { height: 66px; padding: 12px 12px 8px 18px; }.panel-scroll { height: calc(100% - 66px); overflow-y: auto; padding: 4px 16px 28px; }
   .share-sheet { margin: auto; }
@@ -160,7 +149,7 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 
 @media (orientation:landscape) and (max-height:520px) {
   .control-panel { top: 0; right: 0; bottom: 0; left: auto; width: 340px; height: 100% !important; border-radius: 0; transform: translateX(100%); }.panel-open .control-panel { transform: none; }.panel-drag-zone { display: none; }.panel-heading { height: 58px; padding: 8px 12px 8px 18px; }.panel-scroll { height: calc(100% - 58px); overflow-y: auto; }
-  .panel-open .view-control { right: 354px; }.app-shell { --sheet-height: 0px !important; }.review-dock { right: auto; left: 14px; transform: none; }
+  .app-shell { --sheet-height: 0px !important; }.review-dock { right: auto; left: 14px; transform: none; }
 }
 
 @media (prefers-reduced-motion:reduce) {

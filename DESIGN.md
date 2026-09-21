@@ -28,6 +28,21 @@ Buttons use a 10px radius and 42px minimum hit target. The bottom dock uses a 16
 
 The canvas is full bleed. On phones, the bottom dock remains persistent while a docked sheet changes the usable 3D viewport. On landscape and desktop, settings move to a 340px right sheet.
 
+The scene tree floats over the upper-right canvas without reserving a column or
+painting a full-height background. Its height follows its content up to the space
+above the bottom dock, capped at 65dvh. Its opaque backing is lighter than the canvas, with a fine outline and soft
+shadow to establish a floating surface. It occludes geometry and labels without
+text shadows or individual text backgrounds. Only the list scrolls; its heading stays visible. Long names wrap,
+and selection uses accent text with a quiet neutral row tint. Opening or closing
+the tree never resizes the canvas. Do not show a direction orb or view menu.
+Keep Show All and Hide All above the scrolling list. Double-clicking an element
+shows and focuses it while hiding every other element across all groups and types.
+Visibility changes preserve nonzero opacity; showing a fully transparent element
+restores its opacity so it is actually visible. These states travel with shares.
+Inset the scrolling list from the rounded pane edge. Fade only edges with more
+content offscreen; remove the fade at each scroll limit so the first and last rows
+remain fully readable. Keep the header and global actions outside the fade.
+
 Scene information is hidden by default and opens through the dock's information
 button. It shares the details panel with Mesh controls. On phones, the four dock
 actions stack their icon above their label to fit narrow screens. Scene messages

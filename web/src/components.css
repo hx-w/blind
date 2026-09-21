@@ -22,19 +22,26 @@
 .component-status button, .component-status a { margin-left: 12px; color: var(--accent); }
 .component-group-labels { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
 .component-group-labels span { position: absolute; top: 0; left: 0; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
-.scene-tree { position: fixed; top: 66px; bottom: 24px; right: 14px; width: 224px; z-index: 18; display: flex; flex-direction: column; background: var(--surface-1); border-radius: var(--radius-sm); overflow: hidden; }
-.scene-tree header { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px 8px 16px; min-height: 44px; }
+.scene-tree { --tree-top: calc(66px + env(safe-area-inset-top)); position: fixed; top: var(--tree-top); right: max(14px, env(safe-area-inset-right)); width: min(280px, calc(100vw - 28px)); max-height: min(65dvh, calc(100dvh - var(--tree-top) - 96px - env(safe-area-inset-bottom))); z-index: 18; display: flex; flex-direction: column; overflow: hidden; background: color-mix(in oklch, var(--scene-background, var(--canvas)) 90%, var(--text)); border-radius: var(--radius-sm); box-shadow: 0 0 0 1px var(--line), 0 8px 24px oklch(0.08 0.006 255 / .18), 0 2px 6px oklch(0.08 0.006 255 / .10); }
+:root[data-theme="light"] .scene-tree { background: var(--surface-2); box-shadow: 0 0 0 1px var(--line), 0 8px 24px oklch(0.25 0.009 255 / .10), 0 2px 6px oklch(0.25 0.009 255 / .06); }
+.scene-tree header { flex: none; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 12px; min-height: 44px; }
 .scene-tree h2 { font-size: 13px; font-weight: 500; margin: 0; }
-.scene-tree header button { min-width: 42px; min-height: 36px; border: 0; background: transparent; border-radius: var(--radius-xs); color: var(--text-tertiary); font-size: 11px; cursor: pointer; }
-.scene-tree-list { overflow: auto; padding: 0 8px 12px; overscroll-behavior: contain; }
-.scene-tree h3 { font-size: 11px; font-weight: 400; color: var(--text-tertiary); margin: 14px 8px 6px; overflow-wrap: anywhere; }
+.scene-tree header button { min-width: 42px; min-height: 42px; border: 0; background: transparent; border-radius: var(--radius-xs); color: var(--text-secondary); font-size: 11px; cursor: pointer; }
+.scene-tree-actions { display: flex; flex: none; gap: 4px; padding: 0 8px 4px; border-bottom: 1px solid var(--line); }
+.scene-tree-actions button { flex: 1; min-height: 42px; border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+.scene-tree-list { min-height: 0; overflow-y: auto; overflow-x: hidden; margin: 4px 4px 8px; padding: 0 4px 4px; scroll-padding-block: 20px; overscroll-behavior: contain; touch-action: pan-y; scrollbar-width: thin; scrollbar-color: var(--text-tertiary) transparent; mask-image: linear-gradient(to bottom, transparent, #000 var(--scroll-fade-top, 0px), #000 calc(100% - var(--scroll-fade-bottom, 0px)), transparent); }
+.scene-tree-list:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.scene-tree h3 { font-size: 11px; font-weight: 400; color: var(--text-secondary); margin: 18px 8px 6px; overflow-wrap: anywhere; }
+.scene-tree h3:first-child { margin-top: 6px; }
 .scene-tree-row { display: flex; align-items: center; min-height: 38px; border-radius: var(--radius-xs); padding-right: 8px; }
-.scene-tree-row:has([aria-pressed="true"]) { background: var(--surface-2); }
-.scene-tree-row > button { flex: 1; min-width: 0; border: 0; padding: 10px 8px; background: transparent; text-align: left; font-size: 12px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; opacity: var(--element-opacity, 1); cursor: pointer; }
+.scene-tree-row:has([aria-pressed="true"]) { background: color-mix(in oklch, var(--text) 6%, transparent); }
+.scene-tree-row > button { flex: 1; min-width: 0; border: 0; padding: 10px 8px; background: transparent; text-align: left; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; opacity: var(--element-opacity, 1); cursor: pointer; }
 .scene-tree-row > button[aria-pressed="true"] { color: var(--accent); }
-.scene-tree-row input { flex: none; width: 16px; height: 16px; margin: 8px; accent-color: var(--accent); cursor: pointer; }
-.tree-open .view-control { right: 252px; }
+.scene-tree-row input { flex: none; width: 16px; height: 16px; margin: 8px; accent-color: var(--text-secondary); cursor: pointer; }
 .panel-open .scene-tree { right: 354px; }
+@media (hover: hover) {
+  .scene-tree-row:hover, .scene-tree header button:hover, .scene-tree-actions button:hover { background: color-mix(in oklch, var(--text) 6%, transparent); }
+}
 .component-dialog { width: calc(100vw - 64px); height: calc(100dvh - 64px); max-width: 1600px; max-height: none; padding: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-1); color: var(--text); overflow: hidden; }
 .component-dialog::backdrop { background: oklch(0.08 0.006 255 / .7); }
 .component-dialog[open] { display: flex; flex-direction: column; }
@@ -45,15 +52,9 @@
 .scene-surface.expanded .component-handle, .scene-surface.expanded .component-enter, .scene-surface.expanded .component-resize { display: none; }
 .component-dialog:fullscreen { width: 100vw; height: 100dvh; max-width: none; border: 0; border-radius: 0; }
 @media (max-width: 1099px), (max-height: 599px) {
-  .scene-tree { bottom: auto; max-height: calc(100dvh - 170px); width: min(260px, calc(100vw - 28px)); }
-  .tree-open .view-control { right: 14px; }
   .panel-open .scene-tree { display: none; }
   .component-dialog { width: 100vw; height: 100dvh; max-width: none; margin: 0; border: 0; border-radius: 0; }
   .component-dialog > header { padding-top: max(4px, env(safe-area-inset-top)); }
-}
-@media (min-width: 1100px) and (min-height: 600px) {
-  .tree-open .viewer { right: 238px; }
-  .tree-open .view-control { right: 14px; }
 }
 .surface-mode .component-layer { pointer-events: none; }
 .surface-mode .scene-surface { pointer-events: none; }
