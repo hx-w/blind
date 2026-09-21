@@ -76,7 +76,7 @@ jobs:
           cargo clippy --locked --all-targets -- -D warnings
           cargo test --locked
       - name: Prepare integration-test executable
-        run: cargo build --locked
+        run: cargo build --locked --features rust-embed/debug-embed
       - name: Verify Client and read-only SFTP
         run: python3 tests/integration_sftp.py target/debug
       - name: Verify read-only OSS sources

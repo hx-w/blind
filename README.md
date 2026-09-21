@@ -515,7 +515,8 @@ cargo test --locked
 
 CI runs verification on Apple Silicon, Intel macOS and Linux x86_64. Each
 platform checks source, browser interactions and binary integrations. Integration
-tests use a debug executable; CI does not compile or package release binaries.
+tests use a debug executable with embedded viewer assets; CI does not compile or
+package release binaries.
 Successful `main` jobs cache Rust verification dependencies per runner.
 Superseded PR checks are cancelled; main runs finish populating caches.
 
