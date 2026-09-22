@@ -16,10 +16,12 @@ const LOAD_CONCURRENCY = 4;
 const RAW_FALLBACK_BYTES = 32 * 1024 * 1024;
 const RAW_FALLBACK_SCENE_BYTES = 64 * 1024 * 1024;
 
-// The library class carries a target at runtime that its typings omit.
+// Arcball's public target is stale after pan/cursor zoom. The pinned Three.js
+// version exposes its live rotation pivot only through the internal gizmo.
 declare module 'three/addons/controls/ArcballControls.js' {
   interface ArcballControls {
     target: THREE.Vector3;
+    readonly _gizmos: THREE.Group;
   }
 }
 
@@ -418,15 +420,14 @@ export class MeshViewer {
   setProjection(projection: ViewState['projection']): void {
     if (projection === this.state.projection) return;
     this.cancelFit(); this.onViewChangeStart?.();
-    const position = this.camera.position.clone();
-    const target = this.controls.target.clone();
+    const { position, target, up } = this.captureCameraPose();
     if (projection === 'orthographic') {
       const distance = position.distanceTo(target);
-      this.orthographic.position.copy(position); this.orthographic.up.copy(this.camera.up);
+      this.orthographic.position.copy(position); this.orthographic.up.copy(up);
       this.orthographic.zoom = 1; this.orthographic.userData.height = distance * 1.05;
       this.camera = this.orthographic;
     } else {
-      this.perspective.position.copy(position); this.perspective.up.copy(this.camera.up);
+      this.perspective.position.copy(position); this.perspective.up.copy(up);
       this.camera = this.perspective;
     }
     this.state.projection = projection;
@@ -589,12 +590,10 @@ export class MeshViewer {
 
   private captureCameraPose(): { position: THREE.Vector3; target: THREE.Vector3; up: THREE.Vector3 } {
     const position = this.camera.position.clone();
-    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(this.camera.quaternion).normalize();
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion).normalize();
-    const center = this.visibleBounds.getCenter(new THREE.Vector3());
-    const centerDepth = center.sub(position).dot(forward);
-    const fallbackDepth = Math.max(position.distanceTo(this.controls.target), 0.001);
-    const target = position.clone().addScaledVector(forward, centerDepth > 0.001 ? centerDepth : fallbackDepth);
+    // Reconstructing this from scene depth preserves the image but changes the
+    // orbit center. Keep the actual pivot for safety corrections and saved views.
+    const target = this.controls._gizmos.position.clone();
     return { position, target, up };
   }
 

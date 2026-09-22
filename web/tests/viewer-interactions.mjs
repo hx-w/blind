@@ -1242,3 +1242,50 @@ test('orthographic rotation stays continuous at the clipping safety boundary', a
   assert.ok(angles[0]>.01,'drag must actually rotate the camera');
   assert.ok(Math.abs(angles[1]/angles[0]-1)<.01,`clipping changed a continuous drag: ${angles}`);
 });
+
+test('double-click keeps the mesh pivot through rotation, pan and share reopening', async () => {
+  const close=(actual,expected,message)=>actual.forEach((v,i)=>assert.ok(Math.abs(v-expected[i])<1e-5,`${message}: ${actual} vs ${expected}`));
+  const unit=v=>{const n=Math.hypot(...v);return v.map(x=>x/n);};
+  const dot=(a,b)=>a.reduce((sum,v,i)=>sum+v*b[i],0);
+  for(const projection of ['orthographic','perspective']) for(const z of [100,-100]) {
+    const data={...structuredClone(scene),label_groups:[],
+      meshes:[{...scene.meshes[0],label:null},{...scene.meshes[1],translation:[20,0,z]}],
+      state:{...scene.state,projection,strokes:[],camera:{position:[0,0,200],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}}};
+    const meshes=[planePly(2),planePly(2)];
+    const page=await openPage({width:800,height:800},0,data,meshes);
+    try {
+      await page.mouse.dblclick(400,400,{delay:80});await page.waitForTimeout(350);
+      const fitted=(await captureShare(page)).state.camera;
+      assert.ok(projection==='orthographic' ? fitted.orthographic_height<8 : fitted.position[2]<200,'double-click must actually fit the mesh');
+      await page.mouse.move(400,400);await page.mouse.down();
+      await page.mouse.move(440,420,{steps:20});await page.mouse.up();
+      const rotated=(await captureShare(page)).state.camera;
+      const forward=unit(rotated.target.map((v,i)=>v-rotated.position[i]));
+      const up=unit(rotated.up);
+      const right=unit([forward[1]*up[2]-forward[2]*up[1],forward[2]*up[0]-forward[0]*up[2],forward[0]*up[1]-forward[1]*up[0]]);
+      const toCenter=rotated.position.map(v=>-v);
+      assert.ok(Math.abs(forward[0])>.01,'drag must actually rotate');
+      close([dot(toCenter,right),dot(toCenter,up)],[0,0],`${projection}/${z}: mesh center must stay at screen center after rotation`);
+      close(fitted.target,[0,0,0],'share must retain the fitted pivot');
+      close(rotated.target,[0,0,0],'rotation must retain the fitted pivot');
+
+      await page.mouse.move(400,400);await page.mouse.down({button:'right'});
+      await page.mouse.move(430,420,{steps:10});await page.mouse.up({button:'right'});
+      const panned=(await captureShare(page)).state.camera;
+      assert.ok(Math.hypot(...panned.target)>.01,'pan must move the live pivot');
+      await page.mouse.move(400,400);await page.mouse.down();
+      await page.mouse.move(440,400,{steps:20});await page.mouse.up();
+      const snapshot=await captureShare(page);
+      close(snapshot.state.camera.target,panned.target,'next rotation must preserve the panned pivot');
+      await page.locator('.panel-trigger').click();
+      await page.locator(`[data-projection="${projection==='orthographic' ? 'perspective' : 'orthographic'}"]`).click();
+      await page.locator('#close-panel').click();
+      const switched=(await captureShare(page)).state.camera;
+      close(switched.target,panned.target,'projection switch must preserve the panned pivot');
+      close(switched.up,snapshot.state.camera.up,'projection switch must preserve roll');
+      const reopened=await openPage({width:800,height:800},0,{...data,state:snapshot.state},meshes);
+      try {close((await captureShare(reopened)).state.camera.target,panned.target,'reopening must preserve the live pivot');}
+      finally {await reopened.close();}
+    } finally {await page.close();}
+  }
+});
