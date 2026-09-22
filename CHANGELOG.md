@@ -3,6 +3,14 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.5] - 2026-09-22
+
+### Fixed
+
+- Keep the orbit pivot on the fitted mesh after double-clicking to isolate an
+  element, so rotation, panning, projection switches and reopening shared
+  scenes stay centered on it.
+
 ## [0.15.4] - 2026-09-21
 
 ### Fixed
