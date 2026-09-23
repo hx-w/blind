@@ -204,6 +204,8 @@ export class SurfaceEditor {
   async enter(id?: string): Promise<void> {
     this.callbacks.closePanel(); this.active = true;
     if(id) this.selectMark(id);
+    if (!document.documentElement.classList.contains('embedded-scene'))
+      this.el('.surface-actions').append(this.el('#share-view'));
     this.panel.hidden = false; this.shell.classList.add('surface-mode');
     this.el('#gesture-hint').classList.add('dismissed'); this.sync();
   }
@@ -220,6 +222,8 @@ export class SurfaceEditor {
   }
   exit(): void {
     this.markup.finishActive(); this.pending=undefined; this.cancelGesture(); this.finishLine(); this.active = false; this.selected = undefined; this.selectedScreen=undefined;
+    if (this.panel.contains(this.el('#share-view')))
+      this.el('.review-dock').append(this.el('#share-view'));
     this.panel.hidden = true; this.input.hidden = true; this.shell.classList.remove('surface-mode');
     this.viewer.setInteractionEnabled(true); this.sync();
   }
@@ -543,7 +547,7 @@ export class SurfaceEditor {
     for(const [key,view] of this.badgeElements)if(!retained.has(key)){view.button.remove();view.line.remove();this.badgeElements.delete(key);}
   }
   private sync(refresh = true): void {
-    this.panel.querySelectorAll<HTMLButtonElement>('button').forEach(button=>button.disabled=this.busy);
+    this.panel.querySelectorAll<HTMLButtonElement>('button:not(#share-view)').forEach(button=>button.disabled=this.busy);
     this.el<HTMLInputElement>('#surface-name').disabled=this.busy;
     this.list.inert=this.busy;
     const share=this.el<HTMLButtonElement>('#share-view');if(!share.classList.contains('working'))share.disabled=this.busy;

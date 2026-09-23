@@ -344,6 +344,7 @@ for (const viewport of [{width:1280,height:800},{width:390,height:844},{width:32
         const events = await eventsDuring(page, () => page.locator(selector).click());
         assert.equal(events.filter(e=>e.type==='resize').length, 0, `${selector} cleared a scene canvas`);
       }
+      assert.equal(await page.locator('.review-dock #share-view').count(), 1, 'sharing returns to the regular toolbar after editing');
       if (process.env.BLIND_TEST_SCREENSHOTS) {
         await page.locator('.panel-trigger').click();
         await page.locator('#opacity-range').scrollIntoViewIfNeeded();
@@ -609,6 +610,7 @@ test('surface points and paths survive touch editing, navigation and share reope
   try {
     await page.locator('#brush-tool').click();
     await page.locator('#surface-input').waitFor({state:'visible'});
+    assert.equal(await page.locator('#surface-toolbar #share-view').count(), 1, 'sharing stays in the annotation toolbar while editing');
     const touch = await page.context().newCDPSession(page);
     const tap = async (x,y) => {
       await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x,y}]});

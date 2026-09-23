@@ -179,6 +179,8 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .surface-actions { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
 .surface-action-spacer { flex: 1; }
 #surface-toolbar .surface-actions > button { display: flex; align-items: center; justify-content: center; gap: 6px; }
+#surface-toolbar .surface-actions > #share-view { min-width: 42px; flex: 0 0 42px; padding: 0; color: var(--accent); }
+#surface-toolbar .surface-actions > #share-view > span { display: none; }
 .surface-colors { display: flex; gap: 2px; }
 #surface-toolbar .surface-colors button { width: 42px; padding: 0; display: grid; place-items: center; }
 .surface-colors i { display: block; width: 17px; height: 17px; border-radius: 50%; background: var(--ink); }
@@ -225,7 +227,13 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
   #surface-toolbar button:not(:disabled):hover, .surface-list button:hover { background: var(--surface-2); color: var(--text); }
 }
 
-@media (max-width:359px) { #surface-toolbar { max-width: calc(100vw - 16px); padding: 8px; } #surface-toolbar .surface-actions > button { padding: 0 7px; } }
+@media (max-width:359px) {
+  #surface-toolbar { max-width: calc(100vw - 16px); padding: 8px; }
+  .surface-actions { gap: 2px; }
+  #surface-toolbar .surface-colors button { width: 36px; }
+  #surface-toolbar .surface-actions > button { min-width: 40px; width: 40px; padding: 0; }
+  #surface-toolbar .surface-actions > #share-view { flex-basis: 40px; }
+}
 
 @media (min-width:760px) {
   .panel-open .scene-panels { right: 354px; }
