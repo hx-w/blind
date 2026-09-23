@@ -37,12 +37,15 @@ with tempfile.TemporaryDirectory(prefix='blind-plugin-test-') as tmp:
  (package/'blind-plugin.json').write_text(json.dumps(manifest))
  (package/'resolver.py').write_text('''import json,sys
 r=json.loads(sys.stdin.readline());p=r['params'];assert p['config']['token']=='PRIVATE';assert p['protocol_version']==1
-uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing','grouped','collision']
+uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing','grouped','collision','many']
 result={'schema_version':1,'requires':['layout.panels','attachments'],'title':'Plugin scene','resources':[{'id':'a','uri':'oss://test/bucket/a.ply','label':'First'},{'id':'b','uri':'oss://test/bucket/b.ply','label':'Second'}],'panels':[{'id':'one','label':'One','members':['a']},{'id':'two','label':'Two','members':['a','b']}],'attachments':[{'id':'zip','uri':'oss://test/bucket/log.zip','label':'Log'}],'new_optional_field':'ignored'}
 if uri=='grouped':
  result['requires'].append('layout.panel-groups');result['panels']=[{'id':'m1','label':'16','group':'Stage one','members':['a','b']},{'id':'m2','label':'46','group':'Stage one','members':['a','b']},{'id':'c1','label':'16','group':'Stage two','members':['a','b']}]
 if uri=='collision':
  result['requires'].append('components.v1');result['components']=[{'id':'mesh-0','uri':'oss://test/bucket/log.zip','component':'text','label':'Collision log'}]
+if uri=='many':
+ result['resources'] += [{'id':f'r{i}','uri':'oss://test/bucket/a.ply'} for i in range(255)]
+ result['panels']=[]
 if uri=='bad':result['resources'][0]['uri']='oss://other/bucket/a.ply'
 if uri=='future':result['requires'].append('future.required')
 if uri=='partial':result['resources'][1]['uri']='oss://test/bucket/missing.ply'
@@ -78,6 +81,15 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   for uri in ['absent://x','demo://bad','demo://future']:
    cli('share',uri,environment=remote,ok=False)
   shared=json.loads(cli('share','demo://https://example.test/a?x=1','--format','json',environment=remote).stdout)
+  collection={'kind':'collection','schema_version':1,'title':'Plugin comparison','scenes':[
+   {'id':'first','title':'First','uri':'demo://grouped'},
+   {'id':'second','title':'Second','uri':'demo://collision'}]}
+  combined=json.loads(cli('share','--config','-','--format','json',input=json.dumps(collection),environment=remote).stdout)
+  combined_code=combined['viewer_url'].rsplit('/',1)[1]
+  assert len(json.loads(http(origin+'/api/v1/scenes/'+combined_code)[1])['scenes'])==2
+  collection['scenes'][0]['uri']='demo://many'
+  many_error=cli('share','--config','-',input=json.dumps(collection),environment=remote,ok=False).stderr
+  assert 'exceeds 256 resources' in many_error,many_error.replace('PRIVATE','[redacted]')
   code=shared['viewer_url'].rsplit('/',1)[1]
   scene=json.loads(http(origin+'/api/v1/scenes/'+code)[1])
   assert len(scene['meshes'])==3 and scene['meshes'][0]['translation']!=scene['meshes'][1]['translation']

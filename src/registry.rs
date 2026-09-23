@@ -547,6 +547,11 @@ impl Registry {
     fn fingerprint(&self, scene: &SceneDescriptor) -> Result<Vec<u8>> {
         let mut canonical = scene.clone();
         canonical.created_at = 0;
+        if let Some(collection) = &mut canonical.collection {
+            for entry in &mut collection.scenes {
+                entry.scene.created_at = 0;
+            }
+        }
         // Explicit default TTL and legacy short scenes have identical lifetimes.
         if canonical.ttl_days == Some(crate::scene::DEFAULT_TTL_DAYS) {
             canonical.ttl_days = None;
@@ -569,6 +574,34 @@ pub fn is_key_mismatch(error: &anyhow::Error) -> bool {
 }
 
 async fn scene_sources_are_valid(
+    scene: &SceneDescriptor,
+    cache: &mut SourceCache,
+    sources: &crate::source::Sources,
+) -> Result<bool, crate::source::SourceError> {
+    if let Some(collection) = &scene.collection {
+        let mut valid = false;
+        let mut unavailable = None;
+        for child in
+            std::iter::once(scene).chain(collection.scenes.iter().map(|entry| &entry.scene))
+        {
+            match single_scene_sources_are_valid(child, cache, sources).await {
+                Ok(true) => valid = true,
+                Ok(false) | Err(crate::source::SourceError::Gone) => {}
+                Err(error) => unavailable = Some(error),
+            }
+        }
+        return if valid {
+            Ok(true)
+        } else if let Some(error) = unavailable {
+            Err(error)
+        } else {
+            Ok(false)
+        };
+    }
+    single_scene_sources_are_valid(scene, cache, sources).await
+}
+
+async fn single_scene_sources_are_valid(
     scene: &SceneDescriptor,
     cache: &mut SourceCache,
     sources: &crate::source::Sources,

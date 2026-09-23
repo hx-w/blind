@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -47,13 +48,13 @@ enum ClientCommand {
     /// Share files as scene components through the registered Blind server.
     #[command(
         long_about = "Share files with automatic display selection. PLY/STL/OBJ → mesh, PTS → points, logs/text → text, ordinary JSON → json, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
-        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, json, html, image or plugin:name. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
+        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n  blind share --config collection.json --format json\n  generate_collection | blind share --config - --format json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n  {\"kind\":\"collection\",\"schema_version\":1,\"title\":\"Case review\",\"active_scene_id\":\"design\",\"scenes\":[{\"id\":\"design\",\"title\":\"Design\",\"resources\":[{\"path\":\"crown.ply\"}]},{\"id\":\"scan\",\"title\":\"Scan\",\"resources\":[{\"path\":\"scan.ply\"}]}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config, or cwd for --config -, or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, json, html, image or plugin:name. Collection children accept resources/groups or one plugin uri. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply, except --stateless for collections."
     )]
     Share {
         /// File paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
         #[arg(required_unless_present = "config", conflicts_with = "config")]
         meshes: Vec<PathBuf>,
-        /// JSON manifest for a large resource set; relative paths use its directory.
+        /// JSON scene or collection manifest; use - for stdin (paths relative to cwd).
         #[arg(
             long,
             value_name = "FILE",
@@ -557,6 +558,27 @@ struct ShareConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CollectionConfig {
+    kind: String,
+    schema_version: u32,
+    title: String,
+    active_scene_id: Option<String>,
+    scenes: Vec<CollectionSceneConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CollectionSceneConfig {
+    id: String,
+    title: String,
+    resources: Option<Vec<ShareResource>>,
+    #[serde(default)]
+    groups: Vec<ShareGroup>,
+    uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ShareResource {
     #[serde(default)]
     member: Option<String>,
@@ -587,19 +609,130 @@ struct ShareInput {
     meshes: Vec<PathBuf>,
     title: Option<String>,
     labels: ParsedLabels,
+    collection: Option<CollectionInput>,
+}
+
+struct CollectionInput {
+    title: String,
+    active_scene_id: String,
+    scenes: Vec<CollectionSceneInput>,
+}
+
+struct CollectionSceneInput {
+    id: String,
+    input: ShareInput,
 }
 
 fn read_share_config(path: &Path) -> Result<ShareInput> {
-    let config_path = fs::canonicalize(path)
-        .with_context(|| format!("cannot resolve share config {}", path.display()))?;
-    let metadata = fs::metadata(&config_path)?;
-    if !metadata.is_file() {
-        bail!("share config {} is not a file", path.display());
-    }
-    if metadata.len() > MAX_SHARE_CONFIG_BYTES {
+    let (bytes, base) = if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(MAX_SHARE_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        (bytes, std::env::current_dir()?)
+    } else {
+        let config_path = fs::canonicalize(path)
+            .with_context(|| format!("cannot resolve share config {}", path.display()))?;
+        let metadata = fs::metadata(&config_path)?;
+        if !metadata.is_file() {
+            bail!("share config {} is not a file", path.display());
+        }
+        if metadata.len() > MAX_SHARE_CONFIG_BYTES {
+            bail!("share config exceeds 4 MiB");
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&config_path)?
+            .take(MAX_SHARE_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        (
+            bytes,
+            config_path
+                .parent()
+                .context("share config has no parent")?
+                .to_owned(),
+        )
+    };
+    if bytes.len() as u64 > MAX_SHARE_CONFIG_BYTES {
         bail!("share config exceeds 4 MiB");
     }
-    let value: Value = serde_json::from_slice(&fs::read(&config_path)?)?;
+    let value: Value = serde_json::from_slice(&bytes)?;
+    if value.get("kind").and_then(Value::as_str) == Some("collection") {
+        let config: CollectionConfig = serde_json::from_value(value)?;
+        anyhow::ensure!(
+            config.kind == "collection" && config.schema_version == 1,
+            "unsupported collection schema"
+        );
+        anyhow::ensure!(
+            (2..=16).contains(&config.scenes.len()),
+            "collection requires 2 to 16 scenes"
+        );
+        validate_collection_name(&config.title)?;
+        let mut ids = std::collections::HashSet::new();
+        let mut scenes = Vec::new();
+        let mut total = 0;
+        for (index, part) in config.scenes.into_iter().enumerate() {
+            anyhow::ensure!(
+                valid_scene_id(&part.id) && ids.insert(part.id.clone()),
+                "scenes[{}].id is invalid or duplicated",
+                index + 1
+            );
+            validate_collection_name(&part.title)
+                .with_context(|| format!("scenes[{}].title", index + 1))?;
+            let input = match (part.resources, part.uri) {
+                (Some(resources), None) => parse_share_config(
+                    ShareConfig {
+                        title: Some(part.title),
+                        resources,
+                        groups: part.groups,
+                    },
+                    &base,
+                ),
+                (None, Some(uri)) if part.groups.is_empty() && crate::plugin::is_plugin(&uri) => {
+                    Ok(ShareInput {
+                        display: Vec::new(),
+                        manifest: None,
+                        meshes: vec![PathBuf::from(uri)],
+                        title: Some(part.title),
+                        labels: ParsedLabels {
+                            meshes: Vec::new(),
+                            groups: Vec::new(),
+                        },
+                        collection: None,
+                    })
+                }
+                _ => bail!(
+                    "scenes[{}] requires either resources or one plugin uri",
+                    index + 1
+                ),
+            }
+            .with_context(|| format!("invalid scenes[{}]", index + 1))?;
+            total += input.meshes.len();
+            scenes.push(CollectionSceneInput { id: part.id, input });
+        }
+        anyhow::ensure!(total <= 256, "collection exceeds 256 resources");
+        let active_scene_id = config
+            .active_scene_id
+            .unwrap_or_else(|| scenes[0].id.clone());
+        anyhow::ensure!(
+            ids.contains(&active_scene_id),
+            "active_scene_id does not name a scene"
+        );
+        return Ok(ShareInput {
+            display: Vec::new(),
+            manifest: None,
+            meshes: Vec::new(),
+            title: None,
+            labels: ParsedLabels {
+                meshes: Vec::new(),
+                groups: Vec::new(),
+            },
+            collection: Some(CollectionInput {
+                title: config.title,
+                active_scene_id,
+                scenes,
+            }),
+        });
+    }
     if value.get("schema_version").is_some() {
         let mut manifest: crate::plugin::ShareManifest = serde_json::from_value(value)?;
         manifest.validate()?;
@@ -613,7 +746,7 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
                 resource.uri = fs::canonicalize(if path.is_absolute() {
                     path.to_owned()
                 } else {
-                    config_path.parent().unwrap().join(path)
+                    base.join(path)
                 })?
                 .to_string_lossy()
                 .into_owned();
@@ -635,14 +768,34 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
                 groups: Vec::new(),
             },
             manifest: Some(manifest),
+            collection: None,
         });
     }
-    let config: ShareConfig = serde_json::from_slice(&fs::read(&config_path)?)
+    let config: ShareConfig = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid share config {}", path.display()))?;
+    parse_share_config(config, &base)
+}
+
+fn valid_scene_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_')
+}
+
+fn validate_collection_name(name: &str) -> Result<()> {
+    anyhow::ensure!(
+        !name.trim().is_empty() && name.chars().count() <= 120,
+        "title must contain 1 to 120 characters"
+    );
+    Ok(())
+}
+
+fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
     if config.resources.is_empty() {
         bail!("share config resources must contain at least one item");
     }
-    let base = config_path.parent().context("share config has no parent")?;
     let mut meshes = Vec::with_capacity(config.resources.len());
     let mut display = Vec::with_capacity(config.resources.len());
     let mut mesh_labels = Vec::with_capacity(config.resources.len());
@@ -730,6 +883,7 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
             meshes: mesh_labels,
             groups,
         },
+        collection: None,
     })
 }
 
@@ -759,9 +913,35 @@ async fn share(
                 meshes,
                 title,
                 labels,
+                collection: None,
             }
         }
     };
+    if let Some(collection) = input.collection {
+        anyhow::ensure!(
+            !stateless,
+            "collection shares require a short link; omit --stateless"
+        );
+        if load()?.is_none() {
+            join(false, true, false, None, None, None).await?;
+        }
+        let c = load()?.context("not registered")?;
+        let mut scenes = Vec::new();
+        for part in collection.scenes {
+            let paths = part
+                .input
+                .meshes
+                .iter()
+                .map(share_path)
+                .collect::<Result<Vec<_>>>()?;
+            scenes.push(json!({"id":part.id,"title":part.input.title,"paths":paths,"display":part.input.display,"labels":part.input.labels.meshes,"label_groups":part.input.labels.groups}));
+        }
+        let payload = api(&c.server, "/api/v1/client/scenes", &c.credential, Some(json!({
+            "collection":{"title":collection.title,"active_scene_id":collection.active_scene_id,"scenes":scenes},
+            "origin":host,"ttl_days":ttl_days
+        }))).await?;
+        return print_share_payload(payload, format, ttl_days, false);
+    }
     if input
         .meshes
         .iter()
@@ -785,19 +965,7 @@ async fn share(
     let paths = input
         .meshes
         .iter()
-        .map(|p| {
-            if crate::plugin::is_plugin(&p.to_string_lossy()) {
-                return Ok(p.to_string_lossy().into_owned());
-            }
-            if crate::oss::is_oss(&p.to_string_lossy()) {
-                let address = p.to_string_lossy().into_owned();
-                crate::oss::Location::parse(&address)?;
-                return Ok(address);
-            }
-            fs::canonicalize(p)
-                .with_context(|| format!("cannot resolve {}", p.display()))
-                .map(|p| p.to_string_lossy().into_owned())
-        })
+        .map(share_path)
         .collect::<Result<Vec<_>>>()?;
     if config_mode {
         eprintln!(
@@ -806,6 +974,29 @@ async fn share(
         );
     }
     let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"display":input.display,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless,"ttl_days":ttl_days}))).await?;
+    print_share_payload(payload, format, ttl_days, stateless)
+}
+
+fn share_path(p: &PathBuf) -> Result<String> {
+    if crate::plugin::is_plugin(&p.to_string_lossy()) {
+        return Ok(p.to_string_lossy().into_owned());
+    }
+    if crate::oss::is_oss(&p.to_string_lossy()) {
+        let address = p.to_string_lossy().into_owned();
+        crate::oss::Location::parse(&address)?;
+        return Ok(address);
+    }
+    fs::canonicalize(p)
+        .with_context(|| format!("cannot resolve {}", p.display()))
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+fn print_share_payload(
+    payload: Value,
+    format: OutputFormat,
+    ttl_days: u32,
+    stateless: bool,
+) -> Result<()> {
     let confirmed_ttl = payload["ttl_days"].as_u64();
     if confirmed_ttl.is_some_and(|days| days != u64::from(ttl_days))
         || (confirmed_ttl.is_none() && (ttl_days != crate::scene::DEFAULT_TTL_DAYS || stateless))

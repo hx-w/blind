@@ -201,6 +201,6 @@ export const pluginContent: ContentFactory = (url, label, spec) => {
       iframe.contentWindow?.postMessage({type: 'blind:init', version: 1, label, state:spec.state, buffer: buffer.slice(0), presentation: mode, exporting: new URLSearchParams(location.search).has('render')}, '*', [channel.port2]);
     } catch (error) { fail(error instanceof Error ? error : new Error('组件加载失败')); }
   };
-  iframe.src = url.replace(/attachments\/\d+$/, `renderers/${encodeURIComponent(spec.id)}`); element.append(iframe);
+  iframe.src = url.replace(/attachments\/\d+(?=\?|$)/, `renderers/${encodeURIComponent(spec.id)}`); element.append(iframe);
   return {element, ready, present(presentation) {mode = presentation; if (mode === 'spatial') closeExternal(); port?.postMessage({type:'presentation',version:1,presentation});}, dispose() {disposed = true; closeExternal(); window.removeEventListener('message',externalMessage); abort.abort(); clearTimeout(timeout); port?.close(); iframe.src = 'about:blank';}};
 };

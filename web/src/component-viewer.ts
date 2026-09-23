@@ -95,7 +95,7 @@ export class ComponentViewer {
     viewer.componentUpdates = () => scene.components?.length ? this.entries.map(e => componentUpdate(e.spec)) : undefined;
     this.refreshBounds();
     if (!scene.state.camera && scene.components?.length) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
-    if (this.entries[0]) this.select(this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec ?? this.entries[0].spec, false);
+    if (this.entries[0]) this.select(this.entries.find(e => e.spec.id === viewer.focusedComponentId)?.spec ?? this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec ?? this.entries[0].spec, false);
     this.render();
   }
   async ready(): Promise<void> { await Promise.all(this.entries.filter(e => effectiveVisibility(e.spec)).map(e => e.runtime.ready)); this.render(); }
@@ -124,6 +124,9 @@ export class ComponentViewer {
   };
   private layout(): void {
     // Explicit positions are absolute world coordinates. Only unpositioned components are tiled.
+    for (const entry of this.entries) {
+      if (entry.spec.position) entry.runtime.setPosition(entry.spec.position);
+    }
     const originals = new Map(sceneComponents(this.scene).map(c => [c.id, c]));
     const groups = [...componentGroups(this.entries.map(e => e.spec)).entries()];
     const plans = groups.map(([label, specs]) => {
@@ -165,6 +168,7 @@ export class ComponentViewer {
   select(spec: SceneComponent, notify = true): void {
     const entry = this.entries.find(e => e.spec === spec); if (!entry) return;
     this.selected = entry;
+    this.viewer.setFocusedComponent(spec.id);
     if (notify) { entry.runtime.select(); this.onSelect?.(spec); }
     for (const e of this.entries) { const selected = e === entry; this.rows.get(e.spec.id)?.button.setAttribute('aria-pressed', String(selected)); e.runtime.element?.classList.toggle('selected', selected); }
   }

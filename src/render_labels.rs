@@ -65,6 +65,62 @@ fn text_width(text: &str, size: f32) -> f32 {
         .sum()
 }
 
+pub(crate) fn draw_text_line(
+    image: &mut RgbaImage,
+    text: &str,
+    x: u32,
+    y: u32,
+    max_width: u32,
+    size: f32,
+    color: [u8; 3],
+) {
+    let mut visible = String::new();
+    let ellipsis_width = text_width("…", size);
+    let mut used = 0.0;
+    for c in text.chars() {
+        let advance = FONT.metrics(c, size).advance_width;
+        if used + advance > max_width as f32 {
+            while used + ellipsis_width > max_width as f32 {
+                let Some(last) = visible.pop() else { break };
+                used -= FONT.metrics(last, size).advance_width;
+            }
+            visible.push('…');
+            break;
+        }
+        visible.push(c);
+        used += advance;
+    }
+    let ascent = FONT
+        .horizontal_line_metrics(size)
+        .map(|metrics| metrics.ascent)
+        .unwrap_or(size);
+    let baseline = y as f32 + ascent;
+    let mut pen = x as f32;
+    for c in visible.chars() {
+        let (metrics, bitmap) = FONT.rasterize(c, size);
+        let left = pen.floor() as i32 + metrics.xmin;
+        let top = baseline.floor() as i32 - metrics.ymin - metrics.height as i32;
+        for row in 0..metrics.height {
+            for col in 0..metrics.width {
+                let px = left + col as i32;
+                let py = top + row as i32;
+                if px < 0 || py < 0 || px >= image.width() as i32 || py >= image.height() as i32 {
+                    continue;
+                }
+                let alpha = bitmap[row * metrics.width + col] as u32;
+                let pixel = image.get_pixel_mut(px as u32, py as u32);
+                for channel in 0..3 {
+                    pixel[channel] = ((color[channel] as u32 * alpha
+                        + pixel[channel] as u32 * (255 - alpha)
+                        + 127)
+                        / 255) as u8;
+                }
+            }
+        }
+        pen += metrics.advance_width;
+    }
+}
+
 fn place(anchor: [f32; 2], size: [f32; 2], viewport: [f32; 2], occupied: &[Rect]) -> Rect {
     let [x, y] = anchor;
     let [w, h] = size;

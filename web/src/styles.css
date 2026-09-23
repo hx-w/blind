@@ -67,6 +67,9 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .icon-button svg, .close-panel svg, .share-heading button svg { width: 19px; height: 19px; }
 .share-button { background: var(--accent); color: var(--accent-ink); }
 .share-button.working svg { opacity: 0.55; }
+.embedded-scene .review-dock, .embedded-scene .share-button, .embedded-scene .gesture-hint { display: none !important; }
+.embedded-scene:not(.embedded-active) .topbar, .embedded-scene:not(.embedded-active) .scene-panels { display: none !important; }
+.embedded-scene .topbar { top: 8px; right: 8px; left: auto; padding: 0; min-height: 42px; }
 
 .viewer { position: absolute; z-index: 1; inset: 0; overflow: hidden; background: var(--canvas); }
 .canvas-root, .canvas-root canvas { position: absolute; inset: 0; width: 100%; height: 100%; }.canvas-root { contain: strict; }

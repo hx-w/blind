@@ -20,6 +20,8 @@ pub mod update;
 
 mod render_labels;
 
+mod collection_image;
+
 mod render_occlusion;
 
 mod render_viewer;

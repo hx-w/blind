@@ -102,6 +102,54 @@ For large resource sets, `blind share --config FILE` reads this strict schema:
 encrypted descriptor, its `members` are 1-based to match CLI indices. Relative
 paths resolve from the config file directory. Unknown fields are errors.
 
+## Scene collections
+
+A collection shares 2 to 16 independent scenes under one short link. Each
+scene has its own components, focused component, camera, rendering, visibility,
+and annotations. The viewer splits only when every scene has at least a
+480 × 360 px viewport; otherwise it shows tabs. The single bottom toolbar
+controls the focused scene and shares the entire collection. The top-right
+viewer-wide fullscreen control is removed.
+
+```json
+{
+  "kind": "collection",
+  "schema_version": 1,
+  "title": "Case review",
+  "active_scene_id": "design",
+  "scenes": [
+    {"id": "design", "title": "Design", "resources": [{"path": "crown.ply"}]},
+    {"id": "scan", "title": "Scan", "resources": [{"path": "scan.ply"}]}
+  ]
+}
+```
+
+Each child has either `resources` (with optional `groups`, using the single
+scene schema above) or one plugin `uri`. IDs are unique lowercase letters,
+digits, `_`, or `-` (up to 64 characters). Collection and child titles are
+1 to 120 characters. At most 256 resources are allowed in total.
+`active_scene_id` is optional and defaults to the first child. Relative paths
+use the config file's directory, or the working directory with `--config -`.
+Unknown fields fail validation. `--stateless` is unavailable for collections.
+
+```sh
+blind share --config collection.json --format json
+cat collection.json | blind share --config - --format json
+```
+
+The JSON output has `viewer_url`, `image_url`, `owner_url`, `active_scene_id`,
+and a `scenes` array with each child's `id`, `viewer_url`, `image_url`,
+resources, and warnings. `GET /api/v1/scenes/<token>` returns the collection
+overview; `?scene=<id>` returns one child in the existing scene format.
+`GET /i/<token>.png?scene=<id>` exports that child. Without `scene`, the image
+route renders every child into a labeled grid, including scenes hidden behind
+tabs in the interactive viewer. The active scene has a blue header rule.
+
+Sharing from the collection viewer posts `active_scene_id` and an `updates`
+object keyed by scene ID to `POST /api/v1/scenes/<token>/share`. Omitted child
+updates keep their prior state. The result is a new immutable collection link;
+the old link stays unchanged.
+
 ## Lifecycle
 
 1. The registered Client submits file paths. The Server canonicalizes and hashes the source through read-only SFTP, or the local filesystem for a same-user local registration.

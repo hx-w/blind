@@ -108,6 +108,8 @@ pub struct ShareResponse {
 #[derive(Debug, Deserialize)]
 struct CreateSceneRequest {
     #[serde(default)]
+    collection: Option<CreateCollectionRequest>,
+    #[serde(default)]
     display: Vec<crate::component::DisplayOptions>,
     #[serde(default = "crate::scene::default_ttl_days")]
     ttl_days: u32,
@@ -125,10 +127,29 @@ struct CreateSceneRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateCollectionRequest {
+    title: String,
+    active_scene_id: String,
+    scenes: Vec<CreateCollectionPart>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateCollectionPart {
+    id: String,
+    title: String,
+    paths: Vec<String>,
+    #[serde(default)]
+    display: Vec<crate::component::DisplayOptions>,
+    #[serde(default)]
+    labels: Vec<Option<crate::scene::MeshLabel>>,
+    #[serde(default)]
+    label_groups: Vec<crate::scene::MeshLabelGroup>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ReshareRequest {
     #[serde(flatten)]
     update: SceneUpdate,
-    origin: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -630,7 +651,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        scene_schema: 5,
+        scene_schema: 6,
         image_renderer: state.renderer.is_some(),
     })
 }
@@ -726,6 +747,11 @@ async fn create_scene(
     headers: HeaderMap,
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    if request.collection.is_some() {
+        return Err(AppError::bad_request(
+            "Use the registered Client share endpoint for collections",
+        ));
+    }
     if request.manifest.is_some() {
         return Err(AppError::bad_request(
             "Use the registered Client share endpoint for manifests",
@@ -775,19 +801,47 @@ async fn create_scene(
 }
 
 async fn get_scene(
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
+    let owner = owner_matches(&headers, &state, &opened);
+    if let Some(collection) = &opened.scene.collection {
+        if !query.contains_key("scene") {
+            let mut scenes =
+                vec![serde_json::json!({"id":collection.first_id,"title":opened.scene.title})];
+            scenes.extend(
+                collection
+                    .scenes
+                    .iter()
+                    .map(|entry| serde_json::json!({"id":entry.id,"title":entry.scene.title})),
+            );
+            return Ok((
+                no_store(),
+                Json(serde_json::json!({
+                    "kind":"collection","title":collection.title,"active_scene_id":collection.active_scene_id,
+                    "scenes":scenes,"owner":owner,"ttl_days":opened.scene.link_ttl_days(!is_short_secret(&token))
+                })),
+            ));
+        }
+    }
+    let scene_id = query.get("scene").map(String::as_str);
+    let scene = selected_scene(&opened.scene, scene_id)?.clone();
     source_result(
         &state,
-        &token,
-        state.registry.sources.validate_source(&opened.scene),
+        if opened.scene.collection.is_some() {
+            ""
+        } else {
+            &token
+        },
+        state.registry.sources.validate_source(&scene),
     )?;
-    let owner = owner_matches(&headers, &state, &opened);
-    let scene = opened.scene;
+    let query_suffix = scene_id
+        .map(|id| format!("?scene={id}"))
+        .unwrap_or_default();
     let meshes = scene
         .meshes
         .iter()
@@ -805,14 +859,14 @@ async fn get_scene(
             translation: mesh.translation,
             // Relative to the document base so both root and base-path mounts
             // resolve to the correct API prefix.
-            source_url: format!("api/v1/scenes/{token}/meshes/{index}"),
+            source_url: format!("api/v1/scenes/{token}/meshes/{index}{query_suffix}"),
         })
         .collect();
     Ok((
         no_store(),
-        Json(PublicScene {
+        Json(serde_json::to_value(PublicScene {
             components: scene.component_descriptors(),
-            attachments: scene.attachments.iter().enumerate().map(|(index,a)| serde_json::json!({"id":a.id,"label":a.label,"byte_size":a.byte_size,"unavailable":a.unavailable,"url":if a.revision.is_some(){Some(format!("api/v1/scenes/{token}/attachments/{index}"))}else{None}})).collect(),
+            attachments: scene.attachments.iter().enumerate().map(|(index,a)| serde_json::json!({"id":a.id,"label":a.label,"byte_size":a.byte_size,"unavailable":a.unavailable,"url":if a.revision.is_some(){Some(format!("api/v1/scenes/{token}/attachments/{index}{query_suffix}"))}else{None}})).collect(),
             warnings: scene.warnings.clone(),
             ttl_days: scene.link_ttl_days(!is_short_secret(&token)),
             source: scene.source.clone(),
@@ -821,24 +875,42 @@ async fn get_scene(
             label_groups: scene.label_groups,
             state: scene.state,
             owner,
-        }),
+        }).map_err(anyhow::Error::from)?),
     ))
 }
 
+fn selected_scene<'a>(
+    root: &'a SceneDescriptor,
+    id: Option<&str>,
+) -> Result<&'a SceneDescriptor, AppError> {
+    match &root.collection {
+        Some(collection) => root
+            .scene_by_id(id.unwrap_or(&collection.active_scene_id))
+            .ok_or_else(|| AppError::not_found("Scene not found in collection")),
+        None if id.is_some() => Err(AppError::not_found("Scene not found in collection")),
+        None => Ok(root),
+    }
+}
+
 async fn get_mesh(
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
-    let scene = opened.scene;
+    let scene = selected_scene(&opened.scene, query.get("scene").map(String::as_str))?.clone();
     let mesh = scene
         .meshes
         .get(index)
         .ok_or_else(|| AppError::not_found("Mesh not found"))?;
     let bytes = source_result(
         &state,
-        &token,
+        if opened.scene.collection.is_some() {
+            ""
+        } else {
+            &token
+        },
         state.registry.sources.read_mesh(&scene, mesh, true).await,
     )?
     .bytes;
@@ -859,12 +931,26 @@ async fn get_mesh(
 }
 
 async fn get_mesh_lod(
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
-    lod_response(scene_lod(&state, &token, &opened.scene, index).await?)
+    let scene = selected_scene(&opened.scene, query.get("scene").map(String::as_str))?;
+    lod_response(
+        scene_lod(
+            &state,
+            if opened.scene.collection.is_some() {
+                ""
+            } else {
+                &token
+            },
+            scene,
+            index,
+        )
+        .await?,
+    )
 }
 
 async fn scene_lod(
@@ -956,26 +1042,61 @@ async fn reshare(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
     headers: HeaderMap,
-    Json(request): Json<ReshareRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
-    source_result(
-        &state,
-        &token,
-        state.registry.sources.validate_source(&opened.scene),
-    )?;
+    if opened.scene.collection.is_none() {
+        source_result(
+            &state,
+            &token,
+            state.registry.sources.validate_source(&opened.scene),
+        )?;
+    }
     let owner = owner_matches(&headers, &state, &opened);
     let mut scene = opened.scene;
-    scene.components = scene.component_descriptors();
     if !is_short_secret(&token) && scene.ttl_days.is_none() {
         scene.ttl_days = Some(0);
     }
-    scene
-        .apply_update(request.update)
-        .map_err(|error| AppError::bad_request(&error.to_string()))?;
+    let origin_request = body
+        .get("origin")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    if scene.collection.is_some() {
+        let active = body
+            .get("active_scene_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::bad_request("active_scene_id is required"))?
+            .to_owned();
+        if scene.scene_by_id(&active).is_none() {
+            return Err(AppError::bad_request("unknown active_scene_id"));
+        }
+        let updates = body
+            .get("updates")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| AppError::bad_request("updates must be an object"))?;
+        for (id, value) in updates {
+            let target = scene
+                .scene_by_id_mut(id)
+                .ok_or_else(|| AppError::bad_request("unknown scene update ID"))?;
+            target.components = target.component_descriptors();
+            let update: SceneUpdate = serde_json::from_value(value.clone())
+                .map_err(|e| AppError::unprocessable(&e.to_string()))?;
+            target
+                .apply_update(update)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        }
+        scene.collection.as_mut().unwrap().active_scene_id = active;
+    } else {
+        let request: ReshareRequest =
+            serde_json::from_value(body).map_err(|e| AppError::unprocessable(&e.to_string()))?;
+        scene.components = scene.component_descriptors();
+        scene
+            .apply_update(request.update)
+            .map_err(|error| AppError::bad_request(&error.to_string()))?;
+    }
     let current_origin = request_origin(&headers, &state.config)?;
     let hosts = share_hosts(&state.config, &current_origin)?;
-    let origin = select_share_origin(&state.config, request.origin, &current_origin, &hosts)?;
+    let origin = select_share_origin(&state.config, origin_request, &current_origin, &hosts)?;
     Ok((
         no_store(),
         Json(ShareResponse {
@@ -987,6 +1108,7 @@ async fn reshare(
 }
 
 async fn render_image(
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
@@ -997,11 +1119,57 @@ async fn render_image(
         .map_err(|_| AppError::too_many_requests("Image renderer is busy"))?;
     let token = token.strip_suffix(".png").unwrap_or(&token);
     let opened = open_scene(&state, token, peer.ip())?;
-    let scene = opened.scene;
+    let bytes = if let Some(collection) = &opened.scene.collection {
+        if let Some(id) = query.get("scene") {
+            let scene = selected_scene(&opened.scene, Some(id))?;
+            render_single_image(&state, token, scene, Some(id), true).await?
+        } else {
+            tokio::time::timeout(Duration::from_secs(180), async {
+                let mut images = Vec::with_capacity(collection.scenes.len() + 1);
+                for (id, scene) in std::iter::once((&collection.first_id, &opened.scene)).chain(
+                    collection
+                        .scenes
+                        .iter()
+                        .map(|entry| (&entry.id, &entry.scene)),
+                ) {
+                    let png = render_single_image(&state, token, scene, Some(id), true).await?;
+                    images.push((id.clone(), scene.title.clone(), png));
+                }
+                let active = collection.active_scene_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::collection_image::compose(&images, &active)
+                })
+                .await
+                .map_err(|error| AppError::internal(&error.to_string()))?
+                .map_err(|error| AppError::internal(&error.to_string()))
+            })
+            .await
+            .map_err(|_| AppError::unprocessable("Collection image export timed out"))??
+        }
+    } else {
+        let scene = selected_scene(&opened.scene, query.get("scene").map(String::as_str))?;
+        render_single_image(&state, token, scene, None, false).await?
+    };
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "image/png")
+        .header(header::CACHE_CONTROL, NO_STORE)
+        .header(header::CONTENT_LENGTH, bytes.len())
+        .body(Body::from(bytes))?)
+}
+
+async fn render_single_image(
+    state: &AppState,
+    token: &str,
+    scene: &SceneDescriptor,
+    scene_id: Option<&str>,
+    in_collection: bool,
+) -> Result<Vec<u8>, AppError> {
+    let source_token = if in_collection { "" } else { token };
     source_result(
-        &state,
-        token,
-        state.registry.sources.validate_source(&scene),
+        state,
+        source_token,
+        state.registry.sources.validate_source(scene),
     )?;
     // The Viewer loads geometry and surfaces eagerly, including hidden entries.
     // Bound their aggregate input before starting either renderer. ZIP members
@@ -1033,24 +1201,24 @@ async fn render_image(
     }
     if !scene.components.is_empty() {
         let url = format!(
-            "http://{}{}/s/{}?render=1",
+            "http://{}{}/s/{}?render=1{}",
             control_address(&state.config)?,
             state.config.base_path().unwrap_or_default(),
-            token
+            token,
+            scene_id
+                .map(|id| format!("&scene={id}"))
+                .unwrap_or_default()
         );
         let bytes = crate::render_viewer::render(&url,scene.state.frame.width,scene.state.frame.height).await.map_err(|error| {
             tracing::warn!(%error,"full scene image render failed");
             AppError::unprocessable("Full scene export failed; check component availability and the Server Chromium installation")
         })?;
         source_result(
-            &state,
-            token,
-            state.registry.sources.validate_source(&scene),
+            state,
+            source_token,
+            state.registry.sources.validate_source(scene),
         )?;
-        return Ok(Response::builder()
-            .header(header::CONTENT_TYPE, "image/png")
-            .header(header::CACHE_CONTROL, NO_STORE)
-            .body(Body::from(bytes))?);
+        return Ok(bytes);
     }
     let mut render_scene = scene.clone();
     let mut sources = Vec::with_capacity(scene.meshes.len());
@@ -1064,7 +1232,7 @@ async fn render_image(
                 .iter()
                 .any(|mark| mark.mesh == index)
         {
-            let asset = scene_lod(&state, token, &scene, index).await?;
+            let asset = scene_lod(state, source_token, scene, index).await?;
             render_scene.meshes[index].format = MeshFormat::Ply;
             render_scene.meshes[index].byte_size = asset.bytes.len() as u64;
             sources.push(Some(asset.bytes.to_vec()));
@@ -1073,9 +1241,9 @@ async fn render_image(
         if mesh.visible {
             sources.push(Some(
                 source_result(
-                    &state,
-                    token,
-                    state.registry.sources.read_mesh(&scene, mesh, true).await,
+                    state,
+                    source_token,
+                    state.registry.sources.read_mesh(scene, mesh, true).await,
                 )?
                 .bytes,
             ));
@@ -1096,21 +1264,16 @@ async fn render_image(
         })?;
     for mesh in scene.meshes.iter().filter(|mesh| mesh.visible) {
         source_result(
-            &state,
-            token,
+            state,
+            source_token,
             state
                 .registry
                 .sources
-                .validate_mesh_metadata(&scene, mesh)
+                .validate_mesh_metadata(scene, mesh)
                 .await,
         )?;
     }
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, NO_STORE)
-        .header(header::CONTENT_LENGTH, bytes.len())
-        .body(Body::from(bytes))?)
+    Ok(bytes)
 }
 
 fn serve_index(base_path: Option<String>) -> Result<Response<Body>, AppError> {
@@ -1142,16 +1305,21 @@ async fn view_scene(
     AxumPath(token): AxumPath<String>,
 ) -> Result<Response<Body>, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
-    source_result(
-        &state,
-        &token,
-        state.registry.sources.validate_source(&opened.scene),
-    )?;
+    if opened.scene.collection.is_none() {
+        source_result(
+            &state,
+            &token,
+            state.registry.sources.validate_source(&opened.scene),
+        )?;
+    }
     let mut response = serve_index(state.config.base_path())?;
-    let mut origins: Vec<_> = opened
-        .scene
-        .components
-        .iter()
+    let mut scenes = vec![&opened.scene];
+    if let Some(collection) = &opened.scene.collection {
+        scenes.extend(collection.scenes.iter().map(|entry| &entry.scene));
+    }
+    let mut origins: Vec<_> = scenes
+        .into_iter()
+        .flat_map(|scene| &scene.components)
         .filter_map(|c| c.renderer.as_ref())
         .flat_map(|r| r.frame_origins.iter())
         .cloned()
@@ -1164,8 +1332,13 @@ async fn view_scene(
             return Err(AppError::unprocessable("Invalid renderer frame origin"));
         }
     }
+    let frame_ancestors = if opened.scene.collection.is_some() {
+        "'self'"
+    } else {
+        "'none'"
+    };
     let policy = format!(
-        "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self' {}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+        "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self' {}; object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}",
         origins.join(" ")
     );
     response.headers_mut().insert(
@@ -1432,6 +1605,18 @@ struct OpenedScene {
 }
 
 fn open_scene(state: &AppState, token: &str, peer: IpAddr) -> Result<OpenedScene, AppError> {
+    let opened = open_scene_inner(state, token, peer)?;
+    if opened.scene.collection.is_some() {
+        source_result(
+            state,
+            token,
+            state.registry.sources.validate_source(&opened.scene),
+        )?;
+    }
+    Ok(opened)
+}
+
+fn open_scene_inner(state: &AppState, token: &str, peer: IpAddr) -> Result<OpenedScene, AppError> {
     if is_short_secret(token) {
         return match state.registry.resolve(token) {
             Ok(RegisteredScene {
@@ -1679,7 +1864,9 @@ fn source_result<T>(
 ) -> Result<T, AppError> {
     result.map_err(|error| match error {
         SourceError::Gone => {
-            mark_scene_gone(state, token);
+            if !token.is_empty() {
+                mark_scene_gone(state, token);
+            }
             AppError::gone("Scene source changed, was deleted, or was revoked")
         }
         SourceError::Unavailable(reason) => {
@@ -1947,6 +2134,7 @@ async fn scene_from_sources(
         components,
         attachments,
         warnings: Vec::new(),
+        collection: None,
         label_groups: Vec::new(),
         state: Default::default(),
     })
@@ -1960,7 +2148,11 @@ async fn client_scene(
     let source = client_auth(&state, &headers, false)?;
     let _manifest_permit = if request.manifest.is_some()
         || request.paths.iter().any(|p| crate::plugin::is_plugin(p))
-    {
+        || request.collection.as_ref().is_some_and(|c| {
+            c.scenes
+                .iter()
+                .any(|s| s.paths.iter().any(|p| crate::plugin::is_plugin(p)))
+        }) {
         Some(
             state
                 .plugin_slots
@@ -1973,6 +2165,19 @@ async fn client_scene(
     } else {
         None
     };
+    if let Some(collection) = request.collection {
+        let response = create_collection_scene(
+            &state,
+            &headers,
+            &source,
+            collection,
+            request.origin,
+            request.ttl_days,
+            request.stateless,
+        )
+        .await?;
+        return Ok((no_store(), Json(response)));
+    }
     let mut scene = if let Some(plan) = request.manifest {
         if !request.paths.is_empty()
             || request.labels.as_ref().is_some_and(|ls| !ls.is_empty())
@@ -2094,6 +2299,178 @@ async fn client_scene(
     Ok((no_store(), Json(response)))
 }
 
+async fn create_collection_scene(
+    state: &AppState,
+    headers: &HeaderMap,
+    source: &Source,
+    request: CreateCollectionRequest,
+    requested_origin: Option<String>,
+    ttl_days: u32,
+    stateless: bool,
+) -> Result<serde_json::Value, AppError> {
+    if stateless {
+        return Err(AppError::bad_request(
+            "collection shares require a short link",
+        ));
+    }
+    if !(2..=16).contains(&request.scenes.len())
+        || request.title.trim().is_empty()
+        || request.title.chars().count() > 120
+    {
+        return Err(AppError::bad_request(
+            "collection requires a title and 2 to 16 scenes",
+        ));
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut total = 0;
+    let mut parts = Vec::with_capacity(request.scenes.len());
+    for part in request.scenes {
+        if part.id.is_empty()
+            || part.id.len() > 64
+            || !part
+                .id
+                .bytes()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-' || c == b'_')
+            || !ids.insert(part.id.clone())
+        {
+            return Err(AppError::bad_request(
+                "collection scene IDs must be unique lowercase identifiers",
+            ));
+        }
+        if part.title.trim().is_empty() || part.title.chars().count() > 120 {
+            return Err(AppError::bad_request(
+                "collection scene title must contain 1 to 120 characters",
+            ));
+        }
+        let plugin = part.paths.iter().any(|p| crate::plugin::is_plugin(p));
+        let mut scene = if plugin {
+            if part.paths.len() != 1
+                || !part.display.is_empty()
+                || !part.labels.is_empty()
+                || !part.label_groups.is_empty()
+            {
+                return Err(AppError::bad_request(
+                    "a collection plugin scene requires one URI without overrides",
+                ));
+            }
+            let dir = config_path()?
+                .parent()
+                .context("missing config parent")?
+                .to_owned();
+            let plan = crate::plugin::resolve(&dir, &part.paths[0])
+                .await
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+            total += plan.resources.len() + plan.components.len() + plan.attachments.len();
+            if total > 256 {
+                return Err(AppError::bad_request("collection exceeds 256 resources"));
+            }
+            scene_from_manifest(state, plan, Some(source.scene_source()), Some(part.title)).await?
+        } else {
+            total += part.paths.len();
+            if total > 256 {
+                return Err(AppError::bad_request("collection exceeds 256 resources"));
+            }
+            scene_from_sources(
+                state,
+                &part.paths,
+                &part.display,
+                Some(source.scene_source()),
+                Some(part.title),
+            )
+            .await?
+        };
+        if !part.labels.is_empty() {
+            scene
+                .set_labels(part.labels)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        }
+        if !part.label_groups.is_empty() {
+            scene
+                .set_label_groups(part.label_groups)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        }
+        scene.ttl_days = Some(ttl_days);
+        parts.push(crate::scene::CollectionEntry { id: part.id, scene });
+    }
+    if !ids.contains(&request.active_scene_id) {
+        return Err(AppError::bad_request(
+            "active_scene_id does not name a scene",
+        ));
+    }
+    state
+        .registry
+        .sources
+        .get(&source.id)
+        .map_err(|_| AppError::unauthorized("Client was revoked"))?;
+    let first = parts.remove(0);
+    let mut scene = first.scene;
+    scene.schema = 6;
+    scene.collection = Some(crate::scene::SceneCollection {
+        title: request.title,
+        first_id: first.id,
+        active_scene_id: request.active_scene_id,
+        scenes: parts,
+    });
+    let origin = match requested_origin {
+        Some(origin) => state.config.normalize_share_origin(&origin)?,
+        None => {
+            if let Some(origin) = &state.config.preferred_origin {
+                state.config.origin_with_base(origin)
+            } else if source.local {
+                discover(
+                    state.config.port()?,
+                    None,
+                    state.config.base_path().as_deref(),
+                )?
+                .first()
+                .context("no server origin")?
+                .origin
+                .clone()
+            } else {
+                request_origin(headers, &state.config)?
+            }
+        }
+    };
+    let links = links_for(&state.registry, &scene, &origin, true)?;
+    let hosts = discover(
+        state.config.port()?,
+        state.config.preferred_origin.as_deref(),
+        state.config.base_path().as_deref(),
+    )?;
+    let mut response = serde_json::to_value(ShareResponse {
+        links,
+        origin,
+        hosts,
+    })
+    .map_err(anyhow::Error::from)?;
+    let collection = scene.collection.as_ref().unwrap();
+    let mut entries = vec![(&collection.first_id, &scene)];
+    entries.extend(
+        collection
+            .scenes
+            .iter()
+            .map(|entry| (&entry.id, &entry.scene)),
+    );
+    response["kind"] = serde_json::json!("collection");
+    response["active_scene_id"] = serde_json::json!(collection.active_scene_id);
+    response["scenes"] = serde_json::json!(entries.iter().map(|(id, part)| serde_json::json!({
+        "id":id,"title":part.title,
+        "viewer_url":format!("{}?scene={id}", response["viewer_url"].as_str().unwrap_or_default()),
+        "image_url":format!("{}?scene={id}", response["image_url"].as_str().unwrap_or_default()),
+        "resources":part.meshes.iter().map(|m| serde_json::json!({"path":m.path,"revision":m.revision})).collect::<Vec<_>>(),
+        "warnings":part.warnings
+    })).collect::<Vec<_>>());
+    response["status"] = serde_json::json!(if entries
+        .iter()
+        .any(|(_, part)| !part.warnings.is_empty())
+    {
+        "partial"
+    } else {
+        "complete"
+    });
+    Ok(response)
+}
+
 async fn client_plugins(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2113,13 +2490,17 @@ async fn get_attachment(
     AxumPath((token, index)): AxumPath<(String, usize)>,
 ) -> Result<Response<Body>, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
+    let scene = selected_scene(&opened.scene, query.get("scene").map(String::as_str))?.clone();
     source_result(
         &state,
-        &token,
-        state.registry.sources.validate_source(&opened.scene),
+        if opened.scene.collection.is_some() {
+            ""
+        } else {
+            &token
+        },
+        state.registry.sources.validate_source(&scene),
     )?;
-    let a = opened
-        .scene
+    let a = scene
         .attachments
         .get(index)
         .ok_or_else(|| AppError::not_found("Attachment not found"))?;
@@ -2129,7 +2510,7 @@ async fn get_attachment(
     let observed = state
         .registry
         .sources
-        .observe(opened.scene.source.as_ref(), &a.path, true)
+        .observe(scene.source.as_ref(), &a.path, true)
         .await
         .map_err(|e| match e {
             SourceError::Gone => AppError::gone("Attachment deleted"),
@@ -2145,7 +2526,7 @@ async fn get_attachment(
         observed.bytes
     };
     if query.get("embed").is_some_and(|v| v == "1") {
-        let html = opened.scene.components.iter().any(|c| {
+        let html = scene.components.iter().any(|c| {
             c.component == crate::component::ComponentKind::Html
                 && c.source == crate::component::ComponentSource::Attachment(index)
         });
@@ -2456,6 +2837,7 @@ async fn scene_from_manifest(
         state: Default::default(),
         attachments,
         warnings,
+        collection: None,
     };
     if !plan.components.is_empty() || has_panel_groups {
         scene.components = scene.component_descriptors();
@@ -2518,18 +2900,23 @@ async fn scene_from_manifest(
 }
 
 async fn get_renderer(
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath((token, id)): AxumPath<(String, String)>,
 ) -> Result<Response<Body>, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
+    let scene = selected_scene(&opened.scene, query.get("scene").map(String::as_str))?;
     source_result(
         &state,
-        &token,
-        state.registry.sources.validate_source(&opened.scene),
+        if opened.scene.collection.is_some() {
+            ""
+        } else {
+            &token
+        },
+        state.registry.sources.validate_source(scene),
     )?;
-    let binding = opened
-        .scene
+    let binding = scene
         .components
         .iter()
         .find(|c| c.id == id)

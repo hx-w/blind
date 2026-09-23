@@ -258,6 +258,8 @@ export class MeshViewer {
   get selectedModel(): ViewerMesh | undefined { return this.models[this.selected]?.info; }
   get modelInfos(): ViewerMesh[] { return this.models.map((model) => model.info); }
   get currentState(): ViewState { return this.exportState(); }
+  get focusedComponentId(): string | undefined { return this.state.focused_component_id ?? undefined; }
+  setFocusedComponent(id: string): void { this.state.focused_component_id = id; }
 
   setInteractionEnabled(enabled: boolean): void { this.controls.enabled = enabled; this.interactionEnabled = enabled; this.pointerStart = null; }
   get annotations(): SurfaceAnnotation[] { return this.state?.annotations ?? []; }
@@ -583,7 +585,7 @@ export class MeshViewer {
   private exportState(): ViewState {
     const cameraPose = this.captureCameraPose();
     return {
-      selected: this.selected, shading: this.state.shading, render_mode: this.renderMode, light: this.lightSettings, projection: this.state.projection,
+      selected: this.selected, focused_component_id: this.state.focused_component_id, shading: this.state.shading, render_mode: this.renderMode, light: this.lightSettings, projection: this.state.projection,
       background: this.state.background, axes: this.axes.visible,
       frame: { width: Math.round(this.root.clientWidth), height: Math.round(this.root.clientHeight) },
       camera: {
@@ -764,7 +766,9 @@ export class MeshViewer {
 }
 
 function meshUrl(info: PublicMesh, quality: MeshQuality): string {
-  return quality === 'lod' ? `${info.source_url}/lod` : info.source_url;
+  if (quality !== 'lod') return info.source_url;
+  const [path, query] = info.source_url.split('?', 2);
+  return `${path}/lod${query ? `?${query}` : ''}`;
 }
 
 async function loadObject(info: PublicMesh, quality: MeshQuality): Promise<LoadedObject> {

@@ -98,6 +98,7 @@ mod tests {
             meshes: Vec::new(),
             components: Vec::new(),
             attachments: Vec::new(),
+            collection: None,
             warnings: Vec::new(),
             label_groups: Vec::new(),
             state: ViewState::default(),

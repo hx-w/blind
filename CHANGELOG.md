@@ -3,6 +3,22 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-09-23
+
+### Added
+
+- Share independent scenes under one link with a collection config or JSON
+  piped to `blind share --config -`.
+- Show scenes side by side when space permits, or as tabs when one scene fills
+  the available view; the shared toolbar acts on the focused scene.
+- Share a view link that restores every scene and an image link that includes
+  every scene in one labeled PNG.
+
+### Changed
+
+- Remove the viewer-wide fullscreen button and keep collection sharing in the
+  bottom toolbar.
+
 ## [0.16.0] - 2026-09-23
 
 ### Added

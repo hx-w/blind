@@ -40,6 +40,7 @@ export interface SurfaceAnnotation {
 
 export interface ViewState {
   selected: number;
+  focused_component_id?: string | null;
   shading: Shading;
   render_mode?: RenderMode;
   light?: LightSettings;
@@ -89,6 +90,15 @@ export interface PublicScene {
   warnings?: Array<{code: string; message: string; resource_id?: string}>;
 }
 
+export interface CollectionOverview {
+  kind: 'collection';
+  title: string;
+  active_scene_id: string;
+  scenes: Array<{id: string; title: string}>;
+  owner: boolean;
+  ttl_days: number;
+}
+
 export interface ShareLinks {
   ttl_days?: number;
   viewer_url: string;
@@ -126,9 +136,27 @@ function headers(owner?: string): HeadersInit {
 }
 
 export async function loadScene(token: string, owner?: string): Promise<PublicScene> {
-  const response = await fetch(`api/v1/scenes/${token}`, { headers: headers(owner), cache: 'no-store' });
+  const selected = new URLSearchParams(location.search).get('scene');
+  const response = await fetch(`api/v1/scenes/${token}${selected ? `?scene=${encodeURIComponent(selected)}` : ''}`, { headers: headers(owner), cache: 'no-store' });
   if (!response.ok) throw await apiError(response);
   return response.json() as Promise<PublicScene>;
+}
+
+export async function loadCollection(token: string, owner?: string): Promise<CollectionOverview> {
+  const response = await fetch(`api/v1/scenes/${token}`, {headers: headers(owner), cache: 'no-store'});
+  if (!response.ok) throw await apiError(response);
+  const payload = await response.json() as CollectionOverview;
+  if (payload.kind !== 'collection') throw new Error('This link is not a scene collection');
+  return payload;
+}
+
+export async function shareCollection(token: string, activeSceneId: string, updates: Record<string, SceneUpdate>, owner?: string, origin?: string): Promise<ShareResponse> {
+  const response = await fetch(`api/v1/scenes/${token}/share`, {
+    method: 'POST', headers: {'Content-Type':'application/json', ...headers(owner)},
+    body: JSON.stringify({active_scene_id: activeSceneId, updates, ...(origin ? {origin} : {})}), cache: 'no-store',
+  });
+  if (!response.ok) throw await apiError(response);
+  return response.json() as Promise<ShareResponse>;
 }
 
 export async function shareScene(token: string, update: SceneUpdate, owner?: string, origin?: string): Promise<ShareResponse> {

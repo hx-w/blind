@@ -204,6 +204,30 @@ fields, empty resources, bad labels, duplicate group members, and out-of-range
 indices fail before any scene is registered. See `blind share --help` for the
 complete contract.
 
+To share several independent scenes under one link, use a collection config:
+
+```json
+{
+  "kind": "collection",
+  "schema_version": 1,
+  "title": "Case review",
+  "active_scene_id": "design",
+  "scenes": [
+    { "id": "design", "title": "Design", "resources": [{ "path": "crown.ply" }] },
+    { "id": "scan", "title": "Scan", "resources": [{ "path": "scan.ply" }] }
+  ]
+}
+```
+
+Run `blind share --config collection.json --format json` to receive one
+collection URL, a composite image URL, and scene-specific view and image URLs. An agent can pipe JSON
+directly into `blind share --config - --format json`; relative paths then use
+the current directory. Each child has its own camera, selection, and styles.
+The viewer splits when every pane fits, otherwise it shows scene tabs. Its
+single toolbar acts on the focused scene. Collections require short links, so
+`--stateless` does not apply. See [the sharing contract](docs/sharing.md) for
+the full schema and reshare API.
+
 In the interactive viewer, choose a Mesh in **详情** and edit **3D 标注**.
 Labels use a small leader and an attachment dot, follow the Mesh in 3D, and keep
 a readable screen size as the camera moves. Placement prefers space outside

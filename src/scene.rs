@@ -54,6 +54,22 @@ pub struct SceneDescriptor {
     pub attachments: Vec<SceneAttachment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<crate::plugin::Warning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<SceneCollection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SceneCollection {
+    pub title: String,
+    pub first_id: String,
+    pub active_scene_id: String,
+    pub scenes: Vec<CollectionEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectionEntry {
+    pub id: String,
+    pub scene: SceneDescriptor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +177,8 @@ pub enum MeshQuality {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewState {
     pub selected: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_component_id: Option<String>,
     pub shading: Shading,
     #[serde(default)]
     pub render_mode: RenderMode,
@@ -371,6 +389,7 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             selected: 0,
+            focused_component_id: None,
             shading: Shading::Flat,
             render_mode: RenderMode::Matte,
             light: LightSettings::default(),
@@ -389,6 +408,37 @@ impl Default for ViewState {
 }
 
 impl SceneDescriptor {
+    pub fn scene_by_id(&self, id: &str) -> Option<&SceneDescriptor> {
+        let collection = self.collection.as_ref()?;
+        if id == collection.first_id {
+            return Some(self);
+        }
+        collection
+            .scenes
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| &entry.scene)
+    }
+
+    pub fn scene_by_id_mut(&mut self, id: &str) -> Option<&mut SceneDescriptor> {
+        if self.collection.as_ref()?.first_id == id {
+            return Some(self);
+        }
+        self.collection
+            .as_mut()?
+            .scenes
+            .iter_mut()
+            .find(|entry| entry.id == id)
+            .map(|entry| &mut entry.scene)
+    }
+
+    pub fn active_scene(&self) -> &SceneDescriptor {
+        self.collection
+            .as_ref()
+            .and_then(|collection| self.scene_by_id(&collection.active_scene_id))
+            .unwrap_or(self)
+    }
+
     /// Adapt older geometry descriptors without changing their source identity or layout.
     pub fn component_descriptors(&self) -> Vec<crate::component::SceneComponent> {
         if !self.components.is_empty() {
@@ -582,6 +632,7 @@ impl SceneDescriptor {
             warnings: Vec::new(),
             label_groups: Vec::new(),
             state: ViewState::default(),
+            collection: None,
         })
     }
 
@@ -650,6 +701,14 @@ impl SceneDescriptor {
         }
         let mut state = update.state;
         state.selected = state.selected.min(self.meshes.len().saturating_sub(1));
+        if state.focused_component_id.as_ref().is_some_and(|id| {
+            !self
+                .component_descriptors()
+                .iter()
+                .any(|component| &component.id == id)
+        }) {
+            bail!("focused component is not in the scene");
+        }
         state.frame.width = state.frame.width.clamp(240, 4096);
         state.frame.height = state.frame.height.clamp(240, 4096);
         if let Some(camera) = &mut state.camera {
@@ -709,6 +768,28 @@ impl SceneDescriptor {
     }
 
     pub fn full_text(&self, viewer_url: &str, image_url: &str) -> String {
+        if let Some(collection) = &self.collection {
+            let mut lines = vec![format!("Blind collection: {}", collection.title)];
+            for (id, scene) in std::iter::once((&collection.first_id, self)).chain(
+                collection
+                    .scenes
+                    .iter()
+                    .map(|entry| (&entry.id, &entry.scene)),
+            ) {
+                lines.push(format!("\n{} ({id}):", scene.title));
+                lines.extend(scene.meshes.iter().map(|mesh| format!("- {}", mesh.path)));
+                lines.extend(
+                    scene
+                        .attachments
+                        .iter()
+                        .map(|attachment| format!("- {}", attachment.path)),
+                );
+            }
+            lines.push(format!(
+                "\nView (all scenes):\n{viewer_url}\n\nImage (all scenes):\n{image_url}"
+            ));
+            return lines.join("\n");
+        }
         let paths = self
             .meshes
             .iter()

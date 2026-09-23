@@ -15,10 +15,35 @@ struct ExportRequests {
     document: url::Url,
     base: String,
     scene: String,
+    scene_id: Option<String>,
 }
 impl ExportRequests {
     fn new(document: &str) -> Result<Self> {
         let document = url::Url::parse(document)?;
+        let scene_id = document
+            .query_pairs()
+            .find(|(key, _)| key == "scene")
+            .map(|(_, value)| value.into_owned());
+        let valid_query = document.query_pairs().all(|(key, value)| {
+            (key == "render" && value == "1")
+                || (key == "scene" && scene_id.as_deref() == Some(value.as_ref()))
+        }) && document
+            .query_pairs()
+            .filter(|(key, _)| key == "render")
+            .count()
+            == 1
+            && document
+                .query_pairs()
+                .filter(|(key, _)| key == "scene")
+                .count()
+                <= 1
+            && scene_id.as_ref().is_none_or(|id| {
+                !id.is_empty()
+                    && id.len() <= 64
+                    && id.bytes().all(|b| {
+                        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_')
+                    })
+            });
         ensure!(
             document.scheme() == "http"
                 && match document.host() {
@@ -28,7 +53,7 @@ impl ExportRequests {
                 }
                 && document.username().is_empty()
                 && document.password().is_none()
-                && document.query() == Some("render=1")
+                && valid_query
                 && document.fragment().is_none(),
             "invalid internal export URL"
         );
@@ -46,6 +71,7 @@ impl ExportRequests {
             document,
             base,
             scene,
+            scene_id,
         })
     }
     fn allows(&self, method: &str, address: &str) -> bool {
@@ -62,8 +88,23 @@ impl ExportRequests {
             return false;
         }
         url.set_fragment(None);
+        let permitted_scene_query = |allow_embed: bool| {
+            let mut scene_seen = false;
+            let mut embed_seen = false;
+            for (key, value) in url.query_pairs() {
+                if key == "scene" && self.scene_id.as_deref() == Some(value.as_ref()) && !scene_seen
+                {
+                    scene_seen = true;
+                } else if allow_embed && key == "embed" && value == "1" && !embed_seen {
+                    embed_seen = true;
+                } else {
+                    return false;
+                }
+            }
+            scene_seen == self.scene_id.is_some() && (!allow_embed || embed_seen)
+        };
         if method == "HEAD" {
-            return url.query() == Some("embed=1")
+            return permitted_scene_query(true)
                 && url
                     .path()
                     .strip_prefix(&format!("{}/attachments/", self.scene))
@@ -90,7 +131,7 @@ impl ExportRequests {
                     .any(|ext| asset.ends_with(ext));
         }
         if path == self.scene {
-            return url.query().is_none();
+            return permitted_scene_query(false);
         }
         let Some(tail) = path.strip_prefix(&format!("{}/", self.scene)) else {
             return false;
@@ -98,15 +139,17 @@ impl ExportRequests {
         let parts: Vec<_> = tail.split('/').collect();
         let index = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
         match parts.as_slice() {
-            ["meshes", n] | ["meshes", n, "lod"] => index(n) && url.query().is_none(),
-            ["attachments", n] => index(n) && matches!(url.query(), None | Some("embed=1")),
+            ["meshes", n] | ["meshes", n, "lod"] => index(n) && permitted_scene_query(false),
+            ["attachments", n] => {
+                index(n) && (permitted_scene_query(false) || permitted_scene_query(true))
+            }
             ["renderers", id] => {
                 !id.is_empty()
                     && id.len() <= 128
                     && id.bytes().all(|b| {
                         b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_')
                     })
-                    && url.query().is_none()
+                    && permitted_scene_query(false)
             }
             _ => false,
         }
