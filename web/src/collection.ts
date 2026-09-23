@@ -10,11 +10,8 @@ if (hashOwner) {
 }
 const owner = hashOwner ?? sessionStorage.getItem(`blind.owner.${token}`) ?? undefined;
 const originalDock = document.querySelector('.review-dock')!.cloneNode(true) as HTMLElement;
-const originalShare = document.querySelector('#share-view')!.cloneNode(true) as HTMLButtonElement;
-originalShare.className = 'dock-tool';
+const originalShare = originalDock.querySelector<HTMLButtonElement>('#share-view')!;
 originalShare.setAttribute('aria-label', '分享全部场景');
-const shareLabel = document.createElement('span'); shareLabel.textContent = '分享'; originalShare.append(shareLabel);
-originalDock.append(originalShare);
 const shell = document.createElement('div'); shell.className = 'app-shell collection-shell';
 const tabs = document.createElement('nav'); tabs.className = 'collection-tabs'; tabs.setAttribute('aria-label', '场景');
 const stage = document.createElement('main'); stage.className = 'collection-stage'; stage.setAttribute('aria-label', '多场景视图');

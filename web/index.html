@@ -11,11 +11,7 @@
     <a class="skip-link" href="#viewer">跳到 3D 视图</a>
     <div class="app-shell" id="app-shell">
       <header class="topbar" aria-label="场景操作">
-        <div class="top-actions" data-viewer-chrome data-label-obstacle>
-          <button class="icon-button share-button" id="share-view" type="button" aria-label="分享当前场景">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 8l4-4 4 4"/><path d="M5 12v7h14v-7"/></svg>
-          </button>
-        </div>
+        <div class="top-actions" data-viewer-chrome data-label-obstacle></div>
       </header>
 
       <main id="viewer" class="viewer" tabindex="-1">
@@ -56,6 +52,9 @@
         </button>
         <button class="dock-tool" id="scene-info-toggle" type="button" aria-label="打开场景信息" aria-expanded="false" aria-controls="control-panel">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.5"/></svg><span>信息</span>
+        </button>
+        <button class="dock-tool" id="share-view" type="button" aria-label="分享当前场景">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 8l4-4 4 4"/><path d="M5 12v7h14v-7"/></svg><span>分享</span>
         </button>
       </nav>
 

@@ -337,6 +337,9 @@ for (const viewport of [{width:1280,height:800},{width:390,height:844},{width:32
   test(`toolbars preserve the scene canvas at ${viewport.width}×${viewport.height}`, async () => {
     const page = await openPage(viewport);
     try {
+      assert.equal(await page.locator('.review-dock #share-view').count(), 1, 'single-scene sharing belongs in the shared toolbar');
+      const dock = await page.locator('.review-dock').boundingBox();
+      assert.ok(dock.x >= 0 && dock.x + dock.width <= viewport.width, 'all six tools must fit the viewport');
       for (const selector of ['.panel-trigger','#close-panel','#scene-info-toggle','#brush-tool','#surface-brush','#surface-done','#fit-view']) {
         const events = await eventsDuring(page, () => page.locator(selector).click());
         assert.equal(events.filter(e=>e.type==='resize').length, 0, `${selector} cleared a scene canvas`);

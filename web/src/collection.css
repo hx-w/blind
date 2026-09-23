@@ -1,5 +1,4 @@
 .collection-shell { display: flex; flex-direction: column; height: 100dvh; min-height: 0; }
-.collection-shell #share-view { color: var(--accent); }
 .collection-tabs { flex: none; display: flex; gap: 3px; max-width: 100%; min-height: 45px; overflow-x: auto; padding: 0 10px; border-bottom: 1px solid var(--line); scrollbar-width: thin; }
 .collection-tabs button { flex: none; min-height: 42px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 15px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
 .collection-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
@@ -23,8 +22,6 @@
   .collection-stage { padding: 0; gap: 0; }
   .collection-card { border: 0; border-radius: 0; }
   .collection-card-title { display: none; }
-  .collection-shell .review-dock { width: calc(100vw - 16px); max-width: 390px; gap: 0; }
-  .collection-shell .dock-tool { min-width: 0; padding: 4px 5px; }
   .collection-shell.collection-tabbed .collection-tabs { min-height: calc(54px + env(safe-area-inset-top)); padding: env(safe-area-inset-top) 6px 0; }
   .collection-shell.collection-tabbed .collection-tabs button { min-height: 54px; }
 }
