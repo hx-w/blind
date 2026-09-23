@@ -1205,6 +1205,14 @@ fn clip_planes(
     (near, far)
 }
 
+pub(crate) fn overlay_collection_strokes(
+    image: &mut RgbaImage,
+    strokes: &[ScreenStroke],
+) -> Result<()> {
+    let ink: ScreenInk = serde_json::from_str(include_str!("../shaders/stroke.json"))?;
+    overlay_screen_strokes(image, strokes, &ink, image.width(), image.height())
+}
+
 fn overlay_screen_strokes(
     image: &mut RgbaImage,
     strokes: &[ScreenStroke],

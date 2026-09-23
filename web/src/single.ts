@@ -103,7 +103,10 @@ const markup = new MarkupCanvas($('#markup-canvas') as HTMLCanvasElement);
 new ResizeObserver(entries => {
   shell.style.setProperty('--detail-panel-height', `${entries[0].target.getBoundingClientRect().height}px`);
 }).observe($('#control-panel'));
-const surface = new SurfaceEditor(meshViewer, markup, shell, {closePanel, toast: showToast, change: syncDetailControls});
+const surface = new SurfaceEditor(meshViewer, markup, shell, {closePanel, toast: showToast, change: () => {
+  syncDetailControls();
+  if (embedded && sceneId) parent.postMessage({type:'blind:scene-annotation-state', id:sceneId}, location.origin);
+}});
 
 meshViewer.onSelectionChange = () => {
   components?.selectMesh(meshViewer.selectedIndex); syncDetailControls(); surface.refreshList();
@@ -156,6 +159,19 @@ if (embedded && sceneId) {
     if (command === 'details') detailsTrigger.click();
     if (command === 'render') renderTrigger.click();
     if (command === 'annotate') brushTool.click();
+    if (command === 'screen-scope') surface.setExternalScreenMarkup(event.data.value !== 'scene');
+    if (command === 'surface-control') {
+      const control = event.data.control as string;
+      const value = event.data.value as string;
+      const selector = control === 'mode' && ['select','point','line','screen'].includes(value) ? `[data-surface-mode="${value}"]`
+        : control === 'color' && /^#[0-9a-f]{6}$/i.test(value) ? `[data-surface-color="${value}"]`
+        : ['done','undo','redo','close','end','delete'].includes(control) ? `#surface-${control}` : '';
+      if (selector) document.querySelector<HTMLButtonElement>(`#surface-toolbar ${selector}`)?.click();
+      if (control === 'name' && typeof value === 'string' && value.length <= 120) {
+        const input = document.querySelector<HTMLInputElement>('#surface-toolbar #surface-name');
+        if (input) { input.value = value; input.dispatchEvent(new Event('change', {bubbles:true})); }
+      }
+    }
     if (command === 'info') sceneInfoToggle.click();
   });
   new MutationObserver(() => parent.postMessage({type:'blind:scene-tool-mode', id:sceneId, annotation:shell.classList.contains('surface-mode')}, location.origin))
@@ -598,6 +614,7 @@ window.addEventListener('resize', () => {
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
 
 function invalidateMarkupForViewChange(): void {
+  if (embedded && sceneId) parent.postMessage({type:'blind:scene-view-change', id:sceneId}, location.origin);
   if (!markup.hasStrokes) return;
   markup.clear();
   surface.invalidateScreenHistory();

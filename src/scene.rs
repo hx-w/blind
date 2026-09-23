@@ -64,6 +64,34 @@ pub struct SceneCollection {
     pub first_id: String,
     pub active_scene_id: String,
     pub scenes: Vec<CollectionEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strokes: Vec<ScreenStroke>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<CollectionLayout>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CollectionLayout {
+    pub width: u32,
+    pub height: u32,
+    pub columns: u32,
+}
+
+impl CollectionLayout {
+    pub fn validate(self, scenes: usize) -> Result<()> {
+        let rows = (scenes as u32).div_ceil(self.columns.max(1));
+        if !(320..=4096).contains(&self.width)
+            || !(240..=4096).contains(&self.height)
+            || self.columns == 0
+            || self.columns as usize > scenes
+            || u64::from(self.width) * u64::from(self.height) > 16_000_000
+            || self.width < 16 + self.columns * 160 + (self.columns - 1) * 8
+            || self.height < 16 + rows * 135 + (rows - 1) * 8
+        {
+            bail!("invalid collection layout");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -825,7 +853,7 @@ fn change_nanos(_metadata: &std::fs::Metadata) -> Option<u64> {
     None
 }
 
-fn validate_screen_strokes(strokes: &[ScreenStroke]) -> Result<()> {
+pub(crate) fn validate_screen_strokes(strokes: &[ScreenStroke]) -> Result<()> {
     if strokes.len() > MAX_SCREEN_STROKES {
         bail!("a scene can contain at most {MAX_SCREEN_STROKES} screen strokes");
     }

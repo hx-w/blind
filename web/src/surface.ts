@@ -31,6 +31,7 @@ export class SurfaceEditor {
   private readonly cameraPointers = new Set<number>();
   private readonly cancelledPointers = new Set<number>();
   private active = false;
+  private externalScreenMarkup = document.documentElement.classList.contains('embedded-scene');
   private listDismissed = false;
   private readonly badgeElements = new Map<string, BadgeView>();
   private readonly badgeLeaders = document.createElementNS(SVG_NS, 'svg');
@@ -201,6 +202,7 @@ export class SurfaceEditor {
   }
   private get current(): SurfaceAnnotation | undefined { return this.viewer.annotations.find(mark => mark.id === this.selected); }
   get isActive(): boolean { return this.active; }
+  setExternalScreenMarkup(external: boolean): void { this.externalScreenMarkup=external; this.sync(); }
   async enter(id?: string): Promise<void> {
     this.callbacks.closePanel(); this.active = true;
     if(id) this.selectMark(id);
@@ -553,7 +555,7 @@ export class SurfaceEditor {
     const share=this.el<HTMLButtonElement>('#share-view');if(!share.classList.contains('working'))share.disabled=this.busy;
     this.input.hidden = !this.active || this.mode==='select' || this.mode==='screen';
     this.input.style.cursor=this.mode==='select'?'default':'crosshair';
-    this.markup.setEnabled(this.active && this.mode==='screen'); this.markup.setColor(this.color);
+    this.markup.setEnabled(this.active && this.mode==='screen' && !this.externalScreenMarkup); this.markup.setColor(this.color);
     this.markup.setSelection(this.active?this.selectedScreen:undefined);
     if (this.active) this.viewer.setInteractionEnabled(this.mode==='select' && !this.busy && this.selectionPointer===undefined && !this.cancelledPointers.size);
     this.viewer.setAnnotations(this.viewer.annotations, this.active ? this.selected : undefined);

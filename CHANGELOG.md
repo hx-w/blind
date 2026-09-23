@@ -3,6 +3,19 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.3] - 2026-09-23
+
+### Fixed
+
+- Keep annotation controls in the global collection toolbar, including when a
+  scene mark is selected directly.
+- Draw screen annotations across the entire collection so one stroke can cross
+  scene boundaries, and preserve them in shared views and images.
+- Use the shared collection layout when composing its PNG so scene positions,
+  proportions, titles, and focus highlight match the viewer.
+- Restore the two-row image layout for earlier ten-scene links that predate
+  saved layout metadata.
+
 ## [0.17.2] - 2026-09-23
 
 ### Fixed

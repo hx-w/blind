@@ -823,7 +823,8 @@ async fn get_scene(
                 no_store(),
                 Json(serde_json::json!({
                     "kind":"collection","title":collection.title,"active_scene_id":collection.active_scene_id,
-                    "scenes":scenes,"owner":owner,"ttl_days":opened.scene.link_ttl_days(!is_short_secret(&token))
+                    "scenes":scenes,"strokes":collection.strokes,"layout":collection.layout,
+                    "owner":owner,"ttl_days":opened.scene.link_ttl_days(!is_short_secret(&token))
                 })),
             ));
         }
@@ -1085,7 +1086,23 @@ async fn reshare(
                 .apply_update(update)
                 .map_err(|e| AppError::bad_request(&e.to_string()))?;
         }
-        scene.collection.as_mut().unwrap().active_scene_id = active;
+        let collection = scene.collection.as_mut().unwrap();
+        if let Some(value) = body.get("strokes") {
+            let strokes: Vec<crate::scene::ScreenStroke> = serde_json::from_value(value.clone())
+                .map_err(|e| AppError::unprocessable(&e.to_string()))?;
+            crate::scene::validate_screen_strokes(&strokes)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+            collection.strokes = strokes;
+        }
+        if let Some(value) = body.get("layout") {
+            let layout: crate::scene::CollectionLayout = serde_json::from_value(value.clone())
+                .map_err(|e| AppError::unprocessable(&e.to_string()))?;
+            layout
+                .validate(collection.scenes.len() + 1)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+            collection.layout = Some(layout);
+        }
+        collection.active_scene_id = active;
     } else {
         let request: ReshareRequest =
             serde_json::from_value(body).map_err(|e| AppError::unprocessable(&e.to_string()))?;
@@ -1122,22 +1139,34 @@ async fn render_image(
     let bytes = if let Some(collection) = &opened.scene.collection {
         if let Some(id) = query.get("scene") {
             let scene = selected_scene(&opened.scene, Some(id))?;
-            render_single_image(&state, token, scene, Some(id), true).await?
+            render_single_image(&state, token, scene, Some(id), true, None).await?
         } else {
             tokio::time::timeout(Duration::from_secs(180), async {
                 let mut images = Vec::with_capacity(collection.scenes.len() + 1);
-                for (id, scene) in std::iter::once((&collection.first_id, &opened.scene)).chain(
-                    collection
-                        .scenes
-                        .iter()
-                        .map(|entry| (&entry.id, &entry.scene)),
-                ) {
-                    let png = render_single_image(&state, token, scene, Some(id), true).await?;
+                for (index, (id, scene)) in std::iter::once((&collection.first_id, &opened.scene))
+                    .chain(
+                        collection
+                            .scenes
+                            .iter()
+                            .map(|entry| (&entry.id, &entry.scene)),
+                    )
+                    .enumerate()
+                {
+                    let size = crate::collection_image::scene_viewport_size(
+                        collection.scenes.len() + 1,
+                        collection.layout,
+                        index,
+                    )
+                    .map_err(|error| AppError::internal(&error.to_string()))?;
+                    let png = render_single_image(&state, token, scene, Some(id), true, Some(size))
+                        .await?;
                     images.push((id.clone(), scene.title.clone(), png));
                 }
                 let active = collection.active_scene_id.clone();
+                let layout = collection.layout;
+                let strokes = collection.strokes.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::collection_image::compose(&images, &active)
+                    crate::collection_image::compose(&images, &active, layout, &strokes)
                 })
                 .await
                 .map_err(|error| AppError::internal(&error.to_string()))?
@@ -1148,7 +1177,7 @@ async fn render_image(
         }
     } else {
         let scene = selected_scene(&opened.scene, query.get("scene").map(String::as_str))?;
-        render_single_image(&state, token, scene, None, false).await?
+        render_single_image(&state, token, scene, None, false, None).await?
     };
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -1164,7 +1193,13 @@ async fn render_single_image(
     scene: &SceneDescriptor,
     scene_id: Option<&str>,
     in_collection: bool,
+    render_size: Option<(u32, u32)>,
 ) -> Result<Vec<u8>, AppError> {
+    let mut render_scene = scene.clone();
+    if let Some((width, height)) = render_size {
+        render_scene.state.frame.width = width;
+        render_scene.state.frame.height = height;
+    }
     let source_token = if in_collection { "" } else { token };
     source_result(
         state,
@@ -1209,7 +1244,7 @@ async fn render_single_image(
                 .map(|id| format!("&scene={id}"))
                 .unwrap_or_default()
         );
-        let bytes = crate::render_viewer::render(&url,scene.state.frame.width,scene.state.frame.height).await.map_err(|error| {
+        let bytes = crate::render_viewer::render(&url,render_scene.state.frame.width,render_scene.state.frame.height).await.map_err(|error| {
             tracing::warn!(%error,"full scene image render failed");
             AppError::unprocessable("Full scene export failed; check component availability and the Server Chromium installation")
         })?;
@@ -1220,7 +1255,6 @@ async fn render_single_image(
         )?;
         return Ok(bytes);
     }
-    let mut render_scene = scene.clone();
     let mut sources = Vec::with_capacity(scene.meshes.len());
     for (index, mesh) in scene.meshes.iter().enumerate() {
         if mesh.visible
@@ -2410,6 +2444,8 @@ async fn create_collection_scene(
         first_id: first.id,
         active_scene_id: request.active_scene_id,
         scenes: parts,
+        strokes: Vec::new(),
+        layout: None,
     });
     let origin = match requested_origin {
         Some(origin) => state.config.normalize_share_origin(&origin)?,

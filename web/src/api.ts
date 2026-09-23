@@ -95,9 +95,13 @@ export interface CollectionOverview {
   title: string;
   active_scene_id: string;
   scenes: Array<{id: string; title: string}>;
+  strokes: ScreenStroke[];
+  layout?: CollectionLayout | null;
   owner: boolean;
   ttl_days: number;
 }
+
+export interface CollectionLayout { width: number; height: number; columns: number; }
 
 export interface ShareLinks {
   ttl_days?: number;
@@ -150,10 +154,10 @@ export async function loadCollection(token: string, owner?: string): Promise<Col
   return payload;
 }
 
-export async function shareCollection(token: string, activeSceneId: string, updates: Record<string, SceneUpdate>, owner?: string, origin?: string): Promise<ShareResponse> {
+export async function shareCollection(token: string, activeSceneId: string, updates: Record<string, SceneUpdate>, strokes: ScreenStroke[], layout: CollectionLayout, owner?: string, origin?: string): Promise<ShareResponse> {
   const response = await fetch(`api/v1/scenes/${token}/share`, {
     method: 'POST', headers: {'Content-Type':'application/json', ...headers(owner)},
-    body: JSON.stringify({active_scene_id: activeSceneId, updates, ...(origin ? {origin} : {})}), cache: 'no-store',
+    body: JSON.stringify({active_scene_id: activeSceneId, updates, strokes, layout, ...(origin ? {origin} : {})}), cache: 'no-store',
   });
   if (!response.ok) throw await apiError(response);
   return response.json() as Promise<ShareResponse>;

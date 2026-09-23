@@ -2,17 +2,23 @@
 .collection-tabs { flex: none; display: flex; gap: 3px; max-width: 100%; min-height: 45px; overflow-x: auto; padding: 0 10px; border-bottom: 1px solid var(--line); scrollbar-width: thin; }
 .collection-tabs button { flex: none; min-height: 42px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 15px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
 .collection-tabs button[aria-selected="true"] { color: var(--accent); border-bottom-color: var(--accent); }
-.collection-stage { flex: 1; min-height: 0; display: grid; gap: 8px; padding: 8px; overflow: hidden; }
+.collection-stage { position: relative; flex: 1; min-height: 0; display: grid; gap: 8px; padding: 8px; overflow: hidden; }
+.collection-markup { z-index: 30; }
+.collection-ink-badges { position: absolute; inset: 0; z-index: 31; pointer-events: none; }
+.collection-ink-badges button { position: absolute; pointer-events: auto; transform: translate(6px,-50%); border: 1px solid color-mix(in srgb,var(--ink) 55%,transparent); border-radius: 3px; padding: 3px 6px; background: color-mix(in srgb,var(--ink) 25%,var(--surface-1)); color: var(--text); font: inherit; font-size: 11px; cursor: pointer; }
+.collection-ink-badges button.selected { outline: 1px solid var(--ink); }
 .collection-card { min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--line); border-radius: 9px; background: var(--canvas); }
 .collection-card.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
 .collection-card-title { flex: none; width: 100%; height: 35px; padding: 0 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; border-bottom: 1px solid var(--line); background: var(--surface-1); color: var(--text-secondary); text-align: left; font-size: 12px; font-weight: 620; cursor: pointer; }
 .collection-card.active .collection-card-title { color: var(--text); }
 .collection-tabbed .collection-stage { padding: 0; gap: 0; }
+.collection-tabbed .collection-markup, .collection-tabbed .collection-ink-badges { display: none; }
 .collection-tabbed .collection-card, .collection-tabbed .collection-card.active { border: 0; border-radius: 0; box-shadow: none; }
 .collection-tabbed .collection-card-title { display: none; }
 .collection-viewport { position: relative; flex: 1; min-height: 0; }
 .collection-frame { display: block; width: 100%; height: 100%; border: 0; background: var(--canvas); }
 .collection-shell.annotation-mode > .review-dock { display: none; }
+.embedded-scene #surface-toolbar { display: none !important; }
 .collection-share { width: min(390px, calc(100vw - 24px)); margin: auto; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--surface-1); color: var(--text); box-shadow: 0 24px 60px oklch(0.06 0.006 255 / .48); }
 .collection-share::backdrop { background: oklch(0.08 0.006 255 / .54); }
 .collection-share h2 { margin: 0 0 14px; font-size: 16px; }
