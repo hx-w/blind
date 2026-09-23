@@ -3,6 +3,24 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-09-23
+
+### Added
+
+- Inspect mesh relief with adjustable raking light or surface normals while
+  keeping the existing shadowless appearance as the default; view and image
+  links retain the chosen rendering settings.
+- Copy the current image link with Cmd+C on macOS or Ctrl+C on other desktop
+  systems; add Shift to copy the view link.
+- Open ordinary JSON files in a collapsible, syntax-colored viewer.
+
+### Changed
+
+- Select a scene component with one click and expand it with a double click.
+  Remove component fullscreen and drag-resize controls.
+- Give the Render tool a Scan Eye icon and a compact mobile panel when light
+  controls are hidden.
+
 ## [0.15.5] - 2026-09-22
 
 ### Fixed

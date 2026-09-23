@@ -1,6 +1,5 @@
 # Blind
 
-[![CI](https://github.com/hx-w/blind/actions/workflows/ci.yml/badge.svg)](https://github.com/hx-w/blind/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hx-w/blind)](https://github.com/hx-w/blind/releases/latest)
 [![macOS](https://img.shields.io/badge/platform-macOS-4b5563)](https://github.com/hx-w/blind#requirements)
 [![License: MIT](https://img.shields.io/github/license/hx-w/blind)](LICENSE)
@@ -508,22 +507,17 @@ Node.js. The directory is intentionally excluded from version control. Before
 a pull request, run:
 
 ```sh
+npm test --prefix web
+npm run test:browser --prefix web
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-CI runs verification on Apple Silicon, Intel macOS and Linux x86_64. Each
-platform checks source, browser interactions and binary integrations. Integration
-tests use a debug executable with embedded viewer assets; CI does not compile or
-package release binaries.
-Successful `main` jobs cache Rust verification dependencies per runner.
-Superseded PR checks are cancelled; main runs finish populating caches.
-
 Release has one responsibility: build and publish. A stable tag builds the viewer
 and native binaries, packages the three archives, generates SHA-256 checksums and
-publishes the GitHub Release. It restores available build caches and does not
-rerun tests or wait for CI. The first build, a toolchain change, or cache eviction
+publishes the GitHub Release. Run local checks before tagging; the Release
+workflow does not run tests. The first build, a toolchain change, or cache eviction
 can still require a cold compilation.
 
 ## API

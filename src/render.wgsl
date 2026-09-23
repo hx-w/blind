@@ -12,6 +12,9 @@ struct Camera {
   curve_edge: vec4<f32>,
   point_scale: vec4<f32>,
   point_color: vec4<f32>,
+  inspection: vec4<f32>,
+  camera_right: vec4<f32>,
+  camera_back: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -66,6 +69,14 @@ fn fs_main(input: VertexOutput, @builtin(front_facing) front_facing: bool) -> @l
     normal = -normal;
   }
   let view_direction = normalize(camera.camera_position.xyz - input.world_position);
+  if camera.inspection.x > 1.5 {
+    let n = vec3<f32>(dot(normal, camera.camera_right.xyz), dot(normal, camera.camera_up.xyz), dot(normal, camera.camera_back.xyz));
+    return vec4<f32>(n * 0.5 + 0.5, input.color.a);
+  }
+  if camera.inspection.x > 0.5 {
+    let grazing = max(dot(normal, normalize(camera.key_direction.xyz)), 0.0);
+    return vec4<f32>(input.color.rgb * (0.10 + grazing * camera.inspection.y * 0.90), input.color.a);
+  }
   let half_direction = normalize(normalize(camera.key_direction.xyz) + view_direction);
   let specular = pow(max(dot(normal, half_direction), 0.0), camera.surface.w) * camera.surface.z;
   let rim = pow(1.0 - clamp(dot(normal, view_direction), 0.0, 1.0), camera.surface.y) * camera.surface.x;
@@ -137,7 +148,14 @@ fn point_fs_main(input: PointOutput) -> @location(0) vec4<f32> {
     input.basis_x * input.disk.x - input.basis_y * input.disk.y + view_direction * sphere_z
   );
   let light = matte_light(normal, view_direction);
+  var color = input.color.rgb * light;
+  if camera.inspection.x > 1.5 {
+    let n = vec3<f32>(dot(normal, camera.camera_right.xyz), dot(normal, camera.camera_up.xyz), dot(normal, camera.camera_back.xyz));
+    color = n * 0.5 + 0.5;
+  } else if camera.inspection.x > 0.5 {
+    color = input.color.rgb * (0.10 + max(dot(normal, normalize(camera.key_direction.xyz)), 0.0) * camera.inspection.y * 0.90);
+  }
   let edge = max(fwidth(radius_squared), 0.001);
   let coverage = 1.0 - smoothstep(1.0 - edge, 1.0, radius_squared);
-  return vec4<f32>(input.color.rgb * light, input.color.a * coverage);
+  return vec4<f32>(color, input.color.a * coverage);
 }

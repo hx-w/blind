@@ -4,6 +4,8 @@ export type MeshQuality = 'lod' | 'raw';
 export type Shading = 'smooth' | 'flat' | 'wire';
 export type Projection = 'perspective' | 'orthographic';
 export type Background = 'dark' | 'light';
+export type RenderMode = 'matte' | 'raking' | 'normals';
+export interface LightSettings { azimuth: number; elevation: number; intensity: number }
 
 export interface CameraState {
   position: [number, number, number];
@@ -39,6 +41,8 @@ export interface SurfaceAnnotation {
 export interface ViewState {
   selected: number;
   shading: Shading;
+  render_mode?: RenderMode;
+  light?: LightSettings;
   projection: Projection;
   background: Background;
   axes: boolean;

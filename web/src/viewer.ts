@@ -4,7 +4,7 @@ import { ArcballControls } from 'three/addons/controls/ArcballControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { apiError, type MeshLabelGroup, type MeshQuality, type PublicMesh, type PublicScene, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
+import { apiError, type LightSettings, type MeshLabelGroup, type MeshQuality, type PublicMesh, type PublicScene, type RenderMode, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
 import { createObjectMaterial, updateObjectMaterial } from './material';
 import { MeshLabels } from './labels';
 import { SurfaceInk } from './surface-render';
@@ -191,6 +191,8 @@ export class MeshViewer {
     // Only suppress a caption when the component shell already names the same group.
     this.labelGroups = (scene.label_groups ?? []).filter(group => !scene.components?.length || !group.meshes.every(index => scene.components!.find(c => c.source.kind === 'mesh' && c.source.index === index)?.group === group.text));
     this.state = structuredClone(scene.state);
+    this.state.render_mode ??= 'matte';
+    this.state.light ??= {azimuth: 45, elevation: 20, intensity: 1};
     this.state.strokes ??= [];
     this.state.annotations ??= [];
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
@@ -404,6 +406,10 @@ export class MeshViewer {
   refreshLabels(): void { this.labels.invalidateLayout(); this.dirty = true; }
   setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); this.onModelChange?.(); } }
   setShading(shading: ViewState['shading']): void { this.state.shading = shading; this.applyMaterials(); }
+  get renderMode(): RenderMode { return this.state.render_mode ?? 'matte'; }
+  get lightSettings(): LightSettings { return {...(this.state.light ?? {azimuth: 45, elevation: 20, intensity: 1})}; }
+  setRenderMode(mode: RenderMode): void { this.state.render_mode = mode; this.applyMaterials(); }
+  setLight(settings: LightSettings): void { this.state.light = {...settings}; this.applyMaterials(); }
   setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.dirty = true; }
   setBackground(background: ViewState['background']): void {
     this.state.background = background;
@@ -531,8 +537,10 @@ export class MeshViewer {
         color: info.color,
         opacity: info.opacity,
         flat: info.format !== 'pts' && this.state.shading === 'flat',
-        wireframe: info.format !== 'pts' && this.state.shading === 'wire',
+        wireframe: info.format !== 'pts' && this.state.shading === 'wire' && this.renderMode === 'matte',
         curve: info.format === 'pts',
+        renderMode: this.renderMode,
+        light: this.lightSettings,
       }, this.renderer.getPixelRatio());
       if (child instanceof THREE.Points) return;
       // Review the geometry itself rather than trusting optional exporter normals,
@@ -555,8 +563,10 @@ export class MeshViewer {
         color: model.info.color,
         opacity: model.info.opacity,
         flat: model.info.format !== 'pts' && this.state.shading === 'flat',
-        wireframe: model.info.format !== 'pts' && this.state.shading === 'wire',
+        wireframe: model.info.format !== 'pts' && this.state.shading === 'wire' && this.renderMode === 'matte',
         curve: model.info.format === 'pts',
+        renderMode: this.renderMode,
+        light: this.lightSettings,
       });
     }));
     this.dirty = true;
@@ -573,7 +583,7 @@ export class MeshViewer {
   private exportState(): ViewState {
     const cameraPose = this.captureCameraPose();
     return {
-      selected: this.selected, shading: this.state.shading, projection: this.state.projection,
+      selected: this.selected, shading: this.state.shading, render_mode: this.renderMode, light: this.lightSettings, projection: this.state.projection,
       background: this.state.background, axes: this.axes.visible,
       frame: { width: Math.round(this.root.clientWidth), height: Math.round(this.root.clientHeight) },
       camera: {

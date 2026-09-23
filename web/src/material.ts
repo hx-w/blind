@@ -41,6 +41,8 @@ const sharedFragmentUniforms = `
   uniform vec4 lighting;
   uniform vec3 finish;
   uniform vec4 tone;
+  uniform int renderMode;
+  uniform float lightIntensity;
 `;
 
 // Shared matte lighting (wrapped key/fill, hemisphere, view facing, tone
@@ -84,6 +86,19 @@ const fragmentShader = `
     vec3 halfDirection = normalize(normalize(keyDirection) + viewDirection);
     float specular = pow(max(dot(normal, halfDirection), 0.0), surface.w) * surface.z;
     float rim = pow(1.0 - clamp(dot(normal, viewDirection), 0.0, 1.0), surface.y) * surface.x;
+    if (renderMode == 2) {
+      gl_FragColor = vec4(normal * 0.5 + 0.5, opacity);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+      return;
+    }
+    if (renderMode == 1) {
+      float grazing = max(dot(normal, normalize(keyDirection)), 0.0);
+      gl_FragColor = vec4(baseColor * (0.10 + grazing * lightIntensity * 0.90), opacity);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+      return;
+    }
     vec3 shaded = baseColor * shadedLight(normal, viewDirection) + vec3(specular);
     shaded *= 1.0 - rim;
     // A lit, polished tube: rounded diffuse falloff and a narrow white highlight.
@@ -114,7 +129,9 @@ const pointFragmentShader = `
     float radiusSquared = dot(disk, disk);
     if (radiusSquared > 1.0) discard;
     vec3 normal = normalize(vec3(disk.x, -disk.y, sqrt(1.0 - radiusSquared)));
-    vec3 shaded = baseColor * shadedLight(normal, normalize(-viewPosition));
+    vec3 shaded = renderMode == 2 ? normal * 0.5 + 0.5 :
+      renderMode == 1 ? baseColor * (0.10 + max(dot(normal, normalize(keyDirection)), 0.0) * lightIntensity * 0.90) :
+      baseColor * shadedLight(normal, normalize(-viewPosition));
     float edge = max(fwidth(radiusSquared), 0.001);
     float coverage = 1.0 - smoothstep(1.0 - edge, 1.0, radiusSquared);
     gl_FragColor = vec4(shaded, opacity * coverage);
@@ -129,7 +146,17 @@ export interface MeshMaterialStyle {
   flat: boolean;
   wireframe: boolean;
   curve: boolean;
+  renderMode: 'matte' | 'raking' | 'normals';
+  light: {azimuth: number; elevation: number; intensity: number};
 }
+
+function lightDirection(light: MeshMaterialStyle['light']): THREE.Vector3 {
+  const a = light.azimuth * Math.PI / 180, e = light.elevation * Math.PI / 180;
+  // Elevation is measured from the screen plane, so every azimuth remains grazing.
+  return new THREE.Vector3(Math.cos(a) * Math.cos(e), Math.sin(a) * Math.cos(e), Math.sin(e));
+}
+
+const renderModeId = {matte: 0, raking: 1, normals: 2} as const;
 
 function isTranslucent(opacity: number): boolean {
   return opacity < shader.translucent_threshold;
@@ -139,11 +166,13 @@ function baseUniforms(style: MeshMaterialStyle) {
   return {
     baseColor: { value: new THREE.Color(style.color) },
     opacity: { value: style.opacity },
-    keyDirection: { value: new THREE.Vector3(...shader.key_direction) },
+    keyDirection: { value: style.renderMode === 'matte' ? new THREE.Vector3(...shader.key_direction) : lightDirection(style.light) },
     fillDirection: { value: new THREE.Vector3(...shader.fill_direction) },
     lighting: { value: new THREE.Vector4(shader.ambient, shader.key, shader.fill, shader.hemisphere) },
     finish: { value: new THREE.Vector3(shader.view, shader.wrap, shader.contrast) },
     tone: { value: new THREE.Vector4(shader.contrast_pivot, shader.light_min, shader.light_max, shader.translucent_threshold) },
+    renderMode: { value: renderModeId[style.renderMode] },
+    lightIntensity: { value: style.light.intensity },
   };
 }
 
@@ -191,6 +220,9 @@ export function updateObjectMaterial(child: THREE.Mesh | THREE.Points, style: Me
   const translucent = isTranslucent(style.opacity);
   (material.uniforms.baseColor.value as THREE.Color).set(style.color);
   material.uniforms.opacity.value = style.opacity;
+  material.uniforms.renderMode.value = renderModeId[style.renderMode];
+  material.uniforms.lightIntensity.value = style.light.intensity;
+  (material.uniforms.keyDirection.value as THREE.Vector3).copy(style.renderMode === 'matte' ? new THREE.Vector3(...shader.key_direction) : lightDirection(style.light));
   material.depthWrite = !translucent;
   if (child instanceof THREE.Points) return;
   material.uniforms.flatShading.value = style.flat;

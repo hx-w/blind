@@ -8,6 +8,7 @@ pub enum ComponentKind {
     Mesh,
     Points,
     Text,
+    Json,
     Html,
     Image,
     Plugin(String),
@@ -19,6 +20,7 @@ impl TryFrom<String> for ComponentKind {
             "mesh" => Self::Mesh,
             "points" => Self::Points,
             "text" => Self::Text,
+            "json" => Self::Json,
             "html" => Self::Html,
             "image" => Self::Image,
             _ => {
@@ -39,6 +41,7 @@ impl From<ComponentKind> for String {
             ComponentKind::Mesh => "mesh".into(),
             ComponentKind::Points => "points".into(),
             ComponentKind::Text => "text".into(),
+            ComponentKind::Json => "json".into(),
             ComponentKind::Html => "html".into(),
             ComponentKind::Image => "image".into(),
             ComponentKind::Plugin(s) => s,
@@ -57,11 +60,12 @@ impl ComponentKind {
         Ok(match name.rsplit('.').next().unwrap_or("") {
             "ply" | "stl" | "obj" => Self::Mesh,
             "pts" => Self::Points,
-            "txt" | "log" | "json" | "jsonl" | "csv" | "md" => Self::Text,
+            "txt" | "log" | "jsonl" | "csv" | "md" => Self::Text,
+            "json" => Self::Json,
             "html" | "htm" => Self::Html,
             "png" | "jpg" | "jpeg" | "webp" | "gif" => Self::Image,
             _ => bail!(
-                "Cannot choose a component for {name}; use --component INDEX=mesh|points|text|html|image|PLUGIN:NAME"
+                "Cannot choose a component for {name}; use --component INDEX=mesh|points|text|json|html|image|PLUGIN:NAME"
             ),
         })
     }
@@ -177,9 +181,9 @@ mod tests {
             ("UPPER.PLY", ComponentKind::Mesh),
             ("margin.pts", ComponentKind::Points),
             ("run.log", ComponentKind::Text),
-            ("execution.json", ComponentKind::Text),
-            ("a.trace.json", ComponentKind::Text),
-            ("tracing.json", ComponentKind::Text),
+            ("execution.json", ComponentKind::Json),
+            ("a.trace.json", ComponentKind::Json),
+            ("tracing.json", ComponentKind::Json),
             ("report.html", ComponentKind::Html),
             ("image.png", ComponentKind::Image),
         ] {

@@ -9,13 +9,34 @@ export interface SurfaceContent {
 }
 export type ContentFactory = (url: string, label: string, spec: SceneComponent) => SurfaceContent;
 function container(): HTMLDivElement { const e = document.createElement('div'); e.className = 'component-content'; return e; }
-async function bytes(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
+class OversizedResourceError extends Error {}
+async function bytes(url: string, signal: AbortSignal, maxBytes = 64 * 1024 * 1024): Promise<ArrayBuffer> {
   const response = await fetch(url, {signal, cache: 'no-store'});
   if (!response.ok) throw await apiError(response);
-  if (Number(response.headers.get('content-length')) > 64 * 1024 * 1024) throw new Error('资源超过 64 MiB');
-  const buffer = await response.arrayBuffer();
-  if (buffer.byteLength > 64 * 1024 * 1024) throw new Error('资源超过 64 MiB');
-  return buffer;
+  if (Number(response.headers.get('content-length')) > maxBytes) throw new OversizedResourceError(`资源超过 ${maxBytes / 1024 / 1024} MiB`);
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > maxBytes) throw new OversizedResourceError(`资源超过 ${maxBytes / 1024 / 1024} MiB`);
+    return buffer;
+  }
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new OversizedResourceError(`资源超过 ${maxBytes / 1024 / 1024} MiB`);
+      }
+      chunks.push(value);
+    }
+  } finally { reader.releaseLock(); }
+  const buffer = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
+  return buffer.buffer;
 }
 function report(element: HTMLElement, ready: Promise<void>): Promise<void> {
   void ready.catch(error => {
@@ -28,6 +49,69 @@ export const textContent: ContentFactory = (url) => {
   const element = container(); const abort = new AbortController();
   const pre = document.createElement('pre'); pre.tabIndex = 0; pre.textContent = '正在读取文本…'; element.append(pre);
   const ready = report(pre, bytes(url, abort.signal).then(buffer => { pre.textContent = new TextDecoder().decode(buffer); }));
+  return {element, ready, dispose: () => abort.abort()};
+};
+export const jsonContent: ContentFactory = (url) => {
+  const element = container(); element.classList.add('component-json');
+  const abort = new AbortController();
+  const status = document.createElement('p'); status.className = 'json-status'; status.textContent = '正在读取 JSON…'; element.append(status);
+  const ready = report(element, bytes(url, abort.signal, 4 * 1024 * 1024).then(buffer => {
+    let value: unknown;
+    try { value = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(buffer)); }
+    catch { throw new Error('JSON 格式无效或不是 UTF-8'); }
+    const tree = document.createElement('div'); tree.className = 'json-tree'; tree.setAttribute('role', 'tree');
+    let remaining = 5000;
+    const add = (parent: HTMLElement, key: string | null, item: unknown, depth: number): void => {
+      if (remaining-- <= 0 || depth > 32) {
+        const cut = document.createElement('span'); cut.className = 'json-muted'; cut.textContent = '… 其余内容已折叠'; parent.append(cut); return;
+      }
+      const keyNode = () => {
+        const name = document.createElement('span'); name.className = 'json-key'; name.textContent = key === null ? '' : `${key}: `; return name;
+      };
+      if (item !== null && typeof item === 'object') {
+        const array = Array.isArray(item);
+        const entries = array ? item.length : countKeys(item);
+        const details = document.createElement('details'); details.className = 'json-node'; details.open = depth < 2;
+        const summary = document.createElement('summary'); summary.append(keyNode());
+        const shape = document.createElement('span'); shape.className = 'json-shape';
+        shape.textContent = `${array ? '[' : '{'} ${entries > 5000 ? '5000+' : entries} ${array ? '项' : '键'} ${array ? ']' : '}'}`; summary.append(shape);
+        details.append(summary);
+        const children = document.createElement('div'); children.className = 'json-children';
+        if (array) {
+          for (let index = 0; index < item.length; index++) {
+            if (remaining <= 0) { add(children, null, undefined, depth + 1); break; }
+            add(children, String(index), item[index], depth + 1);
+          }
+        } else {
+          for (const childKey in item) {
+            if (!Object.hasOwn(item, childKey)) continue;
+            if (remaining <= 0) { add(children, null, undefined, depth + 1); break; }
+            add(children, childKey, (item as Record<string, unknown>)[childKey], depth + 1);
+          }
+        }
+        details.append(children); parent.append(details);
+      } else {
+        const row = document.createElement('div'); row.className = 'json-leaf'; row.append(keyNode());
+        const literal = document.createElement('span'); literal.className = `json-${item === null ? 'null' : typeof item}`;
+        if (typeof item === 'string') {
+          const truncated = item.length > 2048;
+          literal.textContent = JSON.stringify(truncated ? item.slice(0, 2048) : item) + (truncated ? ` … (${item.length} 字符)` : '');
+        } else literal.textContent = String(item);
+        row.append(literal); parent.append(row);
+      }
+    };
+    const countKeys = (item: object): number => {
+      let count = 0;
+      for (const key in item) if (Object.hasOwn(item, key) && ++count > 5000) break;
+      return count;
+    };
+    add(tree, null, value, 0); element.replaceChildren(tree);
+  }).catch(error => {
+    if (!(error instanceof OversizedResourceError)) throw error;
+    const message = document.createElement('p'); message.className = 'json-status'; message.textContent = 'JSON 文件较大，无法在预览中展开。';
+    const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = '打开原始文件';
+    element.replaceChildren(message, link);
+  }));
   return {element, ready, dispose: () => abort.abort()};
 };
 export const imageContent: ContentFactory = (url, label) => {

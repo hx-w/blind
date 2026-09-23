@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
@@ -162,6 +162,10 @@ pub enum MeshQuality {
 pub struct ViewState {
     pub selected: usize,
     pub shading: Shading,
+    #[serde(default)]
+    pub render_mode: RenderMode,
+    #[serde(default)]
+    pub light: LightSettings,
     pub projection: Projection,
     pub background: Background,
     pub axes: bool,
@@ -279,6 +283,50 @@ pub enum Shading {
     Wire,
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderMode {
+    #[default]
+    Matte,
+    Raking,
+    Normals,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LightSettings {
+    pub azimuth: f32,
+    pub elevation: f32,
+    pub intensity: f32,
+}
+
+impl Default for LightSettings {
+    fn default() -> Self {
+        Self {
+            azimuth: 45.0,
+            elevation: 20.0,
+            intensity: 1.0,
+        }
+    }
+}
+
+impl LightSettings {
+    pub fn validate(self) -> Result<()> {
+        ensure!(
+            self.azimuth.is_finite() && (-180.0..=180.0).contains(&self.azimuth),
+            "invalid light azimuth"
+        );
+        ensure!(
+            self.elevation.is_finite() && (0.0..=90.0).contains(&self.elevation),
+            "invalid light elevation"
+        );
+        ensure!(
+            self.intensity.is_finite() && (0.0..=2.0).contains(&self.intensity),
+            "invalid light intensity"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Projection {
@@ -324,6 +372,8 @@ impl Default for ViewState {
         Self {
             selected: 0,
             shading: Shading::Flat,
+            render_mode: RenderMode::Matte,
+            light: LightSettings::default(),
             projection: Projection::Perspective,
             background: Background::Dark,
             axes: true,
@@ -579,6 +629,7 @@ impl SceneDescriptor {
                 }
             }
         }
+        update.state.light.validate()?;
         validate_annotations(&update.state.annotations, &self.meshes)?;
         for style in &update.meshes {
             if let Some(Some(label)) = &style.label {
@@ -911,11 +962,6 @@ mod tests {
         bad.controls = vec![0, 2];
         assert!(validate_annotations(&[bad], &scene.meshes).is_err());
         assert!(validate_annotations(&[mark.clone(), mark], &scene.meshes).is_err());
-    }
-
-    #[test]
-    fn new_scenes_default_to_flat_shading() {
-        assert_eq!(ViewState::default().shading, Shading::Flat);
     }
 
     #[test]

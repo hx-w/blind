@@ -23,14 +23,15 @@ Explicit component selection always wins over filename inference.
 | --- | --- |
 | `.ply`, `.stl`, `.obj` | `mesh` |
 | `.pts` | `points` (existing ordered-point/curve rendering) |
-| `.log`, `.txt`, `.md`, `.csv`, `.jsonl`, ordinary `.json` | `text` |
+| `.log`, `.txt`, `.md`, `.csv`, `.jsonl` | `text` |
+| ordinary `.json` | `json` |
 | `trace.json`, `tracing.json`, `*.trace.json` with Cyclops installed | `cyclops:trace` |
 | `.html`, `.htm` | `html` |
 | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | `image` |
 
 Matching is case-insensitive and uses the source filename, including OSS keys.
 Unknown extensions require an explicit component. JSON is not guessed from its
-contents: `execution.json` remains text; use `--component cyclops:trace` for a trace with
+contents: `execution.json` uses the collapsible JSON viewer; use `--component cyclops:trace` for a trace with
 another filename. File contents must still be valid for the chosen renderer.
 
 ## Groups and layout
@@ -75,26 +76,34 @@ its path for an additional instance. A scene may consist entirely of surfaces.
 - Details shows common visibility/opacity and type-appropriate settings.
   Hiding retains nonzero opacity. Zero opacity is hidden; enabling it restores
   full opacity. Changing opacity above zero shows the element.
-- Drag a surface title to move it in XY; drag its corner to resize proportionally.
-  Focus its title and use arrow keys for position, Shift for a larger step.
+- Surface sizes come from the share configuration. Dragging a surface title navigates
+  the scene; the viewer has no drag resize control.
 - Select geometry, then Alt-drag to move it in the camera plane. In the scene
   list, Alt-arrow moves any selected element in XY; Shift increases the step.
-- Surface content does not consume scene gestures. Click it or **展开** to read,
-  scroll or interact. **全屏** requests browser fullscreen. Escape / **返回场景**
-  returns to the same layout. Spatial opacity does not reduce expanded readability.
-- Fullscreen support depends on the browser. Expanded content remains usable
-  when native fullscreen is unavailable. Perfetto and HTML own keyboard input
+- Surface content does not consume scene gestures. Click once to select, double click
+  or press Enter to expand and interact. Escape / **返回场景** returns to the same layout.
+  Spatial opacity does not reduce expanded readability. Perfetto and HTML own keyboard input
   inside their frames; the surrounding return button remains available.
 - Share preserves positions, surface sizes, visibility, opacity, camera and
   existing annotations. A public reshare creates a new link, following existing
   Blind ownership behavior.
+- On macOS, Cmd+C copies an image link for the current view, and Cmd+Shift+C
+  copies its view link. On other desktop systems use Ctrl. Text selection and editable fields keep
+  their normal copy behavior.
+- The Render tool switches between the existing shadowless matte appearance,
+  adjustable raking light, and surface normals. The chosen mode and light settings
+  are saved in view and image links. Inspection modes show filled surfaces even if
+  wireframe is selected in Details; returning to the matte mode restores wireframe.
 
 ## Renderer contract
 
 `web/src/scene-components.ts` defines the shared component schema,
 `ComponentCapabilities`, `ComponentRuntime` and `ComponentRegistry`. Each
 renderer registers its type and declares supported presentations (`spatial`,
-`focus`, `fullscreen`), movement, resizing and input ownership by presentation.
+`focus`, `fullscreen` for legacy plugins), movement, and input ownership by presentation.
+The protocol still accepts `resizable` for older plugins, but the Viewer ignores it
+and has no drag resize control. A legacy plugin declaring only `fullscreen` opens
+in the focus dialog without requesting browser fullscreen.
 The host owns grouping, selection, scene list, layout, focus container and sharing.
 Renderers implement bounds, position, visibility, opacity, presentation, focus,
 selection and disposal. Geometry adapters retain the existing mesh loader, LOD,
@@ -126,9 +135,9 @@ Add to `blind-plugin.json`:
     "entrypoint": "components/table.html",
     "extensions": ["table.json"],
     "capabilities": {
-      "presentations": ["spatial", "focus", "fullscreen"],
-      "movable": true,
-      "resizable": true
+      "presentations": ["spatial", "focus"],
+      "movable": false,
+      "resizable": false
     },
     "frame_origins": []
   }],
@@ -141,7 +150,7 @@ package may use empty `schemes` and `entrypoint` arrays. Other manifest fields a
 installation checks are unchanged. `blind plugin list` exposes registered components.
 Choose explicitly with `--component example:table` or use extension detection:
 longest matching suffix wins; equally specific matches fail with an explicit-choice
-message. Built-in geometry suffixes are reserved. Bare JSON remains text when no
+message. Built-in geometry suffixes are reserved. Bare JSON uses the JSON viewer when no
 installed renderer matches. A plugin can provide an alternative display for a file
 by using its own namespaced type; it cannot silently replace core code in the parent.
 
@@ -214,12 +223,15 @@ It never connects to a user's browser. The frame uses saved canvas dimensions.
 HTML's load event cannot prove completion of arbitrary asynchronous application
 code; use the plugin readiness protocol for such content.
 
-Text renders as text, never HTML. HTML supports self-contained sandboxed documents with embedded data/blob images;
+Text renders as text, never HTML. JSON renders as a collapsible, escaped tree.
+The JSON preview is limited to 4 MiB and 5,000 nodes; larger files remain available
+through a link to the original attachment. Long string values are shortened in the preview.
+HTML supports self-contained sandboxed documents with embedded data/blob images;
 relative asset bundles are not expanded. CSS 3D surfaces share the camera with WebGL
 but not its depth buffer, so they are not mesh-occluded geometry. Frame labels have
 no external leader lines.
 
-Blind has five built-ins: `mesh`, `points`, `text`, `html`, `image`. Order/task naming,
+Blind has six built-ins: `mesh`, `points`, `text`, `json`, `html`, `image`. Order/task naming,
 trace recognition and Perfetto integration belong to Cyclops. Cyclops provides an
 exportable Chrome Trace JSON preview and optional Perfetto analysis in the expanded
 component; no second scene-level timeline is introduced.

@@ -6,6 +6,7 @@ import { ApiError, loadScene, shareScene, type HostCandidate, type MeshQuality, 
 import { MarkupCanvas } from './markup';
 import { MeshViewer } from './viewer';
 import { SurfaceEditor } from './surface';
+import { installShortcuts } from './shortcuts';
 
 const $ = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -23,6 +24,12 @@ const meta = $('#scene-meta');
 const sceneInfo = $('#scene-info');
 const sceneInfoToggle = $('#scene-info-toggle');
 const meshControls = $('#mesh-controls');
+const renderControls = $('#render-controls');
+const renderTrigger = $('#render-trigger') as HTMLButtonElement;
+const lightControls = $('#light-controls');
+const lightAzimuth = $('#light-azimuth') as HTMLInputElement;
+const lightElevation = $('#light-elevation') as HTMLInputElement;
+const lightIntensity = $('#light-intensity') as HTMLInputElement;
 const panelTitle = $('#panel-title');
 const panelScroll = $('#panel-scroll');
 const loading = $('#loading-state');
@@ -73,10 +80,13 @@ $('.skip-link').addEventListener('click', (event) => {
 });
 let owner = token ? restoreOwner(token) : undefined;
 let scene: PublicScene | undefined;
+let sceneReady = false;
 let components: ComponentViewer | undefined;
 let panelOpen = false;
-let panelMode: 'mesh' | 'info' = 'mesh';
+let panelMode: 'mesh' | 'info' | 'render' = 'mesh';
 let shareLinks: ShareResponse | undefined;
+let shareRequestGeneration = 0;
+let shortcutCopyGeneration = 0;
 let toastTimer = 0;
 let panelHeight = 0;
 let dragStart: { y: number; height: number } | null = null;
@@ -160,6 +170,7 @@ async function start(): Promise<void> {
         const row = document.createElement('p'); row.textContent = `${loadProgress.failed} 个模型加载失败；请检查网络或稍后重试。`; artifactList.prepend(row);
       }
     }
+    sceneReady = true;
     finishLoading();
     if (exportMode) {
       if (loadProgress.failed) throw new Error('Export failed: geometry unavailable');
@@ -168,6 +179,7 @@ async function start(): Promise<void> {
       document.documentElement.dataset.renderStatus = 'ready';
     }
   } catch (error) {
+    sceneReady = false;
     if (exportMode) { document.documentElement.dataset.renderStatus = 'error'; document.documentElement.dataset.renderError = error instanceof Error ? error.message : 'Scene render failed'; }
     finishLoading(); hideViewerControls();
     invalid.hidden = false;
@@ -249,6 +261,7 @@ function syncDetailControls(): void {
   }
   const state = meshViewer.currentState;
   axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
+  syncRenderControls();
   document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach(button => button.classList.toggle('active', button.dataset.projection === state.projection));
   if (component && !geometry) {
     panelContext.textContent = panelOpen && panelMode === 'mesh' ? component.label : '';
@@ -290,18 +303,43 @@ function syncDetailControls(): void {
 detailsTrigger.addEventListener('click', () => {
   if (panelOpen && panelMode === 'mesh') closePanel(); else openPanel('mesh');
 });
+renderTrigger.addEventListener('click', () => {
+  if (panelOpen && panelMode === 'render') closePanel(); else openPanel('render');
+});
+
+function syncRenderControls(): void {
+  const mode = meshViewer.renderMode, light = meshViewer.lightSettings;
+  document.querySelectorAll<HTMLButtonElement>('[data-render-mode]').forEach(button => {
+    const active = button.dataset.renderMode === mode;
+    button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
+  });
+  lightControls.hidden = mode !== 'raking';
+  lightAzimuth.value = String(light.azimuth); lightElevation.value = String(light.elevation); lightIntensity.value = String(Math.round(light.intensity * 100));
+  $('#light-azimuth-value').textContent = `${light.azimuth}°`;
+  $('#light-elevation-value').textContent = `${light.elevation}°`;
+  $('#light-intensity-value').textContent = `${Math.round(light.intensity * 100)}%`;
+}
+
+document.querySelectorAll<HTMLButtonElement>('[data-render-mode]').forEach(button => button.addEventListener('click', () => {
+  meshViewer.setRenderMode(button.dataset.renderMode as 'matte' | 'raking' | 'normals'); syncRenderControls();
+  if (panelOpen && panelMode === 'render' && isMobileViewport() && !expanded) setPanelHeight(innerHeight * renderPanelRatio());
+}));
+for (const input of [lightAzimuth, lightElevation, lightIntensity]) input.addEventListener('input', () => {
+  meshViewer.setLight({azimuth: Number(lightAzimuth.value), elevation: Number(lightElevation.value), intensity: Number(lightIntensity.value) / 100});
+  syncRenderControls();
+});
 
 meshLabelText.addEventListener('input', () => { meshViewer.setLabel(meshLabelText.value); components?.sync(); });
 
-function openPanel(mode: 'mesh' | 'info'): void {
+function openPanel(mode: 'mesh' | 'info' | 'render'): void {
   panelOpen = true; expanded = false;
   panelMode = mode;
-  sceneInfo.hidden = mode !== 'info'; meshControls.hidden = mode !== 'mesh';
-  panelTitle.textContent = mode === 'info' ? '场景信息' : '详情';
+  sceneInfo.hidden = mode !== 'info'; meshControls.hidden = mode !== 'mesh'; renderControls.hidden = mode !== 'render';
+  panelTitle.textContent = mode === 'info' ? '场景信息' : mode === 'render' ? '渲染检视' : '详情';
   panelScroll.classList.toggle('show-scene-info', mode === 'info');
   panelScroll.scrollTop = 0;
   syncPanelTriggers();
-  if (isMobileViewport()) setPanelHeight(innerHeight * 0.58);
+  if (isMobileViewport()) setPanelHeight(innerHeight * (mode === 'render' ? renderPanelRatio() : 0.58));
   dragZone.setAttribute('aria-label', '展开详情面板');
   shell.classList.add('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'false');
   panel.inert = false;
@@ -310,14 +348,14 @@ function openPanel(mode: 'mesh' | 'info'): void {
 
 function closePanel(restoreFocus = false): void {
   panelOpen = false; shell.classList.remove('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'true');
-  if (restoreFocus) (panelMode === 'info' ? sceneInfoToggle : detailsTrigger).focus();
+  if (restoreFocus) (panelMode === 'info' ? sceneInfoToggle : panelMode === 'render' ? renderTrigger : detailsTrigger).focus();
   panel.inert = true;
   syncPanelTriggers();
   shell.style.setProperty('--sheet-height', '0px');
 }
 
 function syncPanelTriggers(): void {
-  for (const [trigger, mode] of [[detailsTrigger, 'mesh'], [sceneInfoToggle, 'info']] as const) {
+  for (const [trigger, mode] of [[detailsTrigger, 'mesh'], [renderTrigger, 'render'], [sceneInfoToggle, 'info']] as const) {
     const active = panelOpen && panelMode === mode;
     trigger.classList.toggle('active', active);
     trigger.setAttribute('aria-expanded', String(active));
@@ -328,6 +366,8 @@ function setPanelHeight(value: number): void {
   panelHeight = Math.max(0, Math.min(value, innerHeight * 0.82));
   shell.style.setProperty('--sheet-height', `${panelHeight}px`);
 }
+
+function renderPanelRatio(): number { return meshViewer.renderMode === 'raking' ? 0.58 : 0.43; }
 
 dragZone.addEventListener('pointerdown', (event) => {
   if (!panelOpen || !isMobileViewport()) return;
@@ -355,7 +395,7 @@ dragZone.addEventListener('keydown', (event) => {
 });
 
 function applyDetailDetent(): void {
-  setPanelHeight(innerHeight * (expanded ? 0.82 : 0.58));
+  setPanelHeight(innerHeight * (expanded ? 0.82 : panelMode === 'render' ? renderPanelRatio() : 0.58));
   panel.classList.toggle('expanded', expanded);
   dragZone.setAttribute('aria-label', expanded ? '收起详情面板' : '展开详情面板');
 }
@@ -391,7 +431,7 @@ $('#share-view').addEventListener('click', async () => {
   if (!token) return;
   const button = $('#share-view') as HTMLButtonElement; button.disabled = true; button.classList.add('working');
   try {
-    await refreshShareLinks();
+    if (!await refreshShareLinks()) return;
     resetShareSheet();
     shareDialog.showModal();
   } catch (error) { showToast(error instanceof Error ? error.message : '无法创建分享链接'); }
@@ -401,20 +441,26 @@ $('#share-view').addEventListener('click', async () => {
 shareHostTrigger.addEventListener('click', openHostPicker);
 backHost.addEventListener('click', showShareMain);
 
-async function refreshShareLinks(origin?: string): Promise<void> {
-  if (!token) return;
+async function refreshShareLinks(origin?: string): Promise<ShareResponse | null> {
+  if (!token) throw new Error('场景链接不可用');
+  const generation = ++shareRequestGeneration;
   markup.finishActive();
   surface.finishForShare();
-  shareLinks = await shareScene(token, meshViewer.exportUpdate(), owner, origin);
-  renderShareHosts(shareLinks);
-  copyFull.hidden = !shareLinks.full_text;
+  let links: ShareResponse;
+  try { links = await shareScene(token, meshViewer.exportUpdate(), owner, origin); }
+  catch (error) { if (generation !== shareRequestGeneration) return null; throw error; }
+  if (generation !== shareRequestGeneration) return null;
+  shareLinks = links;
+  renderShareHosts(links);
+  copyFull.hidden = !links.full_text;
+  return links;
 }
 
 async function selectShareHost(origin: string): Promise<void> {
   if (!token || !shareLinks) return;
   setShareBusy(true);
   try {
-    await refreshShareLinks(origin);
+    if (!await refreshShareLinks(origin)) return;
     showShareMain();
     showToast('链接地址已切换');
   } catch (error) {
@@ -440,6 +486,43 @@ document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((button) => 
     showManualCopy(value);
   }
 }));
+installShortcuts([
+  {key: 'c', run: () => copyCurrentLink('image')},
+  {key: 'c', shift: true, run: () => copyCurrentLink('view')},
+], () => sceneReady && !exportMode && !(/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+  || matchMedia('(pointer: coarse) and (hover: none)').matches));
+
+async function copyCurrentLink(kind: 'image' | 'view'): Promise<void> {
+  if (!token) return;
+  const generation = ++shortcutCopyGeneration;
+  const pending = refreshShareLinks(shareLinks?.origin).then(links => {
+    if (!links || generation !== shortcutCopyGeneration) throw new SupersededShare();
+    return kind === 'image' ? links.image_url : links.viewer_url;
+  });
+  // Start the clipboard write in the key event's user activation. Safari loses
+  // that activation if the share request is awaited before calling write().
+  let writeResult: Promise<boolean> | undefined;
+  if (window.isSecureContext && navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
+    try {
+      const item = new ClipboardItem({'text/plain': pending.then(value => new Blob([value], {type: 'text/plain'}))});
+      writeResult = navigator.clipboard.write([item]).then(() => true, () => false);
+    } catch { /* Fall back to a plain text write or manual copy. */ }
+  }
+  try {
+    const value = await pending;
+    if (generation !== shortcutCopyGeneration) return;
+    if (writeResult ? await writeResult : await copyText(value).catch(() => false)) {
+      if (generation === shortcutCopyGeneration) showToast(kind === 'image' ? '图片链接已复制' : '视角链接已复制');
+      return;
+    }
+    if (generation !== shortcutCopyGeneration) return;
+    resetShareSheet(); shareDialog.showModal(); showManualCopy(value);
+  } catch (error) {
+    if (error instanceof SupersededShare) return;
+    if (generation === shortcutCopyGeneration) showToast(error instanceof Error ? error.message : '无法复制链接');
+  }
+}
+class SupersededShare extends Error {}
 $('#select-copy').addEventListener('click', selectManualCopy);
 $('#back-share').addEventListener('click', resetShareSheet);
 $('#close-share').addEventListener('click', () => { shareDialog.close(); resetShareSheet(); });

@@ -13,10 +13,20 @@
 .component-content pre { padding: 16px 18px; margin: 0; width: max-content; min-width: 100%; font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; color: var(--text-secondary); }
 .component-content iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
 .component-content img { display: block; width: 100%; height: 100%; object-fit: contain; }
-.component-enter { position: absolute; inset: 0; width: 100%; border: 0; background: transparent; cursor: zoom-in; touch-action: none; }
+.component-enter { position: absolute; inset: 0; width: 100%; border: 0; background: transparent; cursor: pointer; touch-action: none; }
 .component-enter:active { transform: none; }
-.component-resize { position: absolute; bottom: 0; right: 0; width: 24px; height: 24px; border: 0; background: var(--surface-2); color: transparent; font-size: 0; cursor: nwse-resize; touch-action: none; }
-.component-resize::after { content: ''; position: absolute; right: 5px; bottom: 5px; width: 7px; height: 7px; border-right: 1px solid var(--text-secondary); border-bottom: 1px solid var(--text-secondary); }
+.component-json { padding: 16px 18px; color: var(--text-secondary); font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.json-status { margin: 0; }
+.component-json a { color: var(--accent); text-underline-offset: 3px; }
+.json-tree { min-width: max-content; padding-right: 12px; }
+.json-node { margin: 0; }
+.json-node > summary { width: max-content; max-width: 100%; padding: 2px 7px 2px 1px; border-radius: 4px; cursor: pointer; list-style-position: inside; }
+.json-node > summary:hover, .json-node > summary:focus-visible { background: var(--surface-2); }
+.json-children { margin-left: 10px; padding-left: 13px; border-left: 1px solid var(--line); }
+.json-leaf { padding: 1px 0 1px 18px; white-space: pre; }
+.json-key { color: var(--text); }.json-shape, .json-muted { color: var(--text-tertiary); }
+.json-string { color: oklch(0.76 0.11 155); }.json-number { color: oklch(0.78 0.11 70); }.json-boolean { color: oklch(0.75 0.10 255); }.json-null { color: var(--text-tertiary); }
+:root[data-theme="light"] .json-string { color: oklch(0.44 0.12 155); }:root[data-theme="light"] .json-number { color: oklch(0.48 0.13 70); }:root[data-theme="light"] .json-boolean { color: oklch(0.46 0.12 255); }
 .component-error, .component-status { padding: 16px; font-size: 13px; color: var(--text-secondary); }
 .component-status { position: absolute; z-index: 1; margin: 0; background: var(--surface-1); }
 .component-status button, .component-status a { margin-left: 12px; color: var(--accent); }
@@ -49,8 +59,7 @@
 .component-dialog h2 { flex: 1; min-width: 0; margin: 0; font-size: 14px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .component-expanded-content { flex: 1; min-height: 0; }
 .scene-surface.expanded { border: 0; border-radius: 0; opacity: 1 !important; }
-.scene-surface.expanded .component-handle, .scene-surface.expanded .component-enter, .scene-surface.expanded .component-resize { display: none; }
-.component-dialog:fullscreen { width: 100vw; height: 100dvh; max-width: none; border: 0; border-radius: 0; }
+.scene-surface.expanded .component-handle, .scene-surface.expanded .component-enter { display: none; }
 @media (max-width: 1099px), (max-height: 599px) {
   .panel-open .scene-tree { display: none; }
   .component-dialog { width: 100vw; height: 100dvh; max-width: none; margin: 0; border: 0; border-radius: 0; }
@@ -65,7 +74,7 @@
 }
 /* The export viewport equals the saved canvas frame; no editor chrome consumes space. */
 .export-mode [data-viewer-chrome], .export-mode .topbar, .export-mode .control-panel,
-.export-mode .scene-tree, .export-mode .component-handle button, .export-mode .component-resize,
+.export-mode .scene-tree, .export-mode .component-handle button,
 .export-mode .component-enter, .export-mode .skip-link { display: none !important; }
 .export-mode .viewer { inset: 0 !important; }
 .export-mode .scene-surface.selected { border-color: var(--line); }

@@ -12,7 +12,9 @@ use crate::{
     mesh::Geometry,
     render_labels::{RenderLabel, overlay_labels},
     render_occlusion::Occluders,
-    scene::{Background, Projection, SceneDescriptor, ScreenStroke, Shading, parse_hex_color},
+    scene::{
+        Background, Projection, RenderMode, SceneDescriptor, ScreenStroke, Shading, parse_hex_color,
+    },
 };
 
 const MAX_RENDER_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
@@ -46,6 +48,9 @@ struct Uniform {
     curve_edge: [f32; 4],
     point_scale: [f32; 4],
     point_color: [f32; 4],
+    inspection: [f32; 4],
+    camera_right: [f32; 4],
+    camera_back: [f32; 4],
 }
 
 #[derive(Clone, Deserialize)]
@@ -335,6 +340,28 @@ impl Renderer {
                 0.0,
             ],
             point_color: [0.0; 4],
+            inspection: [
+                match input.render_mode {
+                    RenderMode::Matte => 0.0,
+                    RenderMode::Raking => 1.0,
+                    RenderMode::Normals => 2.0,
+                },
+                input.light_intensity,
+                0.0,
+                0.0,
+            ],
+            camera_right: [
+                input.camera_right.x,
+                input.camera_right.y,
+                input.camera_right.z,
+                0.0,
+            ],
+            camera_back: [
+                input.camera_back.x,
+                input.camera_back.y,
+                input.camera_back.z,
+                0.0,
+            ],
         };
         // Every batch gets its own uniform slot so point batches carry their
         // shared color without paying per point.
@@ -543,6 +570,10 @@ struct RenderInput {
     camera_up: Vec3,
     key_direction: Vec3,
     fill_direction: Vec3,
+    camera_right: Vec3,
+    camera_back: Vec3,
+    render_mode: RenderMode,
+    light_intensity: f32,
     background: wgpu::Color,
     strokes: Vec<ScreenStroke>,
 }
@@ -668,7 +699,7 @@ fn load_scene_geometry_bytes(
         .collect();
     let mut batches = Vec::new();
     let mut line_vertices = Vec::new();
-    let wire = scene.state.shading == Shading::Wire;
+    let wire = scene.state.shading == Shading::Wire && scene.state.render_mode == RenderMode::Matte;
     let flat = scene.state.shading == Shading::Flat;
     for (_layer, mesh, geometry, mesh_min, mesh_max) in loaded {
         let color = parse_color(&mesh.color, mesh.opacity)?;
@@ -847,8 +878,22 @@ fn load_scene_geometry_bytes(
         view_projection: projection * view,
         camera_position: position,
         camera_up,
-        key_direction: camera_direction(material.key_direction),
+        key_direction: camera_direction(if scene.state.render_mode == RenderMode::Matte {
+            material.key_direction
+        } else {
+            let azimuth = scene.state.light.azimuth.to_radians();
+            let elevation = scene.state.light.elevation.to_radians();
+            [
+                azimuth.cos() * elevation.cos(),
+                azimuth.sin() * elevation.cos(),
+                elevation.sin(),
+            ]
+        }),
         fill_direction: camera_direction(material.fill_direction),
+        camera_right,
+        camera_back,
+        render_mode: scene.state.render_mode,
+        light_intensity: scene.state.light.intensity,
         background,
         strokes: scene.state.strokes.clone(),
     })
@@ -1434,6 +1479,54 @@ mod tests {
     #[tokio::test]
     async fn renderer_initializes_all_shader_pipelines() {
         Renderer::new().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspection_modes_and_light_settings_affect_png() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tetra.ply");
+        let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
+        scene.state.axes = false;
+        scene.state.frame.width = 128;
+        scene.state.frame.height = 128;
+        let sources = scene
+            .meshes
+            .iter()
+            .map(|m| Some(std::fs::read(&m.path).unwrap()))
+            .collect::<Vec<_>>();
+        let renderer = Renderer::new().await.unwrap();
+        let matte = renderer.render(&scene, sources.clone()).await.unwrap();
+        scene.state.render_mode = RenderMode::Raking;
+        let raking = renderer.render(&scene, sources.clone()).await.unwrap();
+        scene.state.light.azimuth = -90.0;
+        let moved_light = renderer.render(&scene, sources.clone()).await.unwrap();
+        scene.state.render_mode = RenderMode::Normals;
+        let normals = renderer.render(&scene, sources.clone()).await.unwrap();
+        for png in [&matte, &raking, &moved_light, &normals] {
+            assert_eq!(image::load_from_memory(png).unwrap().width(), 128);
+        }
+        assert_ne!(matte, raking);
+        assert_ne!(raking, moved_light);
+        assert_ne!(moved_light, normals);
+        scene.state.shading = Shading::Wire;
+        scene.state.render_mode = RenderMode::Matte;
+        let wire = renderer.render(&scene, sources.clone()).await.unwrap();
+        scene.state.render_mode = RenderMode::Raking;
+        let filled = renderer.render(&scene, sources).await.unwrap();
+        let coverage = |png: &[u8]| {
+            let image = image::load_from_memory(png).unwrap().to_rgb8();
+            let background = image.get_pixel(0, 0).0;
+            image
+                .pixels()
+                .filter(|pixel| {
+                    pixel
+                        .0
+                        .iter()
+                        .zip(background)
+                        .any(|(value, base)| value.abs_diff(base) > 8)
+                })
+                .count()
+        };
+        assert!(coverage(&filled) > coverage(&wire) * 2);
     }
 
     #[tokio::test]

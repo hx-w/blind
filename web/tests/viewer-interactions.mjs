@@ -42,6 +42,233 @@ before(async () => {
     executablePath: process.env.BLIND_TEST_CHROMIUM || undefined,
     args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
 });
+
+test('render tool and desktop copy shortcuts preserve inspection settings in shared links', async () => {
+  const page = await openPage({width: 900, height: 700});
+  const copyModifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+  try {
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {
+      write: async items => { window.writeStarted = true; window.copied = await (await items[0].getType('text/plain')).text(); },
+      writeText: async value => { window.copied = value; },
+    }}));
+    await page.locator('#render-trigger').click();
+    assert.equal(await page.locator('[data-render-mode="matte"]').getAttribute('aria-pressed'), 'true');
+    await page.locator('[data-render-mode="raking"]').click();
+    await page.locator('#light-azimuth').fill('-70');
+    await page.locator('#light-elevation').fill('12');
+    await page.locator('#light-intensity').fill('140');
+    if (process.env.BLIND_TEST_SCREENSHOTS) {
+      await mkdir(process.env.BLIND_TEST_SCREENSHOTS, {recursive:true});
+      await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/render-tool.png`});
+    }
+    await page.locator('#close-panel').click();
+    let update = await captureShare(page);
+    assert.equal(update.state.render_mode, 'raking');
+    assert.deepEqual(update.state.light, {azimuth: -70, elevation: 12, intensity: 1.4});
+    let releaseShare;
+    const shareGate = new Promise(resolve => { releaseShare = resolve; });
+    await page.route('**/api/v1/scenes/*/share', async route => { await shareGate; await route.continue(); }, {times:1});
+    await page.keyboard.press(`${copyModifier}+c`);
+    assert.equal(await page.evaluate(() => window.writeStarted), true, 'clipboard write must start before the share request finishes');
+    releaseShare();
+    await page.waitForFunction(() => window.copied?.endsWith('/i/fixture.png'));
+    await page.keyboard.press(`${copyModifier}+Shift+c`);
+    await page.waitForFunction(() => window.copied?.endsWith('/s/fixture'));
+    await page.locator('#render-trigger').click();
+    await page.locator('[data-render-mode="normals"]').click();
+    await page.locator('#close-panel').click();
+    update = await captureShare(page);
+    assert.equal(update.state.render_mode, 'normals');
+    await page.locator('.panel-trigger').click();
+    await page.locator('#mesh-label-text').fill('copy text');
+    await page.locator('#mesh-label-text').focus();
+    await page.evaluate(() => { window.copied = 'unchanged'; });
+    await page.keyboard.press(`${copyModifier}+c`);
+    assert.equal(await page.evaluate(() => window.copied), 'unchanged');
+    await page.setViewportSize({width: 390, height: 700});
+    await page.locator('#mesh-label-text').blur();
+    await page.keyboard.press(`${copyModifier}+Shift+c`);
+    await page.waitForFunction(() => window.copied?.endsWith('/s/fixture'));
+    await page.locator('#render-trigger').click();
+    assert.equal(await page.locator('#render-controls').isVisible(), true);
+    const compactHeight = await page.locator('#control-panel').evaluate(element => element.getBoundingClientRect().height);
+    if (process.env.BLIND_TEST_SCREENSHOTS) await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/render-tool-mobile.png`});
+    await page.locator('[data-render-mode="raking"]').click();
+    assert.equal(await page.locator('#light-controls').isVisible(), true);
+    assert.equal(await page.locator('[data-render-mode="raking"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('[data-render-mode="normals"]').getAttribute('aria-pressed'), 'false');
+    const lightHeight = await page.locator('#control-panel').evaluate(element => element.getBoundingClientRect().height);
+    assert.ok(lightHeight > compactHeight + 80);
+    if (process.env.BLIND_TEST_SCREENSHOTS) {
+      await page.waitForTimeout(200);
+      await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/render-light-mobile.png`});
+    }
+    await page.evaluate(() => {
+      window.copied = 'mobile untouched';
+      Object.defineProperty(navigator, 'userAgent', {configurable:true,value:`${navigator.userAgent} Mobile`});
+    });
+    await page.keyboard.press(`${copyModifier}+c`);
+    assert.equal(await page.evaluate(() => window.copied), 'mobile untouched');
+  } finally { await page.close(); }
+});
+
+test('the latest copy shortcut wins when share requests finish out of order', async () => {
+  const page = await openPage({width:900,height:700});
+  const modifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+  let calls = 0;
+  let firstIntercept;
+  const firstIntercepted = new Promise(resolve => { firstIntercept = resolve; });
+  let thirdIntercept;
+  const thirdIntercepted = new Promise(resolve => { thirdIntercept = resolve; });
+  try {
+    await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{
+      write: async items => { window.copied = await (await items[0].getType('text/plain')).text(); },
+    }}));
+    await page.route('**/api/v1/scenes/*/share', async route => {
+      const order = ++calls;
+      if (order === 1) firstIntercept();
+      if (order === 3) thirdIntercept();
+      await new Promise(resolve => setTimeout(resolve, order === 1 || order === 3 ? 300 : 20));
+      await route.fulfill({json:{viewer_url:`${origin}/s/${order}`,image_url:`${origin}/i/${order}.png`,origin,hosts:[]}});
+    });
+    await page.keyboard.press(`${modifier}+c`);
+    await firstIntercepted;
+    await page.keyboard.press(`${modifier}+Shift+c`);
+    await page.waitForFunction(expected => window.copied === expected, `${origin}/s/2`);
+    await page.waitForTimeout(350);
+    assert.equal(await page.evaluate(() => window.copied), `${origin}/s/2`);
+    assert.equal(calls, 2);
+    await page.locator('#share-view').click();
+    await thirdIntercepted;
+    await page.keyboard.press(`${modifier}+c`);
+    await page.waitForFunction(expected => window.copied === expected, `${origin}/i/4.png`);
+    await page.waitForTimeout(350);
+    assert.equal(await page.locator('#share-sheet').evaluate(element => element.open), false, 'a stale share request must not open the sheet');
+    assert.equal(calls, 4);
+  } finally { await page.close(); }
+});
+
+test('raking light resolves shallow bumps and pits from either direction', async () => {
+  const count = 81, vertices = [], faces = [];
+  for (let row = 0; row < count; row++) for (let col = 0; col < count; col++) {
+    const x = col * 2 / (count - 1) - 1, y = row * 2 / (count - 1) - 1;
+    const bump = Math.exp(-((x + .42) ** 2 + y ** 2) / .035);
+    const pit = Math.exp(-((x - .42) ** 2 + y ** 2) / .035);
+    vertices.push(`${x} ${y} ${(.06 * (bump - pit)).toFixed(6)}`);
+  }
+  for (let row = 0; row < count - 1; row++) for (let col = 0; col < count - 1; col++) {
+    const a = row * count + col, b = a + 1, c = a + count, d = c + 1;
+    faces.push(`3 ${a} ${b} ${d}`, `3 ${a} ${d} ${c}`);
+  }
+  const ply = `ply\nformat ascii 1.0\nelement vertex ${vertices.length}\nproperty float x\nproperty float y\nproperty float z\nelement face ${faces.length}\nproperty list uchar int vertex_indices\nend_header\n${vertices.join('\n')}\n${faces.join('\n')}\n`;
+  const data = structuredClone(scene);
+  data.meshes = [{...data.meshes[0],name:'Relief',label:null,color:'#b8b8b8',byte_size:Buffer.byteLength(ply)}];
+  data.label_groups = []; data.state = {...data.state,shading:'flat',strokes:[],camera:{position:[0,0,4],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:3}};
+  const page = await openPage({width:800,height:800},0,data,[ply]);
+  const measure = async name => {
+    const png = await page.screenshot();
+    if (process.env.BLIND_TEST_SCREENSHOTS) {
+      await mkdir(process.env.BLIND_TEST_SCREENSHOTS,{recursive:true});
+      const {writeFile} = await import('node:fs/promises');
+      await writeFile(`${process.env.BLIND_TEST_SCREENSHOTS}/relief-${name}.png`,png);
+    }
+    return page.evaluate(async source => {
+      const image = new Image(); image.src = source; await image.decode();
+      const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+      const context = canvas.getContext('2d'); context.drawImage(image,0,0);
+      const region = context.getImageData(Math.round(image.width * .25),Math.round(image.height * .35),Math.round(image.width * .5),Math.round(image.height * .3));
+      const pixels = region.data, values = [];
+      for (let i=0;i<pixels.length;i+=4) {
+        const value = (pixels[i]+pixels[i+1]+pixels[i+2])/3;
+        values.push(value);
+      }
+      const mean = values.reduce((sum,value)=>sum+value,0)/values.length;
+      return {mean, contrast: Math.sqrt(values.reduce((sum,value)=>sum+(value-mean)**2,0)/values.length)};
+    },`data:image/png;base64,${png.toString('base64')}`);
+  };
+  try {
+    const matte = await measure('matte');
+    await page.locator('.panel-trigger').click();
+    await page.locator('[data-shading="wire"]').click();
+    await page.locator('#close-panel').click();
+    await page.locator('#render-trigger').click();
+    await page.locator('[data-render-mode="raking"]').click();
+    await page.locator('#light-azimuth').fill('0');
+    await page.locator('#close-panel').click();
+    await page.waitForTimeout(300);
+    const east = await measure('east');
+    await page.locator('#render-trigger').click();
+    await page.locator('#light-azimuth').fill('180');
+    await page.locator('#close-panel').click();
+    await page.waitForTimeout(300);
+    const west = await measure('west');
+    assert.ok(east.contrast > matte.contrast * 1.8, `east light must expose relief: ${JSON.stringify({matte,east})}`);
+    assert.ok(west.contrast > matte.contrast * 1.8, `west light must expose relief: ${JSON.stringify({matte,west})}`);
+    assert.ok(Math.abs(east.mean - west.mean) > 1, 'moving the light must change the relief image');
+    await page.locator('#render-trigger').click();
+    await page.locator('[data-render-mode="matte"]').click();
+    await page.locator('#close-panel').click();
+    await page.waitForTimeout(300);
+    const wire = await measure('wire');
+    assert.ok(wire.mean < east.mean * .8, 'returning to matte must restore wireframe');
+  } finally { await page.close(); }
+});
+
+test('JSON component selects on click and opens on double click without resize or fullscreen controls', async () => {
+  const data = structuredClone(scene); data.label_groups = []; data.state.strokes = [];
+  data.meshes = data.meshes.slice(0, 1);
+  data.attachments = [{id:'json',label:'Report',byte_size:40,url:'/test/attachments/0',unavailable:null}];
+  data.components = [
+    {id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',group:null,position:[0,0,0],size:null,visible:true,opacity:1},
+    {id:'report',component:'json',source:{kind:'attachment',index:0},label:'Report',group:null,position:[40,0,0],size:[40,32],visible:true,opacity:1},
+  ];
+  const page = await browser.newPage({viewport:{width:900,height:700}});
+  try {
+    await page.route('**/api/v1/scenes/**', route => route.request().method() === 'GET' ? route.fulfill({json:data}) : route.continue());
+    await page.route('**/test/attachments/*', route => route.fulfill({contentType:'application/json',body:JSON.stringify({quality:{gaps:2,valid:true},note:'x'.repeat(3000)})}));
+    await page.goto(`${origin}/s/fixture`);
+    await page.locator('#loading-state').waitFor({state:'hidden'});
+    const surface = page.locator('[data-component="json"]');
+    const preview = surface.locator('.component-enter');
+    assert.equal(await surface.locator('.json-key').nth(1).textContent(), 'quality: ');
+    assert.match(await surface.locator('.json-string').textContent(), /3000 字符/);
+    assert.ok((await surface.locator('.json-string').textContent()).length < 2100);
+    assert.equal(await surface.locator('.component-resize').count(), 0);
+    assert.equal(await surface.getByRole('button',{name:'全屏'}).count(), 0);
+    await surface.locator('.component-handle').click();
+    assert.equal(await page.locator('.component-dialog').evaluate(node => node.open), false);
+    assert.equal(await surface.evaluate(node => node.classList.contains('selected')), true);
+    await preview.click();
+    assert.equal(await page.locator('.component-dialog').evaluate(node => node.open), false);
+    assert.equal(await surface.evaluate(node => node.classList.contains('selected')), true);
+    await preview.dblclick();
+    assert.equal(await page.locator('.component-dialog').evaluate(node => node.open), true);
+    assert.equal(await page.locator('.component-dialog').getByRole('button',{name:'全屏'}).count(), 0);
+    if (process.env.BLIND_TEST_SCREENSHOTS) {
+      await mkdir(process.env.BLIND_TEST_SCREENSHOTS, {recursive:true});
+      await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/json-component.png`});
+    }
+  } finally { await page.close(); }
+});
+
+test('large JSON uses a bounded preview with a link to the original file', async () => {
+  const data = structuredClone(scene); data.meshes = []; data.label_groups = []; data.state.strokes = [];
+  data.attachments = [{id:'large',label:'Large report',byte_size:4 * 1024 * 1024 + 100,url:'/test/attachments/0',unavailable:null}];
+  data.components = [{id:'large',component:'json',source:{kind:'attachment',index:0},label:'Large report',group:null,
+    position:[0,0,0],size:[80,50],visible:true,opacity:1}];
+  const page = await browser.newPage({viewport:{width:900,height:700}});
+  try {
+    await page.route('**/api/v1/scenes/**', route => route.request().method() === 'GET' ? route.fulfill({json:data}) : route.continue());
+    await page.route('**/test/attachments/*', route => route.fulfill({contentType:'application/json',body:JSON.stringify({data:'x'.repeat(4 * 1024 * 1024)})}));
+    await page.goto(`${origin}/s/fixture`);
+    await page.locator('#loading-state').waitFor({state:'hidden'});
+    const link = page.locator('[data-component="json"] .component-json a');
+    await link.waitFor();
+    assert.equal(await link.getAttribute('href'), '/test/attachments/0');
+    assert.match(await page.locator('.component-json .json-status').textContent(), /无法在预览中展开/);
+  } finally { await page.close(); }
+});
+
 after(async () => { await browser?.close(); server?.closeAllConnections(); await new Promise(resolve => server ? server.close(resolve) : resolve()); });
 
 async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null, meshes = null) {
@@ -854,6 +1081,10 @@ test('all failed mesh downloads show unavailable instead of a partial scene', as
     assert.match(await page.locator('#invalid-state h2').textContent(),/暂时无法打开/);
     assert.equal(await page.locator('#scene-notice').isVisible(),false);
     assert.equal(await page.locator('#share-view').isVisible(),false);
+    await page.setViewportSize({width:900,height:700});
+    await page.evaluate(() => window.addEventListener('keydown', event => { window.copyIntercepted = event.defaultPrevented; }, {once:true}));
+    await page.keyboard.press(`${process.platform === 'darwin' ? 'Meta' : 'Control'}+c`);
+    assert.equal(await page.evaluate(() => window.copyIntercepted), false);
   } finally { await page.close(); }
 });
 
@@ -892,7 +1123,7 @@ test('wireframe gaps expose component input while painted edges remain occluders
       await page.goto(`${origin}/s/fixture`);await page.locator('#loading-state').waitFor({state:'hidden'});
       await page.mouse.click(400,400);
       assert.equal(await page.locator('.component-dialog').isVisible(),false,`${projection}/${shading}: painted triangle edge must intercept input`);
-      await page.mouse.click(450,400);
+      await page.mouse.dblclick(450,400);
       assert.equal(await page.locator('.component-dialog').isVisible(),shading==='wire',`${projection}/${shading}: input must match visible triangle coverage`);
     } finally {await page.close();}
   }
@@ -1031,7 +1262,9 @@ test('spatial content respects depth and stays fixed during pointer and keyboard
         await page.reload();await page.locator('#loading-state').waitFor({state:'hidden'});
       }
       await page.mouse.click(400,400);
-      assert.equal(await page.locator('.component-dialog').isVisible(),z>0,'only an exposed image can open on a tap');
+      assert.equal(await page.locator('.component-dialog').isVisible(),false,'a single click only selects content');
+      await page.mouse.dblclick(400,400);
+      assert.equal(await page.locator('.component-dialog').isVisible(),z>0,'only exposed content opens on a double click');
       if(z<0)assert.equal((await captureShare(page)).state.selected,0,'mesh pixels covering DOM content remain selectable');
       if(z>0)await page.getByRole('button',{name:'返回场景'}).click();
       const before=(await captureShare(page)).state.camera;
@@ -1154,7 +1387,7 @@ for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
     mixed.components=['mesh','points','text','example:trace'].map((component,i)=>({id:`c${i}`,component,
       source:{kind:i<2?'mesh':'attachment',index:i<2?i:i-2},label:['Scan','Margin','Log','Trace'][i],group:i<2?'Geometry':'Diagnostics',
       position:[i*4,0,0],size:i<2?null:[3,2],visible:i!==3,opacity:[.37,0,.6,0][i],
-      ...(i===3?{renderer:{plugin:'example',revision:'fixture',name:'trace',capabilities:{movable:true,resizable:true,presentations:['spatial','focus','fullscreen']}}}:{})}));
+      ...(i===3?{renderer:{plugin:'example',revision:'fixture',name:'trace',capabilities:{movable:false,resizable:false,presentations:['spatial','focus']}}}:{})}));
     const openMixed=async data=>{
       const page=await browser.newPage({viewport});
       await page.route('**/api/v1/scenes/**',r=>r.request().method()==='GET'?r.fulfill({json:data}):r.continue());

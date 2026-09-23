@@ -75,8 +75,9 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         assert 'allow-same-origin' not in headers['Content-Security-Policy']
         assert 'https:' not in headers['Content-Security-Policy']
         assert api('/'+scene['attachments'][0]['url']+'?embed=1')[0] == 400
-        _, plain = share(tmp/'capture.json')
-        assert plain['components'][0]['component'] == 'text' and not plain['meshes']
+        plain_token, plain = share(tmp/'capture.json')
+        assert plain['components'][0]['component'] == 'json' and not plain['meshes']
+        assert api(f'/i/{plain_token}.png')[0] == 200
         _, explicit = share(tmp/'capture.json', '--component','example:panel')
         assert explicit['components'][0]['component'] == 'example:panel'
         # Full PNG export must contain the sandboxed plugin, not only WebGL geometry.
@@ -153,7 +154,7 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         assert api('/'+scene['attachments'][0]['url'])[0] == 410
         # Scene metadata and geometry remain inspectable when a diagnostic resource changes.
         assert api(f'/api/v1/scenes/{token}')[0] == 200
-        print('PASS: plugin isolation, pinned revisions, full PNG export, bounded ZIP members; automatic/explicit components, text-only scene, flat groups, safe HTML, mixed source indices, layout round-trip, immutable bindings and revision checks')
+        print('PASS: plugin isolation, pinned revisions, full PNG export, bounded ZIP members; automatic/explicit components, JSON-only scene, flat groups, safe HTML, mixed source indices, layout round-trip, immutable bindings and revision checks')
     finally:
         process.terminate()
         try: process.wait(timeout=10)

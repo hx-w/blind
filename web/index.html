@@ -48,6 +48,12 @@
         <button class="dock-tool panel-trigger" type="button" aria-label="打开元素详情" aria-expanded="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>详情</span>
         </button>
+        <button class="dock-tool render-trigger" id="render-trigger" type="button" aria-label="打开渲染检视工具" aria-expanded="false" aria-controls="control-panel">
+          <!-- Lucide Scan Eye: https://lucide.dev/icons/scan-eye
+               Copyright (c) 2026 Lucide Icons and Contributors. ISC License.
+               Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. -->
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="1"/><path d="M18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0"/></svg><span>渲染</span>
+        </button>
         <button class="dock-tool" id="brush-tool" type="button" aria-label="进入标注模式" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5 4 4L9 19l-5 1 1-5 9.5-9.5Z"/><path d="m12.5 7.5 4 4"/></svg><span>标注</span>
         </button>
@@ -69,6 +75,20 @@
               <h1 id="scene-title">Blind</h1>
             </div>
             <p id="scene-meta">正在读取场景</p>
+          </section>
+          <section id="render-controls" hidden>
+            <p class="render-intro">切换材质观察表面细节。掠射光可改变光源方向和强度；检视模式始终显示实体表面，并随视角链接保存。</p>
+            <div class="style-section"><span class="setting-label">Shader</span><div class="segmented segmented-three" aria-label="渲染 Shader">
+              <button data-render-mode="matte" type="button">无影灯</button><button data-render-mode="raking" type="button">掠射光</button><button data-render-mode="normals" type="button">法线</button>
+            </div></div>
+            <div id="light-controls" class="light-controls">
+              <label class="setting-label" for="light-azimuth">水平角 <output id="light-azimuth-value">45°</output></label>
+              <input id="light-azimuth" type="range" min="-180" max="180" value="45" />
+              <label class="setting-label" for="light-elevation">高度角 <output id="light-elevation-value">20°</output></label>
+              <input id="light-elevation" type="range" min="0" max="90" value="20" />
+              <label class="setting-label" for="light-intensity">强度 <output id="light-intensity-value">100%</output></label>
+              <input id="light-intensity" type="range" min="0" max="200" value="100" />
+            </div>
           </section>
           <section id="mesh-controls">
             <label class="mesh-picker" for="detail-mesh-select"><span>当前元素</span><select id="detail-mesh-select" aria-label="选择要编辑的元素"></select></label>

@@ -4,7 +4,7 @@ import { CSS3DObject, CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer
 import type { PublicScene, Vec3 } from './api';
 import { MeshViewer } from './viewer';
 import { ComponentRegistry, componentGroups, componentUpdate, effectiveVisibility, sceneComponents, type ComponentCapabilities, type ComponentRuntime, type Presentation, type SceneComponent } from './scene-components';
-import { textContent, pluginContent, htmlContent, imageContent, type ContentFactory } from './component-content';
+import { textContent, jsonContent, pluginContent, htmlContent, imageContent, type ContentFactory } from './component-content';
 import './components.css';
 
 interface Context { viewer: MeshViewer; host: ComponentViewer; scene: PublicScene }
@@ -27,8 +27,8 @@ export function builtInComponents(): ComponentRegistry<Context> {
       };
     },
   });
-  for (const [type, content] of Object.entries({text: textContent, html: htmlContent, image: imageContent})) {
-    registry.register({type, capabilities: {presentations: ['spatial', 'focus', 'fullscreen'], movable: false, resizable: true, input: contentInput},
+  for (const [type, content] of Object.entries({text: textContent, json: jsonContent, html: htmlContent, image: imageContent})) {
+    registry.register({type, capabilities: {presentations: ['spatial', 'focus'], movable: false, resizable: false, input: contentInput},
       create: (spec, context) => new SurfaceRuntime(spec, context, content)});
   }
   return registry;
@@ -78,7 +78,7 @@ export class ComponentViewer {
     const customTypes = new Set<string>();
     for (const spec of sceneComponents(scene)) {
       if (spec.renderer && !customTypes.has(spec.component)) {
-        registry.register({type:spec.component,capabilities:{...spec.renderer.capabilities,movable:false,input:contentInput},create:(spec,context)=>new SurfaceRuntime(spec,context,pluginContent)});
+        registry.register({type:spec.component,capabilities:{...spec.renderer.capabilities,movable:false,resizable:false,input:contentInput},create:(spec,context)=>new SurfaceRuntime(spec,context,pluginContent)});
         customTypes.add(spec.component);
       }
       const definition = registry.get(spec.component);
@@ -200,12 +200,18 @@ export class ComponentViewer {
     this.sync(); this.onChange?.();
   }
 
+  open(spec: SceneComponent): void {
+    const entry = this.entries.find(e => e.spec === spec);
+    if (!entry) return;
+    const mode = entry.capabilities.presentations.includes('focus') ? 'focus'
+      : entry.capabilities.presentations.includes('fullscreen') ? 'fullscreen' : null;
+    if (mode) this.present(spec, mode);
+  }
   present(spec: SceneComponent, mode: Presentation): void {
     const entry = this.entries.find(e => e.spec === spec); if (!entry || !entry.capabilities.presentations.includes(mode)) return;
     this.select(spec);
     if (!entry.runtime.element) {
       entry.runtime.focus();
-      if (mode === 'fullscreen') void this.root.parentElement?.requestFullscreen?.().catch(() => {});
       return;
     }
     if (this.expanded && this.expanded !== entry) this.close();
@@ -216,20 +222,17 @@ export class ComponentViewer {
       this.viewer.setInteractionEnabled(false); this.dialog.showModal();
     }
     entry.runtime.setPresentation(mode);
-    if (mode === 'fullscreen' && this.dialog.requestFullscreen) void this.dialog.requestFullscreen().catch(() => { entry.runtime.setPresentation('focus'); });
   }
   private close = (): void => {
     if (!this.expanded) return;
     const entry = this.expanded; this.expanded = undefined;
-    if (document.fullscreenElement === this.dialog) void document.exitFullscreen();
     entry.runtime.setPresentation('spatial'); this.dialog.close(); this.viewer.setInteractionEnabled(true);
     this.returnFocus?.focus({preventScroll: true}); this.viewer.invalidate();
   };
   private buildDialog(): void {
     this.dialog.className = 'component-dialog'; this.dialog.setAttribute('aria-labelledby', 'component-dialog-title');
     this.dialogTitle.id = 'component-dialog-title'; const heading = document.createElement('header');
-    const fullscreen = button('全屏', () => { if (this.expanded) this.present(this.expanded.spec, 'fullscreen'); });
-    const close = button('返回场景', this.close); heading.append(this.dialogTitle, fullscreen, close);
+    const close = button('返回场景', this.close); heading.append(this.dialogTitle, close);
     this.expandedContent.className = 'component-expanded-content'; this.dialog.append(heading, this.expandedContent);
     document.querySelector('#app-shell')!.append(this.dialog);
     this.dialog.addEventListener('cancel', event => { event.preventDefault(); this.close(); });
@@ -350,20 +353,20 @@ class SurfaceRuntime implements ComponentRuntime {
     const {host, scene} = context; this.element.className = 'scene-surface'; this.element.dataset.component = spec.component;
     const header = document.createElement('header'); header.className = 'component-handle'; header.title = spec.label;
     const label = document.createElement('span'); label.textContent = spec.label;
-    const capabilities = spec.renderer?.capabilities;
     header.append(label);
-    if (!capabilities || capabilities.presentations.includes('focus')) header.append(button('展开', () => host.present(spec, 'focus')));
-    if (!capabilities || capabilities.presentations.includes('fullscreen')) header.append(button('全屏', () => host.present(spec, 'fullscreen')));
     const source = scene.attachments?.[spec.source.index];
     this.content = source?.url ? factory(source.url, spec.label, spec) : {element: document.createElement('p'), ready: Promise.reject(new Error('资源不可用')), dispose() {}};
     void this.content.ready.catch(() => {});
     if (!source?.url) this.content.element.textContent = source?.unavailable ?? '资源不可用';
     const body = document.createElement('div'); body.className = 'component-body'; body.append(this.content.element);
-    const enter = button(`打开 ${spec.label}`, () => host.present(spec, 'focus')); enter.className = 'component-enter'; enter.setAttribute('aria-label', `展开 ${spec.label}`); enter.textContent = ''; body.append(enter);
-    // The same orbit/pan/zoom gestures work over content previews. Only a tap opens content.
+    const enter = button(`选中 ${spec.label}`, () => host.select(spec)); enter.className = 'component-enter'; enter.setAttribute('aria-label', `选中 ${spec.label}，双击展开`); enter.textContent = ''; body.append(enter);
+    // The same orbit/pan/zoom gestures work over content previews. Single click selects.
     let navigating = false;
     let gesture: AbortController | undefined;
-    enter.onclick = event => { if (event.detail === 0 || !navigating) host.present(spec, 'focus'); };
+    enter.onclick = () => { if (!navigating) host.select(spec); };
+    enter.addEventListener('dblclick', event => { event.preventDefault(); host.open(spec); });
+    enter.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); host.open(spec); } });
+    header.addEventListener('dblclick', event => { event.preventDefault(); host.open(spec); });
     enter.addEventListener('pointerdown', event => {
       if (event.isPrimary) {
         gesture?.abort(); gesture = new AbortController(); navigating = false;
@@ -379,13 +382,10 @@ class SurfaceRuntime implements ComponentRuntime {
     this.element.append(header, body); this.wrapper.append(this.element); host.layer.add(this.object);
     this.setPosition(spec.position ?? [0, 0, 0]); this.setOpacity(spec.opacity); this.size();
     header.addEventListener('pointerdown', event => {
+      host.select(spec);
       if (!(event.target as Element).closest('button')) context.viewer.navigatePointer(event);
     });
     header.addEventListener('wheel', event => {event.preventDefault(); context.viewer.navigateWheel(event);}, {passive: false});
-    const resize = button('调整大小', () => {}); resize.className = 'component-resize'; resize.setAttribute('aria-label', '调整宽度，方向键或拖动');
-    resize.addEventListener('pointerdown', event => this.resize(event));
-    resize.addEventListener('keydown', event => { if (!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(event.key)) return; event.preventDefault(); const factor = ['ArrowRight','ArrowUp'].includes(event.key) ? 1.1 : 1 / 1.1; this.resizeBy(factor); });
-    if (!capabilities || capabilities.resizable) this.element.append(resize);
   }
   get ready(): Promise<void> { return this.content.ready; }
   get bounds(): THREE.Box3 {
@@ -411,14 +411,6 @@ class SurfaceRuntime implements ComponentRuntime {
     this.content.present?.(mode);
   }
   private size(): void { const [w,h] = this.spec.size ?? [110,70]; this.wrapper.style.width = '800px'; this.wrapper.style.height = `${800 * h / w}px`; this.object.scale.setScalar(w / 800); this.context.viewer.invalidate(); }
-  private resizeBy(factor: number): void { const [w,h] = this.spec.size ?? [110,70]; const width = Math.max(20, Math.min(500, w * factor)); this.spec.size = [width, h / w * width]; this.size(); this.context.host.refreshBounds(); }
-  private resize(event: PointerEvent): void {
-    if (this.mode !== 'spatial') return; event.preventDefault(); this.context.viewer.setInteractionEnabled(false);
-    const target = event.currentTarget as HTMLElement; target.setPointerCapture(event.pointerId); let x = event.clientX;
-    const move = (e: PointerEvent) => { this.resizeBy(Math.exp((e.clientX - x) / 250)); x = e.clientX; };
-    const end = () => { target.removeEventListener('pointermove', move); target.removeEventListener('pointerup', end); target.removeEventListener('pointercancel', end); target.removeEventListener('lostpointercapture', end); this.context.viewer.setInteractionEnabled(true); };
-    target.addEventListener('pointermove', move); target.addEventListener('pointerup', end); target.addEventListener('pointercancel', end); target.addEventListener('lostpointercapture', end);
-  }
   dispose(): void { this.content.dispose(); this.object.removeFromParent(); this.wrapper.remove(); this.element.remove(); }
 }
 function button(text: string, action: () => void): HTMLButtonElement { const button = document.createElement('button'); button.type = 'button'; button.textContent = text; button.onclick = action; return button; }

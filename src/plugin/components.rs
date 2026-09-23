@@ -183,9 +183,9 @@ pub struct RendererCapabilities {
 impl Default for RendererCapabilities {
     fn default() -> Self {
         Self {
-            presentations: vec!["spatial".into(), "focus".into(), "fullscreen".into()],
+            presentations: vec!["spatial".into(), "focus".into()],
             movable: true,
-            resizable: true,
+            resizable: false,
         }
     }
 }

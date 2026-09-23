@@ -46,8 +46,8 @@ enum ClientCommand {
     },
     /// Share files as scene components through the registered Blind server.
     #[command(
-        long_about = "Share files with automatic display selection. PLY/STL/OBJ → mesh, PTS → points, logs/text/ordinary JSON → text, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
-        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, html, image or plugin:name. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
+        long_about = "Share files with automatic display selection. PLY/STL/OBJ → mesh, PTS → points, logs/text → text, ordinary JSON → json, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
+        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, json, html, image or plugin:name. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
     )]
     Share {
         /// File paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
@@ -861,8 +861,9 @@ fn parse_components(
             "component specified twice for resource {index}"
         );
         display[index - 1].component = Some(
-            serde_json::from_value(serde_json::Value::String(kind.into()))
-                .context("component must be mesh, points, text, html, image or plugin:name")?,
+            serde_json::from_value(serde_json::Value::String(kind.into())).context(
+                "component must be mesh, points, text, json, html, image or plugin:name",
+            )?,
         );
     }
     Ok(display)
