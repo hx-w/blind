@@ -2,7 +2,7 @@ import type { Box3 } from 'three';
 import type { PublicScene, Vec3 } from './api';
 
 export type Presentation = 'spatial' | 'focus' | 'fullscreen';
-export interface SceneComponent {
+export interface SceneEntity {
   id: string;
   component: string;
   renderer?: {plugin:string; revision:string; name:string; frame_origins?: string[]; capabilities: Omit<ComponentCapabilities, "input">};
@@ -15,13 +15,15 @@ export interface SceneComponent {
   visible: boolean;
   opacity: number;
 }
-export type ComponentUpdate = Pick<SceneComponent, 'id' | 'position' | 'size' | 'visible' | 'opacity' | 'state'>;
+export type EntityUpdate = Pick<SceneEntity, 'id' | 'label' | 'position' | 'size' | 'visible' | 'opacity' | 'state'>;
 export interface ComponentCapabilities {
   presentations: readonly Presentation[];
   movable: boolean;
   resizable: boolean;
   /** The shell owns navigation in space; content owns input when expanded. */
   input: Readonly<Record<Presentation, 'scene' | 'content'>>;
+  /** Additional controls exposed only by geometric component definitions. */
+  geometry?: 'mesh' | 'points';
 }
 export interface ComponentRuntime {
   readonly bounds: Box3;
@@ -30,6 +32,7 @@ export interface ComponentRuntime {
   setPosition(position: Vec3): void;
   setVisible(visible: boolean): void;
   setOpacity(opacity: number): void;
+  setLabel(label: string): void;
   setPresentation(mode: Presentation): void;
   select(): void;
   focus(): void;
@@ -38,7 +41,7 @@ export interface ComponentRuntime {
 export interface ComponentDefinition<Context> {
   type: string;
   capabilities: ComponentCapabilities;
-  create(spec: SceneComponent, context: Context): ComponentRuntime;
+  create(spec: SceneEntity, context: Context): ComponentRuntime;
 }
 /** Renderers register here; tree, grouping and sharing have no component-specific branches. */
 export class ComponentRegistry<Context> {
@@ -54,7 +57,8 @@ export class ComponentRegistry<Context> {
     return definition;
   }
 }
-export function sceneComponents(scene: PublicScene): SceneComponent[] {
+export function sceneEntities(scene: PublicScene): SceneEntity[] {
+  if (scene.entities?.length) return structuredClone(scene.entities);
   if (scene.components?.length) return structuredClone(scene.components);
   return scene.meshes.map((mesh, index) => ({
     id: `mesh-${index}`, component: mesh.format === 'pts' ? 'points' : 'mesh', source: {kind: 'mesh', index},
@@ -63,12 +67,12 @@ export function sceneComponents(scene: PublicScene): SceneComponent[] {
     position: mesh.translation ?? [0, 0, 0], size: null, visible: mesh.visible, opacity: mesh.opacity,
   }));
 }
-export function componentUpdate(spec: SceneComponent): ComponentUpdate {
-  return {...(spec.state === undefined ? {} : {state:spec.state}), id: spec.id, position: spec.position ? [...spec.position] : null, size: spec.size ? [...spec.size] : null, visible: spec.visible, opacity: spec.opacity};
+export function entityUpdate(spec: SceneEntity): EntityUpdate {
+  return {...(spec.state === undefined ? {} : {state:spec.state}), id: spec.id, label:spec.label, position: spec.position ? [...spec.position] : null, size: spec.size ? [...spec.size] : null, visible: spec.visible, opacity: spec.opacity};
 }
 /** Insertion order is stable. A scene has one flat list of groups, never nested scenes. */
-export function componentGroups(components: readonly SceneComponent[]): Map<string, SceneComponent[]> {
-  const groups = new Map<string, SceneComponent[]>();
+export function componentGroups(components: readonly SceneEntity[]): Map<string, SceneEntity[]> {
+  const groups = new Map<string, SceneEntity[]>();
   for (const component of components) {
     const key = component.group ?? '';
     if (!groups.has(key)) groups.set(key, []);
@@ -76,6 +80,6 @@ export function componentGroups(components: readonly SceneComponent[]): Map<stri
   }
   return groups;
 }
-export function effectiveVisibility(spec: Pick<SceneComponent, 'visible' | 'opacity'>): boolean {
+export function effectiveVisibility(spec: Pick<SceneEntity, 'visible' | 'opacity'>): boolean {
   return spec.visible && spec.opacity > 0;
 }

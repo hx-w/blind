@@ -48,8 +48,8 @@ pub struct SceneDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_days: Option<u32>,
     pub meshes: Vec<MeshRef>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub components: Vec<crate::component::SceneComponent>,
+    #[serde(default, alias = "components", skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<crate::component::SceneEntity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_groups: Vec<MeshLabelGroup>,
     pub state: ViewState,
@@ -224,6 +224,132 @@ pub struct ViewState {
     pub strokes: Vec<ScreenStroke>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<SurfaceAnnotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section: Option<SectionState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SectionState {
+    pub entity_id: String,
+    pub mesh: usize,
+    pub revision: String,
+    pub origin: [f64; 3],
+    pub normal: [f64; 3],
+    pub axis: [f64; 3],
+    pub radius: f64,
+    pub offset: f64,
+    pub fit: bool,
+    #[serde(default)]
+    pub pan: [f64; 2],
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<SectionTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_size: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub measurements: Vec<SectionMeasurement>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SectionMeasurement {
+    pub a: [f64; 2],
+    pub b: [f64; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opposite: Option<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SectionTarget {
+    pub entity_id: String,
+    pub mesh: usize,
+    pub revision: String,
+}
+
+impl SectionState {
+    fn validate(
+        &self,
+        meshes: &[MeshRef],
+        entities: &[crate::component::SceneEntity],
+    ) -> Result<()> {
+        let mesh = meshes
+            .get(self.mesh)
+            .context("section target is not in the scene")?;
+        ensure!(
+            entities.iter().any(|entity| entity.id == self.entity_id
+                && entity.source == crate::component::ComponentSource::Mesh(self.mesh)
+                && entity.component == crate::component::ComponentKind::Mesh),
+            "section entity is not a Mesh in the scene"
+        );
+        ensure!(
+            mesh.revision == self.revision,
+            "section target revision changed"
+        );
+        ensure!(
+            self.targets.len() <= meshes.len(),
+            "too many section targets"
+        );
+        ensure!(
+            self.measurements.len() <= 2,
+            "too many section measurements"
+        );
+        let mut seen = std::collections::HashSet::new();
+        for target in &self.targets {
+            ensure!(seen.insert(target.mesh), "duplicate section target");
+            let source = meshes
+                .get(target.mesh)
+                .context("section target is not in the scene")?;
+            ensure!(
+                source.revision == target.revision,
+                "section target revision changed"
+            );
+            ensure!(
+                entities.iter().any(|entity| entity.id == target.entity_id
+                    && entity.source == crate::component::ComponentSource::Mesh(target.mesh)
+                    && entity.component == crate::component::ComponentKind::Mesh),
+                "section entity is not a Mesh in the scene"
+            );
+        }
+        ensure!(
+            self.origin
+                .iter()
+                .chain(self.normal.iter())
+                .chain(self.axis.iter())
+                .chain(self.pan.iter())
+                .all(|v| v.is_finite()),
+            "section coordinates must be finite"
+        );
+        ensure!(
+            self.panel_size.is_none_or(|size| size
+                .iter()
+                .all(|v| v.is_finite() && *v >= 160.0 && *v <= 1200.0)),
+            "invalid section panel size"
+        );
+        ensure!(
+            self.measurements.iter().all(|line| line
+                .a
+                .iter()
+                .chain(line.b.iter())
+                .chain(line.opposite.iter().flatten())
+                .all(|v| v.is_finite() && v.abs() <= 1e9)),
+            "invalid section measurement"
+        );
+        ensure!(
+            self.radius.is_finite() && self.radius > 0.0 && self.offset.is_finite(),
+            "section extent must be finite"
+        );
+        let length = |v: [f64; 3]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        ensure!(
+            (length(self.normal) - 1.0).abs() < 0.01 && (length(self.axis) - 1.0).abs() < 0.01,
+            "section axes must be unit vectors"
+        );
+        let dot = self
+            .normal
+            .iter()
+            .zip(self.axis.iter())
+            .map(|(a, b)| a * b)
+            .sum::<f64>();
+        ensure!(dot.abs() < 0.01, "section axes must be perpendicular");
+        Ok(())
+    }
 }
 
 /// Frozen surface samples. Sharing never reprojects or refits these coordinates.
@@ -392,8 +518,8 @@ pub enum Background {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SceneUpdate {
-    #[serde(default)]
-    pub components: Option<Vec<crate::component::ComponentUpdate>>,
+    #[serde(default, alias = "components")]
+    pub entities: Option<Vec<crate::component::EntityUpdate>>,
     pub meshes: Vec<MeshStyleUpdate>,
     pub state: ViewState,
 }
@@ -434,6 +560,7 @@ impl Default for ViewState {
             camera: None,
             strokes: Vec::new(),
             annotations: Vec::new(),
+            section: None,
         }
     }
 }
@@ -471,14 +598,14 @@ impl SceneDescriptor {
     }
 
     /// Adapt older geometry descriptors without changing their source identity or layout.
-    pub fn component_descriptors(&self) -> Vec<crate::component::SceneComponent> {
-        if !self.components.is_empty() {
-            return self.components.clone();
+    pub fn entity_descriptors(&self) -> Vec<crate::component::SceneEntity> {
+        if !self.entities.is_empty() {
+            return self.entities.clone();
         }
         self.meshes
             .iter()
             .enumerate()
-            .map(|(index, mesh)| crate::component::SceneComponent {
+            .map(|(index, mesh)| crate::component::SceneEntity {
                 renderer: None,
                 state: None,
                 id: format!("mesh-{index}"),
@@ -511,11 +638,11 @@ impl SceneDescriptor {
     }
 
     pub fn set_labels(&mut self, labels: Vec<Option<MeshLabel>>) -> Result<()> {
-        if !self.components.is_empty() && labels.len() == self.components.len() {
+        if !self.entities.is_empty() && labels.len() == self.entities.len() {
             for label in labels.iter().flatten() {
                 label.validate()?;
             }
-            for (c, label) in self.components.iter_mut().zip(labels) {
+            for (c, label) in self.entities.iter_mut().zip(labels) {
                 if let Some(label) = label {
                     c.label = label.text.clone();
                     if let crate::component::ComponentSource::Mesh(i) = c.source {
@@ -541,15 +668,15 @@ impl SceneDescriptor {
         if groups.len() > MAX_LABEL_GROUPS {
             bail!("A scene can contain at most {MAX_LABEL_GROUPS} grouped labels");
         }
-        if !self.components.is_empty() {
+        if !self.entities.is_empty() {
             for group in &groups {
-                group.validate(self.components.len())?;
+                group.validate(self.entities.len())?;
             }
             let mut grouped = std::collections::HashSet::new();
             for group in &groups {
                 for &index in &group.meshes {
                     if !grouped.insert(index)
-                        || self.components[index]
+                        || self.entities[index]
                             .group
                             .as_ref()
                             .is_some_and(|label| label != &group.text)
@@ -558,7 +685,7 @@ impl SceneDescriptor {
                             "An element can belong to only one flat group; repeat its resource to display another instance"
                         );
                     }
-                    self.components[index].group = Some(group.text.clone());
+                    self.entities[index].group = Some(group.text.clone());
                 }
             }
             self.label_groups = groups
@@ -567,7 +694,7 @@ impl SceneDescriptor {
                     let meshes: Vec<_> = g
                         .meshes
                         .iter()
-                        .filter_map(|&i| match self.components[i].source {
+                        .filter_map(|&i| match self.entities[i].source {
                             crate::component::ComponentSource::Mesh(m) => Some(m),
                             _ => None,
                         })
@@ -648,7 +775,7 @@ impl SceneDescriptor {
                 .unwrap_or_default()
                 .as_secs(),
             meshes,
-            components: Vec::new(),
+            entities: Vec::new(),
             attachments: Vec::new(),
             warnings: Vec::new(),
             label_groups: Vec::new(),
@@ -688,23 +815,26 @@ impl SceneDescriptor {
         if update.meshes.len() != self.meshes.len() {
             bail!("Mesh style count does not match the scene");
         }
-        if update.components.is_some() && self.components.is_empty() {
-            self.components = self.component_descriptors();
+        if update.entities.is_some() && self.entities.is_empty() {
+            self.entities = self.entity_descriptors();
         }
-        if let Some(components) = &update.components {
-            if components.len() != self.components.len() {
+        if let Some(components) = &update.entities {
+            if components.len() != self.entities.len() {
                 bail!("Component count does not match the scene");
             }
             let mut ids = std::collections::HashSet::new();
             for c in components {
                 c.validate()?;
-                if !ids.insert(&c.id) || !self.components.iter().any(|old| old.id == c.id) {
+                if !ids.insert(&c.id) || !self.entities.iter().any(|old| old.id == c.id) {
                     bail!("Unknown or duplicate component ID");
                 }
             }
         }
         update.state.light.validate()?;
         validate_annotations(&update.state.annotations, &self.meshes)?;
+        if let Some(section) = &update.state.section {
+            section.validate(&self.meshes, &self.entity_descriptors())?;
+        }
         for style in &update.meshes {
             if let Some(Some(label)) = &style.label {
                 label.validate()?;
@@ -726,7 +856,7 @@ impl SceneDescriptor {
         state.selected = state.selected.min(self.meshes.len().saturating_sub(1));
         if state.focused_component_id.as_ref().is_some_and(|id| {
             !self
-                .component_descriptors()
+                .entity_descriptors()
                 .iter()
                 .any(|component| &component.id == id)
         }) {
@@ -743,14 +873,24 @@ impl SceneDescriptor {
         for group in &self.label_groups {
             group.validate(self.meshes.len())?;
         }
-        if let Some(components) = update.components {
+        if let Some(components) = update.entities {
             for c in components {
-                let old = self
-                    .components
-                    .iter_mut()
-                    .find(|old| old.id == c.id)
-                    .unwrap();
+                let old = self.entities.iter_mut().find(|old| old.id == c.id).unwrap();
                 old.state = c.state;
+                if let Some(label) = c.label {
+                    old.label = label.clone();
+                    if let crate::component::ComponentSource::Mesh(index) = old.source {
+                        let mesh = &mut self.meshes[index];
+                        mesh.label = if label == mesh.name {
+                            None
+                        } else {
+                            Some(MeshLabel {
+                                text: label,
+                                anchor: mesh.label.as_ref().and_then(|old| old.anchor),
+                            })
+                        };
+                    }
+                }
                 old.position = c.position;
                 old.size = c.size;
                 old.visible = c.visible;
@@ -763,14 +903,14 @@ impl SceneDescriptor {
                 }
             }
         } else {
-            for c in &mut self.components {
+            for c in &mut self.entities {
                 if let crate::component::ComponentSource::Mesh(index) = c.source {
                     c.visible = self.meshes[index].visible;
                     c.opacity = self.meshes[index].opacity;
                 }
             }
         }
-        for c in &mut self.components {
+        for c in &mut self.entities {
             if let crate::component::ComponentSource::Mesh(index) = c.source {
                 let mesh = &self.meshes[index];
                 c.label = mesh
@@ -780,9 +920,13 @@ impl SceneDescriptor {
                     .unwrap_or_else(|| mesh.name.clone());
             }
         }
-        self.schema = self
-            .schema
-            .max(if self.components.is_empty() { 3 } else { 5 });
+        self.schema = self.schema.max(if state.section.is_some() {
+            7
+        } else if self.entities.is_empty() {
+            3
+        } else {
+            5
+        });
         self.state = state;
         for mark in &self.state.annotations {
             self.meshes[mark.mesh].quality = MeshQuality::Raw;
@@ -970,8 +1114,8 @@ mod tests {
         let mut scene = SceneDescriptor::create(&[PathBuf::from("tests/fixtures/tetra.ply")], None)
             .await
             .unwrap();
-        assert!(scene.components.is_empty());
-        let mut descriptors = serde_json::to_value(scene.component_descriptors()).unwrap();
+        assert!(scene.entities.is_empty());
+        let mut descriptors = serde_json::to_value(scene.entity_descriptors()).unwrap();
         let component = descriptors[0].as_object_mut().unwrap();
         component.retain(|key, _| {
             ["id", "position", "size", "visible", "opacity", "state"].contains(&key.as_str())
@@ -984,8 +1128,188 @@ mod tests {
         .unwrap();
         scene.apply_update(update).unwrap();
         assert_eq!(scene.schema, 5);
-        assert_eq!(scene.components[0].id, "mesh-0");
+        assert_eq!(scene.entities[0].id, "mesh-0");
         assert_eq!(scene.meshes[0].translation, [4., 5., 6.]);
+    }
+
+    #[tokio::test]
+    async fn entity_renames_round_trip_without_changing_sources() {
+        let mut scene = SceneDescriptor::create(&[PathBuf::from("tests/fixtures/tetra.ply")], None)
+            .await
+            .unwrap();
+        scene.entities = scene.entity_descriptors();
+        scene.attachments.push(SceneAttachment {
+            member: None,
+            id: "report".into(),
+            path: "report.txt".into(),
+            label: "Report".into(),
+            byte_size: None,
+            revision: None,
+            unavailable: Some("fixture".into()),
+        });
+        scene.entities.push(crate::component::SceneEntity {
+            id: "report".into(),
+            component: crate::component::ComponentKind::Text,
+            source: crate::component::ComponentSource::Attachment(0),
+            renderer: None,
+            label: "Report".into(),
+            group: None,
+            position: Some([4.0, 0.0, 0.0]),
+            size: Some([40.0, 30.0]),
+            visible: true,
+            opacity: 1.0,
+            state: None,
+        });
+        let update = |scene: &SceneDescriptor, mesh_label: &str, report_label: &str| {
+            serde_json::from_value::<SceneUpdate>(serde_json::json!({
+                "meshes": [{"color":scene.meshes[0].color,"opacity":1.0,"visible":true,"quality":"raw"}],
+                "entities": [
+                    {"id":"mesh-0","label":mesh_label,"position":[0,0,0],"size":null,"visible":true,"opacity":1.0},
+                    {"id":"report","label":report_label,"position":[4,0,0],"size":[40,30],"visible":true,"opacity":1.0}
+                ],
+                "state":scene.state
+            }))
+            .unwrap()
+        };
+        let original_name = scene.meshes[0].name.clone();
+        scene
+            .apply_update(update(&scene, "边缘复核", "检验报告"))
+            .unwrap();
+        assert_eq!(scene.meshes[0].label.as_ref().unwrap().text, "边缘复核");
+        assert_eq!(scene.entities[0].label, "边缘复核");
+        assert_eq!(scene.entities[1].label, "检验报告");
+        assert_eq!(
+            scene.attachments[0].label, "Report",
+            "source label stays immutable"
+        );
+        let mut reopened: SceneDescriptor =
+            serde_json::from_slice(&serde_json::to_vec(&scene).unwrap()).unwrap();
+        assert_eq!(reopened.entities[1].label, "检验报告");
+        reopened
+            .apply_update(update(&reopened, &original_name, "Report"))
+            .unwrap();
+        assert!(reopened.meshes[0].label.is_none());
+        assert_eq!(reopened.entities[0].label, original_name);
+        assert!(
+            reopened
+                .apply_update(update(&reopened, " ", "Report"))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn section_share_binds_a_plane_to_its_source_entity_and_revision() {
+        let mut scene = SceneDescriptor::create(&[PathBuf::from("tests/fixtures/tetra.ply")], None)
+            .await
+            .unwrap();
+        let section = SectionState {
+            entity_id: scene.entity_descriptors()[0].id.clone(),
+            mesh: 0,
+            revision: scene.meshes[0].revision.clone(),
+            origin: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            axis: [1.0, 0.0, 0.0],
+            radius: 1.0,
+            offset: 0.0,
+            fit: false,
+            pan: [0.0, 0.0],
+            targets: Vec::new(),
+            panel_size: None,
+            measurements: Vec::new(),
+        };
+        let mut state = scene.state.clone();
+        state.section = Some(section.clone());
+        scene
+            .apply_update(SceneUpdate {
+                entities: None,
+                meshes: vec![MeshStyleUpdate {
+                    color: scene.meshes[0].color.clone(),
+                    opacity: 1.0,
+                    visible: true,
+                    quality: MeshQuality::Raw,
+                    label: None,
+                }],
+                state,
+            })
+            .unwrap();
+        let reopened: SceneDescriptor =
+            serde_json::from_slice(&serde_json::to_vec(&scene).unwrap()).unwrap();
+        assert_eq!(reopened.state.section, Some(section.clone()));
+        assert_eq!(reopened.schema, 7);
+        let mut measured = section.clone();
+        measured.panel_size = Some([560.0, 430.0]);
+        measured.measurements = vec![SectionMeasurement {
+            a: [0.0, 0.0],
+            b: [1.5, 2.0],
+            opposite: Some([1.5, 2.4]),
+        }];
+        assert!(
+            measured
+                .validate(&scene.meshes, &scene.entity_descriptors())
+                .is_ok()
+        );
+        assert_eq!(
+            serde_json::from_slice::<SectionState>(&serde_json::to_vec(&measured).unwrap())
+                .unwrap(),
+            measured
+        );
+        measured.measurements[0].b[0] = f64::INFINITY;
+        assert!(
+            measured
+                .validate(&scene.meshes, &scene.entity_descriptors())
+                .is_err()
+        );
+        let mut wrong = section.clone();
+        wrong.entity_id = "another-mesh".into();
+        assert!(
+            wrong
+                .validate(&scene.meshes, &scene.entity_descriptors())
+                .is_err()
+        );
+        let pair = SceneDescriptor::create(
+            &[
+                PathBuf::from("tests/fixtures/tetra.ply"),
+                PathBuf::from("tests/fixtures/tetra.ply"),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+        let mut combined = section.clone();
+        combined.targets = pair
+            .meshes
+            .iter()
+            .enumerate()
+            .map(|(mesh, source)| SectionTarget {
+                entity_id: pair.entity_descriptors()[mesh].id.clone(),
+                mesh,
+                revision: source.revision.clone(),
+            })
+            .collect();
+        assert!(
+            combined
+                .validate(&pair.meshes, &pair.entity_descriptors())
+                .is_ok()
+        );
+        combined.targets.remove(0);
+        assert!(
+            combined
+                .validate(&pair.meshes, &pair.entity_descriptors())
+                .is_ok()
+        );
+        combined.targets[0].revision = "stale".into();
+        assert!(
+            combined
+                .validate(&pair.meshes, &pair.entity_descriptors())
+                .is_err()
+        );
+        wrong = section;
+        wrong.revision = "another-revision".into();
+        assert!(
+            wrong
+                .validate(&scene.meshes, &scene.entity_descriptors())
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1037,7 +1361,7 @@ mod tests {
         state.annotations.push(mark.clone());
         scene
             .apply_update(SceneUpdate {
-                components: None,
+                entities: None,
                 meshes: scene
                     .meshes
                     .iter()
@@ -1102,7 +1426,7 @@ mod tests {
         });
         scene
             .apply_update(SceneUpdate {
-                components: None,
+                entities: None,
                 meshes: scene
                     .meshes
                     .iter()
@@ -1132,7 +1456,7 @@ mod tests {
         assert!(
             scene
                 .apply_update(SceneUpdate {
-                    components: None,
+                    entities: None,
                     meshes: scene
                         .meshes
                         .iter()

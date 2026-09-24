@@ -207,7 +207,7 @@ mod tests {
         for bad in ["trace", "../foo:bar", "a:b:c", "a:", ":b"] {
             assert!(crate::component::ComponentKind::try_from(bad.to_owned()).is_err());
         }
-        let mut update: crate::component::ComponentUpdate = serde_json::from_value(
+        let mut update: crate::component::EntityUpdate = serde_json::from_value(
             json!({"id":"a","visible":true,"opacity":1,"state":{"selection":3}}),
         )
         .unwrap();

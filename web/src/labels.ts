@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { MeshLabelGroup, PublicMesh } from './api';
 import { clamp, layoutLabel, type LabelOffset, overlapArea, type Rect } from './label-layout';
+import {compactLabel} from './compact-label';
 
 interface LabelModel { info: PublicMesh; bounds: THREE.Box3 }
 interface LabelView { text: HTMLSpanElement; line: SVGPathElement; dot: SVGCircleElement; offset?: LabelOffset; width: number; height: number }
@@ -15,6 +16,7 @@ export class MeshLabels {
   private readonly frontLeaders = document.createElementNS(svgNS, 'svg');
   private readonly views = new Map<number, LabelView>();
   private readonly groupViews = new Map<number, GroupView>();
+  private readonly nameMeasure = document.createElement('canvas').getContext('2d');
   private viewport = '';
   // Root-relative rects of the UI chrome labels must avoid. Measured only
   // after an invalidation, never per frame.
@@ -86,9 +88,20 @@ export class MeshLabels {
       view.text.hidden = false;
       view.line.style.display = ''; view.dot.style.display = '';
       const group = groups.find(group => group.meshes.includes(index));
-      const text = memberCaption(info.label.text, group?.text);
+      const fullText = memberCaption(info.label.text, group?.text);
+      const signature = `${fullText}\u0000${width}`;
+      if (view.text.dataset.signature !== signature) {
+        const context = this.nameMeasure;
+        const maxWidth = Math.min(200, Math.max(92, width * .38));
+        if (context) context.font = getComputedStyle(view.text).font;
+        const text = context ? compactLabel(fullText, candidate => context.measureText(candidate).width <= maxWidth) : fullText;
+        view.text.textContent = text;
+        view.text.classList.toggle('compact', text !== fullText);
+        view.text.dataset.signature = signature;
+        view.offset = undefined; view.width = 0;
+      }
       view.text.title = info.label.text;
-      if (view.text.textContent !== text) { view.text.textContent = text; view.offset = undefined; view.width = 0; }
+      view.text.setAttribute('aria-label', info.label.text);
       // offsetWidth forces a synchronous reflow, so measure only when the
       // text or the viewport changed rather than on every rendered frame.
       if (!view.width) {

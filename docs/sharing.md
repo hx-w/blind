@@ -28,6 +28,9 @@ The encrypted descriptor contains:
 - Camera position, target, up vector, field of view, zoom, projection, and orthographic height.
 - Captured frame dimensions.
 - Surface mode, axes, and gray background mode.
+- Scene entities with a renderer type, source reference, editable label,
+  visibility, opacity, position, and component-specific state. Older stored
+  descriptors using `components` remain readable.
 - Screen strokes as a color, capture aspect ratio, and bounded normalized
   points. A scene permits 64 strokes, 512 points per stroke, and 4,096 points
   in total.
@@ -65,6 +68,12 @@ handles and names are editor UI and are not included in PNGs. Legacy states
 without annotations load an empty collection. As with all scene edits, sharing
 creates a new immutable snapshot and leaves the old URL unchanged.
 
+A read-only section is stored in `state.section`. It binds the plane to a Mesh
+entity and its source revision, and records the selected Mesh targets, plane
+origin and axes, slider offset, plot pan and zoom, window size, and up to two
+contour measurements. All visible triangle Meshes are selected when a new
+section is drawn; the viewer can then narrow that set. No source Mesh is edited.
+
 Mesh labels stay attached as the camera changes. The interactive viewer projects
 their anchors into screen space and lays out readable text with a leader and
 attachment dot. Hidden Meshes and anchors outside the camera view hide their
@@ -73,7 +82,10 @@ world-space anchors are preserved in registry scene records.
 Labels spanning multiple Meshes draw a low-obstruction corner frame around the
 visible members. Their label is selectable and fits the camera to the group.
 Individual labels remain visible and participate in the same collision avoidance.
-PNG rendering currently does not draw Mesh labels.
+The native geometry renderer omits Mesh labels on older geometry-only scenes.
+Scenes using entities or a section use Viewer export, which includes visible
+labels and the section window. Viewer export requires Chrome/Chromium on the
+Server.
 
 For API clients, scene creation accepts an optional `labels` array parallel to
 `paths`, containing label objects or `null`. Scene/share Mesh entries expose a

@@ -1,4 +1,4 @@
-import type { SceneComponent, ComponentUpdate } from "./scene-components";
+import type { SceneEntity, EntityUpdate } from "./scene-components";
 export type MeshFormat = 'ply' | 'stl' | 'obj' | 'pts';
 export type MeshQuality = 'lod' | 'raw';
 export type Shading = 'smooth' | 'flat' | 'wire';
@@ -24,6 +24,24 @@ export interface ScreenStroke {
 }
 
 export type Vec3 = [number, number, number];
+export interface SectionTarget { entity_id: string; mesh: number; revision: string }
+export interface SectionState {
+  entity_id: string;
+  mesh: number;
+  revision: string;
+  origin: Vec3;
+  normal: Vec3;
+  axis: Vec3;
+  radius: number;
+  offset: number;
+  fit: boolean;
+  pan?: [number, number];
+  targets?: SectionTarget[];
+  /** Panel width and plot height in CSS pixels; clamped to the receiving viewport. */
+  panel_size?: [number, number];
+  /** Plane-local coordinates in the source mesh's own length unit. */
+  measurements?: Array<{a: [number, number]; b: [number, number]; opposite?: [number, number]}>;
+}
 export interface SurfaceAnnotation {
   id: string;
   mesh: number;
@@ -51,6 +69,7 @@ export interface ViewState {
   camera: CameraState | null;
   strokes: ScreenStroke[];
   annotations?: SurfaceAnnotation[];
+  section?: SectionState | null;
 }
 
 export interface PublicMesh {
@@ -78,7 +97,9 @@ export interface MeshLabelGroup {
 }
 
 export interface PublicScene {
-  components?: SceneComponent[];
+  entities?: SceneEntity[];
+  /** Read old scene payloads during migration. */
+  components?: SceneEntity[];
   ttl_days?: number;
   source?: { id: string; name: string; host: string; user: string } | null;
   title: string;
@@ -126,7 +147,7 @@ export interface ShareResponse extends ShareLinks {
 }
 
 export interface SceneUpdate {
-  components?: ComponentUpdate[];
+  entities?: EntityUpdate[];
   meshes: Array<{ color: string; opacity: number; visible: boolean; quality: MeshQuality; label?: MeshLabel | null }>;
   state: ViewState;
 }

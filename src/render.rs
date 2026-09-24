@@ -699,7 +699,7 @@ fn load_scene_geometry_bytes(
         .collect();
     let mut batches = Vec::new();
     let mut line_vertices = Vec::new();
-    let wire = scene.state.shading == Shading::Wire && scene.state.render_mode == RenderMode::Matte;
+    let wire = scene.state.shading == Shading::Wire;
     let flat = scene.state.shading == Shading::Flat;
     for (_layer, mesh, geometry, mesh_min, mesh_max) in loaded {
         let color = parse_color(&mesh.color, mesh.opacity)?;
@@ -1519,7 +1519,7 @@ mod tests {
         scene.state.render_mode = RenderMode::Matte;
         let wire = renderer.render(&scene, sources.clone()).await.unwrap();
         scene.state.render_mode = RenderMode::Raking;
-        let filled = renderer.render(&scene, sources).await.unwrap();
+        let raking_wire = renderer.render(&scene, sources).await.unwrap();
         let coverage = |png: &[u8]| {
             let image = image::load_from_memory(png).unwrap().to_rgb8();
             let background = image.get_pixel(0, 0).0;
@@ -1534,7 +1534,8 @@ mod tests {
                 })
                 .count()
         };
-        assert!(coverage(&filled) > coverage(&wire) * 2);
+        assert!(coverage(&wire) > 0);
+        assert!(coverage(&raking_wire) < coverage(&matte) / 2);
     }
 
     #[tokio::test]

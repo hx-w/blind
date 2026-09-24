@@ -163,12 +163,10 @@ Top: reference crowns. Bottom: generated results.
 Review the cusps, grooves, and marginal ridges from the same view.' --format json
 ```
 
-Scene information includes the source hostname, OS user, and registration name by default. The panel is hidden by default. Open **ⓘ 信息** in the bottom toolbar
-to read it in a bottom sheet on phones or the side panel on desktop. Messages
-preserve line breaks and wrap long words. Long messages scroll without
-truncation, while the close control and Mesh statistics remain visible. The
-information panel and Mesh details share the same space and can be switched
-directly from the toolbar.
+Scene information includes the source hostname, OS user, and registration name by default.
+Open the scene list and choose its **ⓘ 信息** tab. Messages preserve line breaks,
+wrap long words and scroll without truncation. The same tab shows the selected
+entity and Mesh Raw/LOD controls.
 
 Attach labels with repeated `--label INDEX[,INDEX...]=TEXT` options. Indices
 start at 1 and follow the input file order. One index labels one Mesh; multiple
@@ -226,7 +224,8 @@ The viewer splits when every pane fits, otherwise it shows scene tabs. Its
 single toolbar acts on the focused scene. Collections use short links. See
 [the sharing contract](docs/sharing.md) for the full schema and reshare API.
 
-In the interactive viewer, choose a Mesh in **详情** and edit **3D 标注**.
+In the interactive viewer, select a Mesh in the scene list and use the small
+rename button after its name to edit its label.
 Labels use a small leader and an attachment dot, follow the Mesh in 3D, and keep
 a readable screen size as the camera moves. Placement prefers space outside
 Mesh bounds and avoids other labels and controls where space permits.
@@ -296,9 +295,12 @@ this contract instead of reimplementing scene or lifecycle logic.
 - One finger or primary drag uses a full arcball rotation without polar limits.
 - Two fingers pinch to zoom and move together to pan.
 - Fit frames all visible Meshes.
-- Details selects the current Mesh and keeps visibility, opacity, color, and
-  presentation controls together.
-- Each Mesh loads as LOD by default. Details can switch it to Raw without
+- The scene list places rename, opacity and visibility controls on each entity row.
+  Mesh and PTS rows show their color before the name; click it to choose a
+  preset below the row. Long names show their beginning and end; 信息 reveals
+  the full name in a scrollable area. Mesh quality sits in the
+  scene list's 信息 tab.
+- Each Mesh loads as LOD by default. 信息 can switch it to Raw without
   changing the camera and reports Raw size, LOD size, saved bytes, and the
   saving percentage.
 - Shared view snapshots preserve the selected Raw or LOD quality for every
@@ -310,15 +312,14 @@ this contract instead of reimplementing scene or lifecycle logic.
 - Vertex-only or zero-face PLY files render as circular GPU point sprites with
   sphere-like lighting. They are not expanded into sphere triangle Meshes.
 - PTS rings render as smooth, continuous curves through the original ordered samples, without point markers.
-- Details also changes surface mode, projection, axes, and the gray background
+- The 观察 dock controls surface mode, projection, axes, and the gray background
   theme.
 - Annotation → Screen brush enters a touch-locked screen-markup mode with four high-contrast
   colors, undo, and clear. Strokes can cross Meshes and empty canvas space.
 - Screen markup belongs to the captured view. Any later rotate, pan, zoom,
   Fit, canonical-view, or projection action hides it immediately.
-- On phones, Details starts at a compact detent and expands by tapping or
-  dragging its handle. The sheet overlays a stable 3D viewport so the model
-  remains visible.
+- On phones, the scene list opens from the scene icon and keeps the 3D viewport
+  stable while switching between elements and information.
 
 The global toolbar never assigns one Mesh name to a multi-Mesh scene and does
 not duplicate visibility with a Solo mode.
@@ -340,7 +341,8 @@ exposed as a setting.
 
 ## Surface annotations
 
-Open **标注** in the bottom dock and choose **点** or **线**. Points follow the
+Open **标注** in the bottom dock to start with **画笔**. Choose **点** or **线** for
+surface marks. Points follow the
 Mesh; lines accept clicks or a continuous drag. Sparse handles guide a smooth
 curve sampled onto the visible surface. Release a drag to finish one line; the
 next drag creates another. For click-to-connect, use **完成线** or **闭合**.
@@ -567,8 +569,9 @@ plugins on Clients. See [plugin installation, configuration and protocol](docs/p
 
 ### Scene components
 
-Share geometry, text, HTML and images in one grouped scene. Installed plugins add
-other components; Cyclops provides order resolution and trace analysis:
+Share Mesh and PTS geometry, text, JSON, HTML and images in one grouped scene.
+Each placed instance is an entity with a label and visibility. Installed plugins
+add component types; Cyclops provides order resolution and trace analysis:
 
 ```sh
 blind share jaw.ply run.log tracing.json
@@ -577,3 +580,15 @@ blind share capture.json --component cyclops:trace
 
 See [component selection, layout and interaction](docs/components.md) for the common
 component contract, `--config` examples and display boundaries.
+
+The main dock opens an observation toolbar with 着色、光照、投影、场景、剖面.
+Clicking 剖面 starts a line gesture on the selected triangle Mesh. All visible
+triangle Meshes join the same plane and plot by default, each in its own color;
+the section window's count opens the Mesh picker to isolate a subset.
+The resulting section is shown as a translucent plane; the
+position slider scans parallel planes and the plot supports zoom, drag to pan,
+fit, and a two-line ruler with contour snapping and optional opposite-surface
+distance. Its window can be resized by dragging the upper-left
+handle. The initial view fits every selected contour; the intersection always uses the
+whole selected Mesh. View and image links preserve the section and ruler without changing
+source geometry.

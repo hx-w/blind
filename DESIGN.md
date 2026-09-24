@@ -46,10 +46,61 @@ Inset the scrolling list from the rounded pane edge. Fade only edges with more
 content offscreen; remove the fade at each scroll limit so the first and last rows
 remain fully readable. Keep the header and global actions outside the fade.
 
-Scene information is hidden by default and opens through the dock's information
-button. It shares the details panel with Mesh controls. On phones, the four dock
-actions stack their icon above their label to fit narrow screens. Scene messages
-wrap and scroll inside the panel, with the close control and statistics visible.
+Scene information is hidden by default and opens in the scene tree's 信息 tab.
+The main dock contains 适配、观察、标注、分享. 观察 replaces it with a second
+toolbar ordered as 着色、光照、投影、场景、剖面, with a compact return control.
+The first four entries expand their controls in the same dock; 剖面 starts
+the line gesture immediately. 场景 contains axes and background switches;
+raking light exposes its three controls only when selected. No separate
+display panel or duplicate lighting selector is used. The toolbars crossfade
+and translate; reduced-motion settings remove the transition. Both fit at
+320px. Icons come from Lucide.
+Scene messages wrap and scroll in the 信息 tab.
+Each scene row places a rename action directly after its label. Long names show
+their beginning and end in the row and on the 3D label. The 信息 tab reveals a
+bounded, scrollable full name; the inline editor keeps the entire value available.
+Selected-entity details and Mesh Raw/LOD quality live in the 信息 tab.
+
+An entity is one placed instance of a component. Every entity has an identity,
+label, group, placement, visibility and opacity. The scene tree provides a flat
+opacity slider and visibility button on each entity row. Geometry rows show
+their current color before the name and expand preset choices below the row.
+The details sheet keeps labels and type-specific settings. Sharing and focus use the same
+contract for Mesh, PTS, text, JSON, images and
+plugins. Geometric components use the existing 3D renderer without a content
+surface frame. They add geometry-specific controls such as quality and color.
+Surface components keep their content frame. A reviewer can rename or hide any
+entity; changing either property leaves the source file untouched.
+
+The section tool belongs to observation. It starts from the selected, visible
+triangle Mesh; PTS and point clouds have no section surface. Clicking
+剖面 immediately enters a touch or pointer line gesture to establish a plane
+through the selected Mesh. The position slider scans parallel planes. The line
+length provides a fallback 2D window radius, while the initial view fits the
+complete contour. Intersection uses the complete selected Mesh. The closed contour is filled with a translucent matte plane over
+the selected Mesh; the view tilts slightly to reveal an edge-on plane. Open
+contours remain lines. The plot supports zoom, drag to pan, fit, and a two-line
+ruler with screen-distance contour snapping and an optional distance to an
+opposite contour. The opposite search excludes the picked contour's nearby arc
+and rejects tangential candidates, following AutoCrown's geometry rule. Its
+distance limit scales with the picked contour because Blind's Meshes have no
+declared physical unit. All selected Meshes can contribute to an inter-Mesh gap;
+unselected Meshes cannot. Mouse right or middle drag pans while measuring;
+touch uses two fingers to pan and pinch. The panel can be resized from its upper-left handle.
+The plot window, panel size, and measurements travel with view and image links;
+measurements are in source mesh coordinates because generic mesh files do not
+declare a physical unit. Changing the plane or target set clears old measurements.
+The selected Mesh anchors the drawn plane. Every visible triangle Mesh is a
+section target by default; the compact count opens a picker to isolate any subset.
+Each target has a distinct
+contour and translucent cap in its Mesh color. Hidden or unselected Meshes do
+not contribute. A selected Mesh that misses the plane is marked in the picker.
+The reviewer may also remove the initial Mesh while keeping another target.
+Changing the target set fits and centers all selected contours in the plot. Sharing
+records the plane and every target's entity ID and
+source revision so a reopened link shows the same combination.
+On touch screens, the section panel yields the canvas while a line is drawn and
+returns when the gesture ends.
 
 Labels share one visual grammar. A one-Mesh label uses a leader and attachment
 dot, with short leaders placed near their attachments instead of beyond Mesh
@@ -74,6 +125,7 @@ Depth comes from background lightness steps and restrained shadows. No blur glas
 - Never put the selected mesh name in the global dock.
 - Do not narrate palette decisions in UI copy.
 - Do not bind product language to a network vendor.
+- Observation tools never alter source geometry.
 - Do not use pure black or pure white.
 - Keep view, image, and full-info sharing as separate choices.
 - Brush mode must fully intercept pointer input so drawing never rotates the scene.
@@ -92,7 +144,8 @@ Phone mesh sheets use content height up to 52dvh. Style sheets snap to 44dvh and
 
 ## Surface annotation interaction
 
-The annotation action opens one selection, point, line and screen-brush dock.
+The annotation action opens one selection, point, line and screen-brush dock,
+with screen brush active by default.
 Keep two persistent tool rows; reveal the color palette on demand and name/line
 controls only for a selected mark. Newly created points and completed lines stay
 selected so their name field remains editable. Never autofocus a phone keyboard.
@@ -105,8 +158,8 @@ numbers match list rows. Open the list by default when a shared scene contains
 annotations, without entering drawing mode. Selecting a row highlights the mark and brings obscured
 surface marks into view. A compact sheet above the dock on phones and a right
 panel on desktop keep the mesh primary. All actions retain 42px touch targets.
-Opening tools and lists never resizes the scene canvas. Details and Info move
-beside the open annotation list rather than hiding the list or canvas badges.
+Opening tools and lists never resizes the scene canvas. Scene information lives
+in the tree and does not hide the annotation list or canvas badges.
 
 Use the shared 3.2px ink width for screen and surface lines. Surface ribbons lie
 on local tangent planes, avoiding clipping on slopes. Do not add tube lighting,

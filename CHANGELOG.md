@@ -3,6 +3,34 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2026-09-24
+
+### Added
+
+- Inspect a read-only section drawn across one or several visible Meshes, then
+  pan, zoom, resize, and measure contours. View links restore the selected
+  plane, target set, and measurements.
+- Treat Meshes, PTS curves, text, JSON, images, HTML, and plugin content as
+  scene entities with shared labels, visibility, opacity, and selection.
+
+### Changed
+
+- Replace the old element and rendering drawers with a compact scene list and
+  an observation dock for shading, lighting, projection, scene switches, and
+  sections. Move Raw/LOD quality into the scene information tab.
+- Put each entity's color, opacity, visibility, and rename action on its scene
+  row. Long labels keep both ends visible; the full name remains available in
+  the information tab and inline editor.
+- Use Lucide icons for the viewer controls and preserve wireframe shading while
+  changing observation light modes.
+
+### Fixed
+
+- Restrict section measurements to contour hits so empty plot clicks do not
+  produce misleading distances.
+- Start annotation in brush mode and keep scene controls and shared state in
+  sync after switching scenes or editing entities.
+
 ## [0.18.0] - 2026-09-24
 
 ### Changed

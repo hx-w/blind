@@ -229,5 +229,9 @@ export function updateObjectMaterial(child: THREE.Mesh | THREE.Points, style: Me
   material.uniforms.curve.value = style.curve;
   material.transparent = translucent;
   material.side = translucent ? THREE.FrontSide : THREE.DoubleSide;
-  material.wireframe = style.wireframe;
+  if (material.wireframe !== style.wireframe) {
+    material.wireframe = style.wireframe;
+    // Force the renderer to rebind its triangle/line geometry on the next frame.
+    material.needsUpdate = true;
+  }
 }

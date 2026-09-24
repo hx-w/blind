@@ -1,5 +1,5 @@
 import { apiError } from './api.ts';
-import type { Presentation, SceneComponent } from './scene-components';
+import type { Presentation, SceneEntity } from './scene-components';
 
 export interface SurfaceContent {
   element: HTMLElement;
@@ -7,7 +7,7 @@ export interface SurfaceContent {
   present?(mode: Presentation): void;
   dispose(): void;
 }
-export type ContentFactory = (url: string, label: string, spec: SceneComponent) => SurfaceContent;
+export type ContentFactory = (url: string, label: string, spec: SceneEntity) => SurfaceContent;
 function container(): HTMLDivElement { const e = document.createElement('div'); e.className = 'component-content'; return e; }
 class OversizedResourceError extends Error {}
 async function bytes(url: string, signal: AbortSignal, maxBytes = 64 * 1024 * 1024): Promise<ArrayBuffer> {

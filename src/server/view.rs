@@ -66,7 +66,7 @@ pub(super) async fn get_scene(
     Ok((
         no_store(),
         Json(serde_json::to_value(PublicScene {
-            components: scene.component_descriptors(),
+            entities: scene.entity_descriptors(),
             attachments: scene.attachments.iter().enumerate().map(|(index,a)| serde_json::json!({"id":a.id,"label":a.label,"byte_size":a.byte_size,"unavailable":a.unavailable,"url":if a.revision.is_some(){Some(format!("api/v1/scenes/{token}/attachments/{index}{query_suffix}"))}else{None}})).collect(),
             warnings: scene.warnings.clone(),
             ttl_days: scene.link_ttl_days(),
@@ -349,7 +349,7 @@ pub(super) async fn reshare(
             let target = scene
                 .scene_by_id_mut(id)
                 .ok_or_else(|| AppError::bad_request("unknown scene update ID"))?;
-            target.components = target.component_descriptors();
+            target.entities = target.entity_descriptors();
             let update: SceneUpdate = serde_json::from_value(value.clone())
                 .map_err(|e| AppError::unprocessable(&e.to_string()))?;
             target
@@ -376,7 +376,7 @@ pub(super) async fn reshare(
     } else {
         let request: ReshareRequest =
             serde_json::from_value(body).map_err(|e| AppError::unprocessable(&e.to_string()))?;
-        scene.components = scene.component_descriptors();
+        scene.entities = scene.entity_descriptors();
         scene
             .apply_update(request.update)
             .map_err(|error| AppError::bad_request(&error.to_string()))?;
@@ -486,7 +486,7 @@ async fn render_single_image(
         .map(|m| m.byte_size)
         .chain(
             scene
-                .components
+                .entities
                 .iter()
                 .filter_map(|c| match c.source {
                     crate::component::ComponentSource::Attachment(i) => scene.attachments.get(i),
@@ -505,7 +505,7 @@ async fn render_single_image(
     if source_bytes > crate::source::MAX_SOURCE_BYTES {
         return Err(AppError::unprocessable("image sources exceed 512 MiB"));
     }
-    if !scene.components.is_empty() {
+    if !scene.entities.is_empty() || scene.state.section.is_some() {
         let url = format!(
             "http://{}{}/s/{}?render=1{}",
             control_address(&state.config)?,
@@ -624,7 +624,7 @@ pub(super) async fn view_scene(
     }
     let mut origins: Vec<_> = scenes
         .into_iter()
-        .flat_map(|scene| &scene.components)
+        .flat_map(|scene| &scene.entities)
         .filter_map(|c| c.renderer.as_ref())
         .flat_map(|r| r.frame_origins.iter())
         .cloned()

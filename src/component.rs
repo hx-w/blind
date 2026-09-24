@@ -123,7 +123,7 @@ pub enum ComponentSource {
     Attachment(usize),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SceneComponent {
+pub struct SceneEntity {
     pub id: String,
     pub component: ComponentKind,
     pub source: ComponentSource,
@@ -141,8 +141,10 @@ pub struct SceneComponent {
 /// Only mutable presentation fields are accepted. Sources/types cannot be replaced by viewers.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ComponentUpdate {
+pub struct EntityUpdate {
     pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
     pub position: Option<[f32; 3]>,
     pub size: Option<[f32; 2]>,
     pub visible: bool,
@@ -150,13 +152,16 @@ pub struct ComponentUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<serde_json::Value>,
 }
-impl ComponentUpdate {
+impl EntityUpdate {
     pub fn validate(&self) -> Result<()> {
         if let Some(state) = &self.state {
             ensure!(
                 serde_json::to_vec(state)?.len() <= 65536,
                 "component state exceeds 64 KiB"
             );
+        }
+        if let Some(label) = &self.label {
+            validate_label(label)?;
         }
         DisplayOptions {
             position: self.position,

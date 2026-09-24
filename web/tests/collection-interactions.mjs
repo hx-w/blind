@@ -8,6 +8,11 @@ import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
 
+async function clickDisplay(page) {
+  if (await page.locator('.dock-observe').getAttribute('aria-hidden') === 'true') await page.locator('#observe-trigger').click();
+  if (await page.locator('[data-observe-category="light"]').getAttribute('aria-expanded') === 'false') await page.locator('[data-observe-category="light"]').click();
+}
+
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const binary = join(root, 'target/debug/blind');
 const fixture = fileURLToPath(new URL('../../tests/fixtures/tetra.ply', import.meta.url));
@@ -79,17 +84,33 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await page.waitForFunction(() => document.querySelector('.collection-card.active')?.getAttribute('data-scene') === 'design');
 
     await page.locator('.collection-card[data-scene="scan"] .collection-card-title').click();
-    await page.locator('#render-trigger').click();
-    await scan.locator('#control-panel[aria-hidden="false"]').waitFor();
-    assert.equal(await design.locator('#control-panel').getAttribute('aria-hidden'), 'true');
-    await scan.locator('[data-render-mode="normals"]').click();
-    await scan.locator('#close-panel').click();
+    await page.waitForFunction(() => document.querySelector('.collection-card.active')?.getAttribute('data-scene') === 'scan');
+    await page.locator('#observe-trigger').click();
+    await page.locator('#section-trigger').click();
+    await scan.locator('.section-draw-overlay').waitFor({state:'visible'});
+    const rect = await scan.locator('.section-draw-overlay').boundingBox();
+    await page.mouse.move(rect.x + rect.width * .35, rect.y + rect.height * .5);
+    await page.mouse.down();
+    await page.mouse.move(rect.x + rect.width * .65, rect.y + rect.height * .5, {steps:8});
+    await page.mouse.up();
+    await scan.locator('.section-panel').waitFor({state:'visible'});
+    assert.equal(await design.locator('.section-panel').isVisible(), false, 'a section belongs to one scene');
     await page.locator('.collection-card[data-scene="design"] .collection-card-title').click();
-    await page.locator('#render-trigger').click();
-    assert.equal(await design.locator('[data-render-mode="matte"]').getAttribute('aria-pressed'), 'true');
-    await design.locator('#close-panel').click();
+    await scan.locator('.section-panel').waitFor({state:'hidden'});
+    await page.locator('.collection-card[data-scene="scan"] .collection-card-title').click();
+    await scan.locator('.section-panel').waitFor({state:'visible'});
+    await scan.locator('button[aria-label="关闭剖面观察"]').click();
+    await page.locator('[data-observe-category="shading"]').click();
+    await page.locator('.collection-shell [data-shading="wire"]').click();
+    await page.waitForFunction(() => document.querySelector('.collection-card[data-scene="scan"] iframe')?.contentDocument?.querySelector('[data-shading="wire"]')?.classList.contains('active'));
+    await clickDisplay(page);
+    await page.locator('.collection-shell .review-dock [data-observe-mode="normals"]').click();
+    await page.locator('.collection-card[data-scene="design"] .collection-card-title').click();
+    await clickDisplay(page);
+    assert.equal(await design.locator('[data-observe-mode="matte"]').getAttribute('aria-pressed'), 'true');
 
     const shareResponse = page.waitForResponse(response => response.url().endsWith('/share') && response.request().method() === 'POST');
+    await page.locator('#observe-back').click();
     await page.locator('#share-view').click();
     const response = await shareResponse;
     assert.equal(response.status(), 200, await response.text());
@@ -98,6 +119,7 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     const savedScan = await (await fetch(`${origin}/api/v1/scenes/${savedToken}?scene=scan`)).json();
     const savedDesign = await (await fetch(`${origin}/api/v1/scenes/${savedToken}?scene=design`)).json();
     assert.equal(savedScan.state.render_mode, 'normals');
+    assert.equal(savedScan.state.shading, 'wire', 'collection shading must reach the active scene');
     assert.equal(savedDesign.state.render_mode, 'matte');
     await page.evaluate(() => Object.defineProperty(navigator, 'clipboard', {configurable:true, value:{
       writeText: async value => { window.copiedCollection = value; },
@@ -168,27 +190,28 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await page.setViewportSize({width:390,height:844});
     await page.locator('.collection-shell.collection-tabbed').waitFor();
     assert.ok((await page.locator('.collection-stage').boundingBox()).y <= 56, 'mobile tabs and share should occupy one top row');
-    assert.equal(await page.locator('.collection-shell .review-dock .dock-tool').count(), 6);
+    assert.equal(await page.locator('.collection-shell .review-dock .dock-main .dock-tool').count(), 4);
+    assert.equal(await page.locator('.collection-shell .review-dock .dock-observe .observe-primary .dock-tool').count(), 6);
     assert.ok((await page.locator('.collection-stage').boundingBox()).y + (await page.locator('.collection-stage').boundingBox()).height >= 842);
     await page.waitForFunction(() => document.querySelectorAll('.collection-frame').length === 1);
     await page.locator('.collection-tabs [data-scene="scan"]').click();
     await page.waitForFunction(() => document.querySelector('.collection-card.active')?.dataset.scene === 'scan');
     await page.frameLocator('.collection-card[data-scene="scan"] iframe').locator('#loading-state').waitFor({state:'hidden'});
-    await page.locator('#render-trigger').click();
-    assert.equal(await page.frameLocator('.collection-card[data-scene="scan"] iframe').locator('[data-render-mode="normals"]').getAttribute('aria-pressed'), 'true');
-    await page.frameLocator('.collection-card[data-scene="scan"] iframe').locator('#close-panel').click();
+    await clickDisplay(page);
+    assert.equal(await page.frameLocator('.collection-card[data-scene="scan"] iframe').locator('[data-observe-mode="normals"]').getAttribute('aria-pressed'), 'true');
+    await page.locator('#observe-back').click();
     await page.locator('#fit-view').click();
     await page.waitForTimeout(300);
     const mobileShare = page.waitForRequest(request => request.url().endsWith('/share') && request.method() === 'POST');
     await page.locator('#share-view').click();
     const scanUpdate = (await mobileShare).postDataJSON().updates.scan;
-    assert.ok(Math.abs(scanUpdate.state.camera.target[1] - (scanUpdate.components[0].position[1] + .5)) < .1,
+    assert.ok(Math.abs(scanUpdate.state.camera.target[1] - (scanUpdate.entities[0].position[1] + .5)) < .1,
       'Fit must use the restored component position after switching to tabs');
     await page.locator('.collection-share button', {hasText:'关闭'}).click();
     await page.setViewportSize({width:320,height:700});
     await page.locator('.collection-shell.collection-tabbed').waitFor();
     const dockBounds = await page.locator('.collection-shell .review-dock').boundingBox();
-    assert.ok(dockBounds.x >= 0 && dockBounds.x + dockBounds.width <= 320, 'six tools must fit at 320px');
+    assert.ok(dockBounds.x >= 0 && dockBounds.x + dockBounds.width <= 320, 'the dock must fit at 320px');
     await page.setViewportSize({width:390,height:844});
     assert.deepEqual(errors, []);
     if (process.env.BLIND_TEST_SCREENSHOTS) {

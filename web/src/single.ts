@@ -9,6 +9,8 @@ import { ApiError, loadScene, shareScene, type HostCandidate, type MeshQuality, 
 import { MarkupCanvas } from './markup';
 import { MeshViewer } from './viewer';
 import { SurfaceEditor } from './surface';
+import { SectionViewer } from './section-viewer';
+import { installIcons } from './icons';
 import { installShortcuts } from './shortcuts';
 import {takeInitialScene} from './bootstrap';
 
@@ -18,24 +20,21 @@ const $ = <T extends HTMLElement>(selector: string): T => {
   return element;
 };
 
-const isMobileViewport = (): boolean => matchMedia('(max-width: 759px)').matches;
-
 const shell = $('#app-shell');
 const root = $('#canvas-root');
 const viewerElement = $('#viewer');
 const title = $('#scene-title');
 const meta = $('#scene-meta');
-const sceneInfo = $('#scene-info');
-const sceneInfoToggle = $('#scene-info-toggle');
-const meshControls = $('#mesh-controls');
-const renderControls = $('#render-controls');
-const renderTrigger = $('#render-trigger') as HTMLButtonElement;
+const dock = $('.review-dock');
+const mainDock = $('.dock-main');
+const observeDock = $('.dock-observe');
+const observeTrigger = $('#observe-trigger') as HTMLButtonElement;
+const observeBack = $('#observe-back') as HTMLButtonElement;
+const observeCategories = document.querySelectorAll<HTMLButtonElement>('[data-observe-category]');
 const lightControls = $('#light-controls');
 const lightAzimuth = $('#light-azimuth') as HTMLInputElement;
 const lightElevation = $('#light-elevation') as HTMLInputElement;
 const lightIntensity = $('#light-intensity') as HTMLInputElement;
-const panelTitle = $('#panel-title');
-const panelScroll = $('#panel-scroll');
 const loading = $('#loading-state');
 const loadingTitle = $('#loading-title');
 const loadingMeter = $('#loading-meter');
@@ -43,19 +42,11 @@ const loadingBar = $('#loading-bar');
 const loadingProgress = $('#loading-progress');
 const invalid = $('#invalid-state');
 const empty = $('#empty-state');
-const panel = $('#control-panel');
-const panelContext = $('#panel-context');
-const dragZone = $('#panel-drag-zone');
-const detailsTrigger = $('.panel-trigger') as HTMLButtonElement;
-const detailMeshSelect = $('#detail-mesh-select') as HTMLSelectElement;
-const meshVisibleToggle = $('#mesh-visible-toggle') as HTMLInputElement;
-const meshLabelText = $('#mesh-label-text') as HTMLInputElement;
-const meshSummaryDot = $('#mesh-summary-dot');
-const meshSummaryName = $('#mesh-summary-name');
-const meshSummaryMeta = $('#mesh-summary-meta');
+const sceneSelectedInfo = $('#scene-selected-info');
+const sceneSelectedLabel = $('#scene-selected-label');
+const sceneSelectedMeta = $('#scene-selected-meta');
+const sceneInfoQuality = $('#scene-info-quality');
 const lodSaving = $('#lod-saving');
-const opacity = $('#opacity-range') as HTMLInputElement;
-const opacityValue = $('#opacity-value') as HTMLOutputElement;
 const axesToggle = $('#axes-toggle') as HTMLInputElement;
 const lightToggle = $('#light-toggle') as HTMLInputElement;
 const shareDialog = $('#share-sheet') as HTMLDialogElement;
@@ -71,7 +62,6 @@ const manualCopy = $('#manual-copy');
 const manualCopyValue = $('#manual-copy-value') as HTMLTextAreaElement;
 const toast = $('#toast');
 const brushTool = $('#brush-tool') as HTMLButtonElement;
-const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 
 // The viewer may be mounted under a configured base path, so the short-link marker
 // can sit after an arbitrary prefix (e.g. /blind/s/{token}).
@@ -87,32 +77,26 @@ let owner = token ? sessionStorage.getItem(`blind.owner.${token}`) ?? undefined 
 let scene: PublicScene | undefined;
 let sceneReady = false;
 let components: ComponentViewer | undefined;
-let panelOpen = false;
-let panelMode: 'mesh' | 'info' | 'render' = 'mesh';
+let observeOpen = false;
+let activeObserveCategory: string | null = null;
 let shareLinks: ShareResponse | undefined;
 let shareRequestGeneration = 0;
 let shortcutCopyGeneration = 0;
 let toastTimer = 0;
-let panelHeight = 0;
-let dragStart: { y: number; height: number } | null = null;
-let suppressHandleClick = false;
-let expanded = false;
 let loadProgress = { completed: 0, total: 0, rawFallbacks: 0, failed: 0 };
 let longLoadTimer = 0;
 const meshViewer = new MeshViewer(root);
 const markup = new MarkupCanvas($('#markup-canvas') as HTMLCanvasElement);
-new ResizeObserver(entries => {
-  shell.style.setProperty('--detail-panel-height', `${entries[0].target.getBoundingClientRect().height}px`);
-}).observe($('#control-panel'));
-const surface = new SurfaceEditor(meshViewer, markup, shell, {closePanel, toast: showToast, change: () => {
-  syncDetailControls();
+const surface = new SurfaceEditor(meshViewer, markup, shell, {toast: showToast, change: () => {
+  syncSceneControls();
   if (embedded && sceneId) parent.postMessage({type:'blind:scene-annotation-state', id:sceneId}, location.origin);
 }});
+const section = new SectionViewer(meshViewer, showToast);
 
 meshViewer.onSelectionChange = () => {
-  components?.selectMesh(meshViewer.selectedIndex); syncDetailControls(); surface.refreshList();
+  components?.selectMesh(meshViewer.selectedIndex); syncSceneControls(); surface.refreshList();
 };
-meshViewer.onModelChange = () => { syncDetailControls(); syncSceneMeta(); surface.refreshList(); components?.sync(); };
+meshViewer.onModelChange = () => { syncSceneControls(); syncSceneMeta(); surface.refreshList(); components?.sync(); section.refresh(); };
 meshViewer.onLoadProgress = (progress) => {
   loadProgress = progress;
   renderLoadProgress();
@@ -124,6 +108,7 @@ markup.onChange = () => {
 };
 markup.onActiveChange = (active) => shell.classList.toggle('drawing-stroke', active);
 
+installIcons();
 void start();
 
 function saveEmbeddedState(): import('./api').SceneUpdate | null {
@@ -155,10 +140,28 @@ if (embedded && sceneId) {
     }
     if (!sceneReady) return;
     if (command === 'activate') document.documentElement.classList.add('embedded-active');
-    if (command === 'deactivate') { document.documentElement.classList.remove('embedded-active'); surface.exit(); closePanel(); saveEmbeddedState(); }
+    if (command === 'deactivate') { document.documentElement.classList.remove('embedded-active'); section.deactivate(); surface.exit(); saveEmbeddedState(); }
     if (command === 'fit') meshViewer.fitAll();
-    if (command === 'details') detailsTrigger.click();
-    if (command === 'render') renderTrigger.click();
+    if (command === 'details') components?.openInfo();
+    if (command === 'render') setObserveToolbar(true);
+    if (command === 'observe-open') setObserveToolbar(true);
+    if (command === 'observe-close') setObserveToolbar(false);
+    if (command.startsWith('observe-mode:')) document.querySelector<HTMLButtonElement>(`[data-observe-mode="${command.slice(13)}"]`)?.click();
+    if (command.startsWith('observe-category:')) document.querySelector<HTMLButtonElement>(`[data-observe-category="${command.slice(17)}"]`)?.click();
+    if (command.startsWith('observe-setting:')) {
+      const [, kind, value] = command.split(':');
+      if (kind === 'shading' && ['smooth','flat','wire'].includes(value)) document.querySelector<HTMLButtonElement>(`[data-shading="${value}"]`)?.click();
+      if (kind === 'projection' && ['perspective','orthographic'].includes(value)) document.querySelector<HTMLButtonElement>(`[data-projection="${value}"]`)?.click();
+      if (kind === 'axes' || kind === 'background') {
+        const input = kind === 'axes' ? axesToggle : lightToggle;
+        input.checked = value === 'true'; input.dispatchEvent(new Event('change', {bubbles:true}));
+      }
+    }
+    if (command === 'observe-light' && event.data.control && Number.isFinite(event.data.value)) {
+      const input = {azimuth:lightAzimuth, elevation:lightElevation, intensity:lightIntensity}[event.data.control as 'azimuth'|'elevation'|'intensity'];
+      if (input) {input.value = String(event.data.value); input.dispatchEvent(new Event('input', {bubbles:true}));}
+    }
+    if (command === 'section') section.open();
     if (command === 'annotate') brushTool.click();
     if (command === 'screen-scope') surface.setExternalScreenMarkup(event.data.value !== 'scene');
     if (command === 'surface-control') {
@@ -173,16 +176,13 @@ if (embedded && sceneId) {
         if (input) { input.value = value; input.dispatchEvent(new Event('change', {bubbles:true})); }
       }
     }
-    if (command === 'info') sceneInfoToggle.click();
+    if (command === 'info') components?.openInfo();
   });
   new MutationObserver(() => parent.postMessage({type:'blind:scene-tool-mode', id:sceneId, annotation:shell.classList.contains('surface-mode')}, location.origin))
     .observe(shell, {attributes:true, attributeFilter:['class']});
 }
 
-$('#scene-notice').addEventListener('click', () => openPanel('info'));
-sceneInfoToggle.addEventListener('click', () => {
-  if (panelOpen && panelMode === 'info') closePanel(); else openPanel('info');
-});
+$('#scene-notice').addEventListener('click', () => components?.openInfo());
 
 async function start(): Promise<void> {
   if (!token) {
@@ -198,9 +198,10 @@ async function start(): Promise<void> {
         if (saved && saved.meshes?.length === scene.meshes.length) {
           scene.state = saved.state;
           scene.meshes.forEach((mesh, index) => Object.assign(mesh, saved.meshes[index]));
-          if (scene.components && saved.components) {
-            for (const component of scene.components) {
-              const update = saved.components.find(candidate => candidate.id === component.id);
+          const entities = scene.entities ?? scene.components;
+          if (entities && saved.entities) {
+            for (const component of entities) {
+              const update = saved.entities.find(candidate => candidate.id === component.id);
               if (update) Object.assign(component, update);
             }
           }
@@ -226,18 +227,19 @@ async function start(): Promise<void> {
     title.insertAdjacentElement('afterend', artifactList);
     startLongLoadHint();
     await meshViewer.load(scene, exportMode);
-    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !scene.components?.some(c => c.source.kind === 'attachment')) {
+    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !(scene.entities ?? scene.components)?.some(c => c.source.kind === 'attachment')) {
       throw new Error('No models could be loaded');
     }
     $('[data-copy="image"]').hidden = false;
     components = new ComponentViewer(root, meshViewer, scene);
-    components.onSelect = () => syncDetailControls();
-    components.onChange = () => syncDetailControls();
+    components.onSelect = () => syncSceneControls();
+    components.onChange = () => syncSceneControls();
     window.addEventListener('pagehide', event => { if (!event.persisted) components?.dispose(); });
     markup.load(scene.state.strokes ?? []);
     surface.load();
     owner = scene.owner ? owner : undefined;
-    renderMeshOptions(); renderSwatches(); syncDetailControls(); syncSceneMeta();
+    syncSceneControls(); syncSceneMeta();
+    section.load();
     const notices = (scene.warnings?.length ?? 0) + loadProgress.failed;
     if (notices > 0) {
       const notice = $('#scene-notice'); notice.hidden = false;
@@ -301,51 +303,24 @@ function hideViewerControls(): void {
   document.querySelectorAll<HTMLElement>('[data-viewer-chrome]').forEach((element) => { element.hidden = true; });
 }
 
-function renderMeshOptions(): void {
-  detailMeshSelect.replaceChildren(...(components?.components ?? []).map(component => {
-    const option = document.createElement('option'); option.value = component.id; option.textContent = component.label; return option;
-  }));
-}
-
-function renderSwatches(): void {
-  const host = $('#color-swatches'); host.replaceChildren();
-  palette.forEach((color) => {
-    const button = document.createElement('button'); button.type = 'button'; button.className = 'swatch';
-    button.style.setProperty('--swatch', color); button.setAttribute('aria-label', `使用颜色 ${color}`);
-    button.addEventListener('click', () => { meshViewer.setColor(color); syncDetailControls(); });
-    host.append(button);
-  });
-}
-
-function syncDetailControls(): void {
-  const component = components?.selectedComponent;
-  const geometry = !component || component.source.kind === 'mesh';
-  document.querySelectorAll<HTMLElement>('[data-geometry-only]').forEach(element => { element.hidden = !geometry; });
-  if (component) {
-    detailMeshSelect.value = component.id;
-    opacity.value = String(Math.round(component.opacity * 100)); opacityValue.value = `${opacity.value}%`;
-    meshVisibleToggle.checked = component.visible && component.opacity > 0;
-  }
+function syncSceneControls(): void {
+  const component = components?.selectedEntity;
+  const geometry = !component || !!components?.selectedGeometry;
   const state = meshViewer.currentState;
   axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
   syncRenderControls();
+  document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach(button => button.classList.toggle('active', button.dataset.shading === state.shading));
   document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach(button => button.classList.toggle('active', button.dataset.projection === state.projection));
-  if (component && !geometry) {
-    panelContext.textContent = panelOpen && panelMode === 'mesh' ? component.label : '';
-    meshSummaryName.textContent = component.label;
-    meshSummaryMeta.textContent = `${component.component.toUpperCase()} · ${formatBytes(scene?.attachments?.[component.source.index]?.byte_size ?? 0)}`;
-    meshSummaryDot.style.setProperty('--mesh-color', 'var(--accent)');
-    return;
+  const selected = geometry ? meshViewer.selectedModel : undefined;
+  sceneSelectedInfo.hidden = !component && !selected;
+  sceneInfoQuality.hidden = !selected;
+  if (component || selected) {
+    sceneSelectedLabel.textContent = component?.label ?? selected?.label?.text ?? selected?.name ?? '';
+    sceneSelectedMeta.textContent = selected
+      ? `${selected.format.toUpperCase()} · Raw ${formatBytes(selected.raw_bytes)}`
+      : `${component!.component.toUpperCase()} · ${formatBytes(scene?.attachments?.[component!.source.index]?.byte_size ?? 0)}`;
   }
-  const selected = meshViewer.selectedModel; if (!selected) return;
-  panelContext.textContent = panelOpen && panelMode === 'mesh' ? selected.label?.text ?? selected.name : '';
-  if (!component) detailMeshSelect.value = String(meshViewer.selectedIndex);
-  meshSummaryName.textContent = selected.label?.text ?? selected.name;
-  meshSummaryMeta.textContent = `${selected.format.toUpperCase()} · Raw ${formatBytes(selected.raw_bytes)}`;
-  meshSummaryDot.style.setProperty('--mesh-color', selected.color);
-  meshVisibleToggle.checked = selected.visible;
-  meshLabelText.value = selected.label?.text ?? '';
-  opacity.value = String(Math.round(selected.opacity * 100)); opacityValue.value = `${opacity.value}%`;
+  if (!selected) return;
   document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach((button) => {
     const quality = button.dataset.quality as MeshQuality;
     button.classList.toggle('active', quality === selected.quality);
@@ -361,138 +336,83 @@ function syncDetailControls(): void {
       : `Raw ${formatBytes(selected.raw_bytes)} · LOD ${formatBytes(selected.lod_bytes)} · 小型 Mesh 增加 ${formatBytes(-delta)}`;
   } else if (selected.lod_error) lodSaving.textContent = 'LOD 暂不可用，当前已回退到 Raw';
   else lodSaving.textContent = '首次切换到 LOD 后显示节省量';
-  document.querySelectorAll<HTMLButtonElement>('.swatch').forEach((button) => button.classList.toggle('active', button.style.getPropertyValue('--swatch').trim().toLowerCase() === selected.color.toLowerCase()));
-  document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.classList.toggle('active', button.dataset.shading === state.shading));
-  document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.classList.toggle('active', button.dataset.projection === state.projection));
-  axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
 }
 
-detailsTrigger.addEventListener('click', () => {
-  if (panelOpen && panelMode === 'mesh') closePanel(); else openPanel('mesh');
+function setObserveToolbar(open: boolean, keyboard = false): void {
+  if (observeOpen === open) return;
+  observeOpen = open;
+  if (keyboard) dock.classList.add('dock-no-motion');
+  dock.classList.toggle('is-observing', open);
+  mainDock.classList.toggle('is-current', !open);
+  observeDock.classList.toggle('is-current', open);
+  mainDock.inert = open; observeDock.inert = !open;
+  mainDock.setAttribute('aria-hidden', String(open));
+  observeDock.setAttribute('aria-hidden', String(!open));
+  observeTrigger.setAttribute('aria-expanded', String(open));
+  if (keyboard) requestAnimationFrame(() => dock.classList.remove('dock-no-motion'));
+}
+observeTrigger.addEventListener('click', event => {
+  setObserveToolbar(true, event.detail === 0);
+  observeBack.focus({preventScroll:true});
 });
-renderTrigger.addEventListener('click', () => {
-  if (panelOpen && panelMode === 'render') closePanel(); else openPanel('render');
+observeBack.addEventListener('click', event => {
+  setObserveToolbar(false, event.detail === 0);
+  observeTrigger.focus({preventScroll:true});
 });
+function setObserveCategory(category: string | null): void {
+  activeObserveCategory = activeObserveCategory === category ? null : category;
+  for (const button of observeCategories) {
+    const active = button.dataset.observeCategory === activeObserveCategory;
+    button.classList.toggle('active', active); button.setAttribute('aria-expanded', String(active));
+  }
+  for (const detail of observeDock.querySelectorAll<HTMLElement>('.observe-detail')) detail.hidden = detail.id !== `observe-${activeObserveCategory}` && !(activeObserveCategory === 'scene' && detail.id === 'render-controls');
+  dock.classList.toggle('detail-open', !!activeObserveCategory);
+  syncRenderControls();
+}
+observeCategories.forEach(button => button.addEventListener('click', () => setObserveCategory(button.dataset.observeCategory ?? null)));
+$('#section-trigger').addEventListener('click', () => { if (activeObserveCategory) setObserveCategory(null); });
+document.querySelectorAll<HTMLButtonElement>('[data-observe-mode]').forEach(button => button.addEventListener('click', () => {
+  meshViewer.setRenderMode(button.dataset.observeMode as 'matte' | 'raking' | 'normals');
+  syncRenderControls();
+}));
 
 function syncRenderControls(): void {
   const mode = meshViewer.renderMode, light = meshViewer.lightSettings;
-  document.querySelectorAll<HTMLButtonElement>('[data-render-mode]').forEach(button => {
-    const active = button.dataset.renderMode === mode;
+  document.querySelectorAll<HTMLButtonElement>('[data-observe-mode]').forEach(button => {
+    const active = button.dataset.observeMode === mode;
     button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
   });
-  lightControls.hidden = mode !== 'raking';
+  lightControls.hidden = mode !== 'raking' || activeObserveCategory !== 'light';
+  dock.classList.toggle('observe-raking', mode === 'raking' && activeObserveCategory === 'light');
   lightAzimuth.value = String(light.azimuth); lightElevation.value = String(light.elevation); lightIntensity.value = String(Math.round(light.intensity * 100));
   $('#light-azimuth-value').textContent = `${light.azimuth}°`;
   $('#light-elevation-value').textContent = `${light.elevation}°`;
   $('#light-intensity-value').textContent = `${Math.round(light.intensity * 100)}%`;
 }
 
-document.querySelectorAll<HTMLButtonElement>('[data-render-mode]').forEach(button => button.addEventListener('click', () => {
-  meshViewer.setRenderMode(button.dataset.renderMode as 'matte' | 'raking' | 'normals'); syncRenderControls();
-  if (panelOpen && panelMode === 'render' && isMobileViewport() && !expanded) setPanelHeight(innerHeight * renderPanelRatio());
-}));
 for (const input of [lightAzimuth, lightElevation, lightIntensity]) input.addEventListener('input', () => {
   meshViewer.setLight({azimuth: Number(lightAzimuth.value), elevation: Number(lightElevation.value), intensity: Number(lightIntensity.value) / 100});
   syncRenderControls();
 });
 
-meshLabelText.addEventListener('input', () => { meshViewer.setLabel(meshLabelText.value); components?.sync(); });
-
-function openPanel(mode: 'mesh' | 'info' | 'render'): void {
-  panelOpen = true; expanded = false;
-  panelMode = mode;
-  sceneInfo.hidden = mode !== 'info'; meshControls.hidden = mode !== 'mesh'; renderControls.hidden = mode !== 'render';
-  panelTitle.textContent = mode === 'info' ? '场景信息' : mode === 'render' ? '渲染检视' : '详情';
-  panelScroll.classList.toggle('show-scene-info', mode === 'info');
-  panelScroll.scrollTop = 0;
-  syncPanelTriggers();
-  if (isMobileViewport()) setPanelHeight(innerHeight * (mode === 'render' ? renderPanelRatio() : 0.58));
-  dragZone.setAttribute('aria-label', '展开详情面板');
-  shell.classList.add('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'false');
-  panel.inert = false;
-  syncDetailControls();
-}
-
-function closePanel(restoreFocus = false): void {
-  panelOpen = false; shell.classList.remove('panel-open'); panel.classList.remove('expanded'); panel.setAttribute('aria-hidden', 'true');
-  if (restoreFocus) (panelMode === 'info' ? sceneInfoToggle : panelMode === 'render' ? renderTrigger : detailsTrigger).focus();
-  panel.inert = true;
-  syncPanelTriggers();
-  shell.style.setProperty('--sheet-height', '0px');
-}
-
-function syncPanelTriggers(): void {
-  for (const [trigger, mode] of [[detailsTrigger, 'mesh'], [renderTrigger, 'render'], [sceneInfoToggle, 'info']] as const) {
-    const active = panelOpen && panelMode === mode;
-    trigger.classList.toggle('active', active);
-    trigger.setAttribute('aria-expanded', String(active));
-  }
-  if (embedded && sceneId) parent.postMessage({type:'blind:scene-panel', id:sceneId, mode:panelOpen ? panelMode : null}, location.origin);
-}
-
-function setPanelHeight(value: number): void {
-  panelHeight = Math.max(0, Math.min(value, innerHeight * 0.82));
-  shell.style.setProperty('--sheet-height', `${panelHeight}px`);
-}
-
-function renderPanelRatio(): number { return meshViewer.renderMode === 'raking' ? 0.58 : 0.43; }
-
-dragZone.addEventListener('pointerdown', (event) => {
-  if (!panelOpen || !isMobileViewport()) return;
-  dragStart = { y: event.clientY, height: panelHeight }; dragZone.setPointerCapture(event.pointerId); panel.classList.add('dragging');
-});
-dragZone.addEventListener('pointermove', (event) => { if (dragStart) setPanelHeight(dragStart.height + dragStart.y - event.clientY); });
-dragZone.addEventListener('pointerup', (event) => {
-  if (!dragStart) return; dragZone.releasePointerCapture(event.pointerId); panel.classList.remove('dragging');
-  const delta = dragStart.y - event.clientY; dragStart = null;
-  suppressHandleClick = Math.abs(delta) > 8;
-  if (delta < -90) { closePanel(); return; }
-  expanded = panelHeight > innerHeight * 0.68 || delta > 70;
-  applyDetailDetent();
-});
-dragZone.addEventListener('click', () => {
-  if (suppressHandleClick) { suppressHandleClick = false; return; }
-  if (panelOpen && isMobileViewport()) {
-    expanded = !expanded; applyDetailDetent();
-  }
-});
-dragZone.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' || event.key === ' ') {
-    if (panelOpen) { event.preventDefault(); expanded = !expanded; applyDetailDetent(); }
-  }
-});
-
-function applyDetailDetent(): void {
-  setPanelHeight(innerHeight * (expanded ? 0.82 : panelMode === 'render' ? renderPanelRatio() : 0.58));
-  panel.classList.toggle('expanded', expanded);
-  dragZone.setAttribute('aria-label', expanded ? '收起详情面板' : '展开详情面板');
-}
-
-$('#close-panel').addEventListener('click', () => closePanel(true));
-panel.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') { event.preventDefault(); closePanel(true); }
-});
 $('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast('已适配全部可见元素'); });
-detailMeshSelect.addEventListener('change', () => components?.selectById(detailMeshSelect.value));
-meshVisibleToggle.addEventListener('change', () => components?.setSelectedVisible(meshVisibleToggle.checked));
-opacity.addEventListener('input', () => { components?.setSelectedOpacity(Number(opacity.value) / 100); opacityValue.value = `${opacity.value}%`; });
 document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach((button) => button.addEventListener('click', async () => {
   const quality = button.dataset.quality as MeshQuality;
   try {
     await meshViewer.setQuality(meshViewer.selectedIndex, quality);
-    syncDetailControls(); syncSceneMeta();
+    syncSceneControls(); syncSceneMeta();
   } catch (error) {
     showToast(error instanceof Error ? error.message : `无法加载 ${quality.toUpperCase()} Mesh`);
   }
 }));
-document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.addEventListener('click', () => { meshViewer.setShading(button.dataset.shading as 'smooth' | 'flat' | 'wire'); syncDetailControls(); }));
+document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.addEventListener('click', () => { meshViewer.setShading(button.dataset.shading as 'smooth' | 'flat' | 'wire'); syncSceneControls(); }));
 // Framing changes surface through meshViewer.onViewChangeStart from the viewer
 // itself, so programmatic actions clear marks the same way gestures do.
-document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.addEventListener('click', () => { meshViewer.setProjection(button.dataset.projection as 'perspective' | 'orthographic'); syncDetailControls(); }));
+document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.addEventListener('click', () => { meshViewer.setProjection(button.dataset.projection as 'perspective' | 'orthographic'); syncSceneControls(); }));
 axesToggle.addEventListener('change', () => meshViewer.setAxes(axesToggle.checked));
 lightToggle.addEventListener('change', () => meshViewer.setBackground(lightToggle.checked ? 'light' : 'dark'));
 
-brushTool.addEventListener('click', () => void surface.enter());
+brushTool.addEventListener('click', () => { setObserveToolbar(false); section.close(); void surface.enter(); });
 $('#share-view').addEventListener('click', async () => {
   if (!token) return;
   const button = $('#share-view') as HTMLButtonElement; button.disabled = true; button.classList.add('working');
@@ -597,10 +517,6 @@ shareDialog.addEventListener('click', (event) => {
   if (event.target === shareDialog) { shareDialog.close(); resetShareSheet(); }
 });
 
-window.addEventListener('resize', () => {
-  if (!panelOpen || !isMobileViewport()) return;
-  applyDetailDetent();
-});
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
 
 function invalidateMarkupForViewChange(): void {
@@ -644,7 +560,8 @@ function renderShareHosts(response: ShareResponse): void {
     row.setAttribute('role', 'radio');
     row.setAttribute('aria-checked', String(host.origin === response.origin));
     row.setAttribute('aria-label', `使用 ${host.origin}`);
-    row.innerHTML = `<span><small>${hostKind(host)}</small><code>${escapeHtml(host.origin)}</code></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4.2 4.2L19 6.5"/></svg>`;
+    row.innerHTML = `<span><small>${hostKind(host)}</small><code>${escapeHtml(host.origin)}</code></span><i data-lucide="check" aria-hidden="true"></i>`;
+    installIcons(row);
     row.addEventListener('click', () => { void selectShareHost(host.origin); });
     return row;
   }));

@@ -3,6 +3,7 @@ import { CatmullRomCurve3, Vector3 } from 'three';
 import type { MeshViewer } from './viewer';
 import type { MarkupCanvas } from './markup';
 import { clamp, layoutLabel, type LabelOffset, type Rect } from './label-layout';
+import {installIcons} from './icons';
 
 type Hit = { point: Vec3; normal: Vec3 };
 type Mode = 'select' | 'point' | 'line' | 'screen';
@@ -10,17 +11,13 @@ type Snapshot = { marks: SurfaceAnnotation[]; strokes: ScreenStroke[]; selected?
 type BadgeView = { button: HTMLButtonElement; line: SVGLineElement; width: number; height: number; offset?: LabelOffset };
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const COLORS = ['#ff6b5e', '#ffc857', '#5fb4ff', '#f4f2ea'];
-const icon = (path: string) => `<svg viewBox="0 0 24 24" aria-hidden="true">${path}</svg>`;
-const undoIcon = icon('<path d="m9 8-4 4 4 4M5 12h9a5 5 0 0 1 5 5"/>');
-const redoIcon = icon('<path d="m15 8 4 4-4 4M19 12h-9a5 5 0 0 0-5 5"/>');
-const trashIcon = icon('<path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/>');
 
 export class SurfaceEditor {
   private readonly panel: HTMLElement;
   private readonly input: HTMLElement;
   private readonly list: HTMLElement;
   private readonly badges: HTMLElement;
-  private mode: Mode = 'point';
+  private mode: Mode = 'screen';
   private color = COLORS[0];
   private selected?: string;
   private selectedScreen?: number;
@@ -46,7 +43,7 @@ export class SurfaceEditor {
   private pending?: {id:number; x:number; y:number; up:boolean; samples:Array<[number,number]>};
 
   constructor(private viewer: MeshViewer, private markup: MarkupCanvas, private shell: HTMLElement,
-    private callbacks: { closePanel: () => void; toast: (message: string) => void; change: () => void }) {
+    private callbacks: { toast: (message: string) => void; change: () => void }) {
     this.input = document.createElement('div'); this.input.id = 'surface-input'; this.input.hidden = true;
     this.input.setAttribute('aria-label', '标记画布');
     document.querySelector('#viewer')!.append(this.input);
@@ -57,27 +54,29 @@ export class SurfaceEditor {
     this.panel.setAttribute('aria-label', '标记工具'); this.panel.setAttribute('data-label-obstacle', '');
     this.panel.innerHTML = `
       <div class="surface-modes" role="group" aria-label="标注工具">
-        <button data-surface-mode="select" type="button">${icon('<path d="m5 3 13 9-7 1-3 7Z"/>')}选择</button>
-        <button data-surface-mode="point" type="button">${icon('<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>')}点</button>
-        <button data-surface-mode="line" type="button">${icon('<path d="M4 17c5 0 4-10 9-10s2 9 7 9"/>')}线</button>
-        <button data-surface-mode="screen" id="surface-brush" type="button">${icon('<path d="m15 4 5 5L8 20l-4-1 1-4Z"/>')}画笔</button>
+        <button data-surface-mode="select" type="button"><i data-lucide="mouse-pointer-2" aria-hidden="true"></i>选择</button>
+        <button data-surface-mode="point" type="button"><i data-lucide="crosshair" aria-hidden="true"></i>点</button>
+        <button data-surface-mode="line" type="button"><i data-lucide="spline" aria-hidden="true"></i>线</button>
+        <button data-surface-mode="screen" id="surface-brush" type="button"><i data-lucide="brush" aria-hidden="true"></i>画笔</button>
         <button id="surface-done" class="surface-primary" type="button">完成</button>
       </div>
       <div class="surface-actions">
         <div class="surface-colors" role="group" aria-label="标记颜色">${COLORS.map((color, i) => `<button type="button" data-surface-color="${color}" aria-label="${['珊瑚红','琥珀黄','标记蓝','柔白'][i]}" style="--ink:${color}"><i></i></button>`).join('')}</div>
         <span class="surface-action-spacer"></span>
-        <button id="surface-undo" type="button" aria-label="撤销标记">${undoIcon}</button><button id="surface-redo" type="button" aria-label="重做标记">${redoIcon}</button>
+        <button id="surface-undo" type="button" aria-label="撤销标记"><i data-lucide="undo-2" aria-hidden="true"></i></button><button id="surface-redo" type="button" aria-label="重做标记"><i data-lucide="redo-2" aria-hidden="true"></i></button>
       </div>
       <div class="surface-selection" hidden>
         <input id="surface-name" maxlength="120" aria-label="标记名称" placeholder="标记名称" autocomplete="off"/>
         <button id="surface-close" type="button">闭合</button><button id="surface-end" type="button">完成线</button>
-        <button id="surface-delete" type="button" aria-label="删除选中标记">${trashIcon}</button>
+        <button id="surface-delete" type="button" aria-label="删除选中标记"><i data-lucide="trash-2" aria-hidden="true"></i></button>
       </div>
       <p id="surface-hint" role="status"></p>`;
     shell.append(this.panel);
+    installIcons(this.panel);
     this.list = document.createElement('section'); this.list.className = 'surface-list'; this.list.hidden = true;
     this.list.setAttribute('aria-label','标记列表'); this.list.setAttribute('data-label-obstacle','');
-    this.list.innerHTML = '<div class="surface-list-heading"><strong>标记</strong><span>点选定位</span><button type="button" id="surface-list-close" aria-label="收起标记列表">×</button></div><div id="surface-items"></div>';
+    this.list.innerHTML = '<div class="surface-list-heading"><strong>标记</strong><span>点选定位</span><button type="button" id="surface-list-close" aria-label="收起标记列表"><i data-lucide="x" aria-hidden="true"></i></button></div><div id="surface-items"></div>';
+    installIcons(this.list);
     this.el('#scene-panels').append(this.list);
     const layout = () => this.updateLayout();
     new ResizeObserver(layout).observe(this.panel);
@@ -195,8 +194,7 @@ export class SurfaceEditor {
     this.shell.style.setProperty('--annotation-viewport-height', `${height}px`);
     this.shell.style.setProperty('--annotation-keyboard-inset', `${inset}px`);
     this.shell.style.setProperty('--annotation-toolbar-height', `${this.active ? this.panel.offsetHeight : 64}px`);
-    const detailWidth = this.shell.classList.contains('panel-open') ? this.el('#control-panel').offsetWidth + 16 : 0;
-    const enoughSpace = (viewport?.width ?? window.innerWidth) - detailWidth >= 900 && height >= 600;
+    const enoughSpace = (viewport?.width ?? window.innerWidth) >= 900 && height >= 600;
     this.badgeObstacles=null;this.viewer.refreshLabels();
     this.list.hidden = this.listDismissed || !enoughSpace || (!this.visibleMarks().length && !this.markup.hasStrokes);
   }
@@ -204,8 +202,9 @@ export class SurfaceEditor {
   get isActive(): boolean { return this.active; }
   setExternalScreenMarkup(external: boolean): void { this.externalScreenMarkup=external; this.sync(); }
   async enter(id?: string): Promise<void> {
-    this.callbacks.closePanel(); this.active = true;
+    this.active = true;
     if(id) this.selectMark(id);
+    else { this.mode='screen'; this.selected=undefined; this.selectedScreen=undefined; this.status=''; }
     if (!document.documentElement.classList.contains('embedded-scene'))
       this.el('.surface-actions').append(this.el('#share-view'));
     this.panel.hidden = false; this.shell.classList.add('surface-mode');
@@ -225,7 +224,7 @@ export class SurfaceEditor {
   exit(): void {
     this.markup.finishActive(); this.pending=undefined; this.cancelGesture(); this.finishLine(); this.active = false; this.selected = undefined; this.selectedScreen=undefined;
     if (this.panel.contains(this.el('#share-view')))
-      this.el('.review-dock').append(this.el('#share-view'));
+      this.el('.review-dock .dock-main').append(this.el('#share-view'));
     this.panel.hidden = true; this.input.hidden = true; this.shell.classList.remove('surface-mode');
     this.viewer.setInteractionEnabled(true); this.sync();
   }
@@ -483,11 +482,12 @@ export class SurfaceEditor {
       const item=row(i+1,mark.label||'未命名标记',mark.color,mark.kind==='point'?'点':mark.closed?'闭合线':'线',mark.id===this.selected,()=>void this.enter(mark.id));
       item.addEventListener('pointerenter',()=> {this.hovered=mark.id;this.viewer.setAnnotations(this.viewer.annotations,mark.id);});
       item.addEventListener('pointerleave',()=> {this.hovered=undefined;this.viewer.setAnnotations(this.viewer.annotations,this.selected);});
-      const toggle=document.createElement('button');toggle.type='button';toggle.className='surface-visibility';toggle.innerHTML=icon(mark.visible?'<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>':'<path d="m3 3 18 18M9 5a10 10 0 0 1 3 0c6 0 10 7 10 7a20 20 0 0 1-4 4M6 6a20 20 0 0 0-4 6s4 7 10 7a10 10 0 0 0 5-1"/>');
+      const toggle=document.createElement('button');toggle.type='button';toggle.className='surface-visibility';toggle.innerHTML=`<i data-lucide="${mark.visible ? 'eye' : 'eye-off'}" aria-hidden="true"></i>`;
       toggle.setAttribute('aria-label',`${mark.visible?'隐藏':'显示'} ${mark.label}`);toggle.setAttribute('aria-pressed',String(mark.visible));
       toggle.addEventListener('click',()=> {this.remember();mark.visible=!mark.visible;this.sync();});item.append(toggle);
     });
     strokes.forEach((stroke,i)=>row(marks.length+i+1,stroke.label || `画笔 ${i+1}`,stroke.color,'屏幕',i===this.selectedScreen,()=>this.selectScreen(i)));
+    installIcons(container);
   }
   private selectScreen(index: number): void {
     const stroke=this.markup.exportStrokes()[index]; if(!stroke)return;

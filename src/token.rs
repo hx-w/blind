@@ -95,7 +95,7 @@ mod tests {
             created_at: 1,
             ttl_days: None,
             meshes: Vec::new(),
-            components: Vec::new(),
+            entities: Vec::new(),
             attachments: Vec::new(),
             collection: None,
             warnings: Vec::new(),

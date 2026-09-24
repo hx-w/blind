@@ -35,109 +35,86 @@
       </main>
 
       <nav class="review-dock" aria-label="查看工具" data-viewer-chrome data-label-obstacle>
+        <div class="dock-page dock-main is-current" aria-label="主工具栏">
         <button class="dock-tool" id="fit-view" type="button" aria-label="适配全部可见元素">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/><circle cx="12" cy="12" r="2.5"/></svg><span>Fit</span>
+          <i data-lucide="focus" aria-hidden="true"></i><span>适配</span>
         </button>
-        <button class="dock-tool panel-trigger" type="button" aria-label="打开元素详情" aria-expanded="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h2M10 17h10"/><circle cx="16" cy="7" r="2"/><circle cx="8" cy="17" r="2"/></svg><span>详情</span>
-        </button>
-        <button class="dock-tool render-trigger" id="render-trigger" type="button" aria-label="打开渲染检视工具" aria-expanded="false" aria-controls="control-panel">
-          <!-- Lucide Scan Eye: https://lucide.dev/icons/scan-eye
-               Copyright (c) 2026 Lucide Icons and Contributors. ISC License.
-               Permission to use, copy, modify, and/or distribute this software for any purpose with or without fee is hereby granted, provided that the above copyright notice and this permission notice appear in all copies. -->
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><circle cx="12" cy="12" r="1"/><path d="M18.944 12.33a1 1 0 0 0 0-.66 7.5 7.5 0 0 0-13.888 0 1 1 0 0 0 0 .66 7.5 7.5 0 0 0 13.888 0"/></svg><span>渲染</span>
+        <button class="dock-tool" id="observe-trigger" type="button" aria-label="打开观察工具" aria-expanded="false" aria-controls="observe-tools">
+          <i data-lucide="scan-eye" aria-hidden="true"></i><span>观察</span>
         </button>
         <button class="dock-tool" id="brush-tool" type="button" aria-label="进入标注模式" aria-pressed="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5.5 4 4L9 19l-5 1 1-5 9.5-9.5Z"/><path d="m12.5 7.5 4 4"/></svg><span>标注</span>
-        </button>
-        <button class="dock-tool" id="scene-info-toggle" type="button" aria-label="打开场景信息" aria-expanded="false" aria-controls="control-panel">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.5"/></svg><span>信息</span>
+          <i data-lucide="pen-line" aria-hidden="true"></i><span>标注</span>
         </button>
         <button class="dock-tool" id="share-view" type="button" aria-label="分享当前场景">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M8 8l4-4 4 4"/><path d="M5 12v7h14v-7"/></svg><span>分享</span>
+          <i data-lucide="share-2" aria-hidden="true"></i><span>分享</span>
         </button>
+        </div>
+        <div class="dock-page dock-observe" id="observe-tools" aria-label="观察工具栏" aria-hidden="true" inert>
+          <div class="observe-primary">
+            <button class="dock-tool dock-back" id="observe-back" type="button" aria-label="返回主工具栏"><i data-lucide="arrow-left" aria-hidden="true"></i></button>
+            <button class="dock-tool observe-category" data-observe-category="shading" type="button" aria-expanded="false" aria-controls="observe-shading"><i data-lucide="paintbrush" aria-hidden="true"></i><span>着色</span></button>
+            <button class="dock-tool observe-category" data-observe-category="light" type="button" aria-expanded="false" aria-controls="observe-light"><i data-lucide="lightbulb" aria-hidden="true"></i><span>光照</span></button>
+            <button class="dock-tool observe-category" data-observe-category="projection" type="button" aria-expanded="false" aria-controls="observe-projection"><i data-lucide="box" aria-hidden="true"></i><span>投影</span></button>
+            <button class="dock-tool observe-category" data-observe-category="scene" id="observe-scene-trigger" type="button" aria-expanded="false" aria-controls="render-controls"><i data-lucide="sliders-horizontal" aria-hidden="true"></i><span>场景</span></button>
+            <button class="dock-tool observe-section" id="section-trigger" type="button" aria-label="划线观察剖面" aria-expanded="false"><i data-lucide="scan-line" aria-hidden="true"></i><span>剖面</span></button>
+          </div>
+          <div class="observe-setting-group observe-detail" id="observe-shading" role="group" aria-label="着色方式" hidden>
+            <button data-shading="smooth" type="button">平滑</button><button data-shading="flat" type="button">平面</button><button data-shading="wire" type="button">线框</button>
+          </div>
+          <div class="observe-mode-group observe-detail" id="observe-light" role="group" aria-label="光照方式" hidden>
+              <button class="dock-tool" data-observe-mode="matte" type="button" aria-label="无影灯观察"><i data-lucide="sun" aria-hidden="true"></i><span>无影灯</span></button>
+              <button class="dock-tool" data-observe-mode="raking" type="button" aria-label="掠射光观察"><i data-lucide="flashlight" aria-hidden="true"></i><span>掠射光</span></button>
+              <button class="dock-tool" data-observe-mode="normals" type="button" aria-label="法线观察"><i data-lucide="axis-3d" aria-hidden="true"></i><span>法线</span></button>
+          </div>
+          <div class="observe-setting-group observe-detail" id="observe-projection" role="group" aria-label="投影方式" hidden>
+            <button data-projection="perspective" type="button">透视</button><button data-projection="orthographic" type="button">正交</button>
+          </div>
+          <div class="observe-settings observe-detail" id="render-controls" role="group" aria-label="场景设置" hidden>
+            <div class="observe-setting-group observe-scene-group" role="group" aria-label="场景">
+              <label title="坐标轴"><span>坐标轴</span><input id="axes-toggle" type="checkbox" role="switch" aria-label="坐标轴"/><b class="observe-switch" aria-hidden="true"></b></label>
+              <label title="浅色背景"><span>浅色背景</span><input id="light-toggle" type="checkbox" role="switch" aria-label="浅色背景"/><b class="observe-switch" aria-hidden="true"></b></label>
+            </div>
+          </div>
+          <div id="light-controls" class="observe-light-controls" hidden>
+            <label for="light-azimuth">水平 <output id="light-azimuth-value">45°</output><input id="light-azimuth" type="range" min="-180" max="180" value="45" /></label>
+            <label for="light-elevation">高度 <output id="light-elevation-value">20°</output><input id="light-elevation" type="range" min="0" max="90" value="20" /></label>
+            <label for="light-intensity">强度 <output id="light-intensity-value">100%</output><input id="light-intensity" type="range" min="0" max="200" value="100" /></label>
+          </div>
+        </div>
       </nav>
 
       <div id="scene-panels" class="scene-panels"></div>
-
-      <aside class="control-panel" id="control-panel" aria-hidden="true" aria-labelledby="panel-title" inert>
-        <div class="panel-drag-zone" id="panel-drag-zone" role="button" tabindex="0" aria-label="调整面板高度"><div class="panel-handle" aria-hidden="true"></div></div>
-        <div class="panel-heading"><h2 id="panel-title">详情</h2><span id="panel-context"></span>
-          <button class="close-panel" id="close-panel" type="button" aria-label="关闭面板"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+      <section class="scene-info" id="scene-info" hidden>
+        <div class="scene-info-scroll" tabindex="0" role="region" aria-label="场景说明">
+          <h1 id="scene-title">Blind</h1>
         </div>
-        <div class="panel-scroll" id="panel-scroll">
-          <section class="scene-info" id="scene-info" hidden>
-            <div class="scene-info-scroll" tabindex="0" role="region" aria-label="场景说明">
-              <h1 id="scene-title">Blind</h1>
-            </div>
-            <p id="scene-meta">正在读取场景</p>
-          </section>
-          <section id="render-controls" hidden>
-            <p class="render-intro">切换材质观察表面细节。掠射光可改变光源方向和强度；检视模式始终显示实体表面，并随视角链接保存。</p>
-            <div class="style-section"><span class="setting-label">Shader</span><div class="segmented segmented-three" aria-label="渲染 Shader">
-              <button data-render-mode="matte" type="button">无影灯</button><button data-render-mode="raking" type="button">掠射光</button><button data-render-mode="normals" type="button">法线</button>
-            </div></div>
-            <div id="light-controls" class="light-controls">
-              <label class="setting-label" for="light-azimuth">水平角 <output id="light-azimuth-value">45°</output></label>
-              <input id="light-azimuth" type="range" min="-180" max="180" value="45" />
-              <label class="setting-label" for="light-elevation">高度角 <output id="light-elevation-value">20°</output></label>
-              <input id="light-elevation" type="range" min="0" max="90" value="20" />
-              <label class="setting-label" for="light-intensity">强度 <output id="light-intensity-value">100%</output></label>
-              <input id="light-intensity" type="range" min="0" max="200" value="100" />
-            </div>
-          </section>
-          <section id="mesh-controls">
-            <label class="mesh-picker" for="detail-mesh-select"><span>当前元素</span><select id="detail-mesh-select" aria-label="选择要编辑的元素"></select></label>
-            <div class="mesh-summary">
-              <span class="mesh-summary-dot" id="mesh-summary-dot"></span>
-              <span class="mesh-summary-copy"><strong id="mesh-summary-name"></strong><small id="mesh-summary-meta"></small></span>
-            </div>
-            <div class="mesh-label-editor" data-geometry-only>
-              <label class="setting-label" for="mesh-label-text">对象标签</label>
-              <input id="mesh-label-text" type="text" maxlength="120" placeholder="例如：供体 A · 真实牙冠" autocomplete="off" aria-describedby="mesh-label-help" />
-              <p id="mesh-label-help">随模型显示，分享时保存。清空文字可移除。</p>
-            </div>
-            <div class="style-section" data-geometry-only><span class="setting-label">精度</span><div class="segmented quality-segmented" aria-label="Mesh 精度">
-              <button class="active" data-quality="lod" type="button">LOD</button><button data-quality="raw" type="button">Raw</button>
-            </div><p class="lod-saving" id="lod-saving" aria-live="polite"></p></div>
-            <div class="style-section color-section" data-geometry-only><span class="setting-label">颜色</span><div class="color-swatches" id="color-swatches" aria-label="Mesh 颜色"></div></div>
-            <div class="opacity-controls">
-              <div class="opacity-heading">
-                <label class="setting-label" for="opacity-range">透明度</label>
-                <label class="mesh-visibility"><span>显示</span><input id="mesh-visible-toggle" type="checkbox" checked/><i aria-hidden="true"></i></label>
-              </div>
-              <div class="range-row"><input id="opacity-range" type="range" min="0" max="100" value="100"/><output id="opacity-value" for="opacity-range">100%</output></div>
-            </div>
-            <div class="style-section" data-geometry-only><span class="setting-label">表面</span><div class="segmented segmented-three" aria-label="着色方式">
-              <button data-shading="smooth" type="button">平滑</button><button class="active" data-shading="flat" type="button">平面</button><button data-shading="wire" type="button">线框</button>
-            </div></div>
-            <div class="style-section"><span class="setting-label">投影</span><div class="segmented" aria-label="投影方式">
-              <button class="active" data-projection="perspective" type="button">透视</button><button data-projection="orthographic" type="button">正交</button>
-            </div></div>
-            <div class="style-section scene-settings"><span class="setting-label">场景</span><div class="toggle-grid">
-              <label><span>坐标轴</span><input id="axes-toggle" type="checkbox" checked/><i></i></label>
-              <label><span>浅色背景</span><input id="light-toggle" type="checkbox"/><i></i></label>
-            </div></div>
-          </section>
+        <div class="scene-selected-info" id="scene-selected-info">
+          <span>已选</span><strong id="scene-selected-label"></strong><small id="scene-selected-meta"></small>
         </div>
-      </aside>
+        <div class="scene-info-quality" id="scene-info-quality" hidden>
+          <span>精度</span><div class="segmented quality-segmented" aria-label="Mesh 精度">
+            <button class="active" data-quality="lod" type="button">LOD</button><button data-quality="raw" type="button">Raw</button>
+          </div><p class="lod-saving" id="lod-saving" aria-live="polite"></p>
+        </div>
+        <p id="scene-meta">正在读取场景</p>
+      </section>
     </div>
 
     <dialog class="share-sheet" id="share-sheet">
       <div class="share-grabber"></div>
       <div class="share-heading">
-        <button class="share-back" id="back-host" type="button" aria-label="返回分享" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 6-6 6 6 6"/></svg></button>
+        <button class="share-back" id="back-host" type="button" aria-label="返回分享" hidden><i data-lucide="chevron-left" aria-hidden="true"></i></button>
         <h2 id="share-title">分享</h2>
-        <button id="close-share" type="button" aria-label="关闭分享"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button>
+        <button id="close-share" type="button" aria-label="关闭分享"><i data-lucide="x" aria-hidden="true"></i></button>
       </div>
       <div class="share-options">
         <button class="share-host-trigger" id="share-host-trigger" type="button" aria-haspopup="true" aria-expanded="false">
           <span><small>链接地址</small><strong id="share-host-current"></strong></span>
-          <svg class="share-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          <i class="share-chevron" data-lucide="chevron-right" aria-hidden="true"></i>
         </button>
-        <button data-copy="view" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1"/></svg></span><span><strong>视角链接</strong><small>当前布局、视角、显隐与标记</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
-        <button data-copy="image" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m6 17 4-4 3 3 2-2 3 3"/></svg></span><span><strong>图片链接</strong><small>当前场景的 PNG，包含可见组件</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
-        <button data-copy="full" id="copy-full" type="button"><span class="share-option-icon"><svg viewBox="0 0 24 24"><path d="M8 4h8l3 3v13H8z"/><path d="M16 4v4h4M11 12h5M11 16h5"/></svg></span><span><strong>完整信息</strong><small>Mesh 路径与两个链接</small></span><svg class="share-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+        <button data-copy="view" type="button"><span class="share-option-icon"><i data-lucide="link-2" aria-hidden="true"></i></span><span><strong>视角链接</strong><small>当前布局、视角、显隐与标记</small></span><i class="share-chevron" data-lucide="chevron-right" aria-hidden="true"></i></button>
+        <button data-copy="image" type="button"><span class="share-option-icon"><i data-lucide="image" aria-hidden="true"></i></span><span><strong>图片链接</strong><small>当前场景的 PNG，包含可见组件</small></span><i class="share-chevron" data-lucide="chevron-right" aria-hidden="true"></i></button>
+        <button data-copy="full" id="copy-full" type="button"><span class="share-option-icon"><i data-lucide="file-text" aria-hidden="true"></i></span><span><strong>完整信息</strong><small>Mesh 路径与两个链接</small></span><i class="share-chevron" data-lucide="chevron-right" aria-hidden="true"></i></button>
       </div>
       <div class="share-host-picker" id="share-host-picker" hidden>
         <p>选择复制内容使用的地址</p>

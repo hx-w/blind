@@ -17,6 +17,36 @@ const scene = {
     frame: { width: 1280, height: 800 }, camera: null, strokes: [{color:'#ff6b5e',aspect:1.6,points:[[0.2,0.2],[0.4,0.3]]}] },
 };
 let browser, server, origin, shared;
+async function clickDisplay(page) {
+  if (await page.locator('.dock-observe').getAttribute('aria-hidden') === 'true') await page.locator('#observe-trigger').click();
+  if (await page.locator('[data-observe-category="light"]').getAttribute('aria-expanded') === 'false') await page.locator('[data-observe-category="light"]').click();
+}
+async function selectSceneMesh(page, index) {
+  const toggle = page.locator('#scene-tree-toggle');
+  const wasOpen = await toggle.getAttribute('aria-expanded') === 'true';
+  if (!wasOpen) await toggle.click();
+  await page.locator('.scene-tree-row').nth(index).locator('.scene-tree-select').click();
+  if (!wasOpen) await toggle.click();
+}
+async function sectionContourPair(page) {
+  return page.locator('.section-plot').evaluate(canvas => {
+    const {width,height} = canvas;
+    const pixels = canvas.getContext('2d').getImageData(0,0,width,height).data;
+    let left = null, right = null;
+    for (let y=8;y<height-8;y+=2) for (let x=8;x<width-8;x+=2) {
+      const offset = (y*width+x)*4;
+      const [red,green,blue] = pixels.subarray(offset,offset+3);
+      const blueContour = blue > 185 && blue > red+55 && blue > green+25;
+      const amberContour = red > 220 && green > 140 && blue < 140;
+      if (!blueContour && !amberContour) continue;
+      if (!left || x<left.x) left={x,y};
+      if (!right || x>right.x) right={x,y};
+    }
+    if (!left || !right || right.x-left.x<25) throw new Error(`No usable contour in the section plot: ${JSON.stringify({width,height,left,right})}`);
+    const rect=canvas.getBoundingClientRect();
+    return [left,right].map(point=>[rect.left+(point.x+.5)*rect.width/width,rect.top+(point.y+.5)*rect.height/height]);
+  });
+}
 before(async () => {
   server = createServer(async (req, res) => {
     try {
@@ -51,9 +81,9 @@ test('render tool and desktop copy shortcuts preserve inspection settings in sha
       write: async items => { window.writeStarted = true; window.copied = await (await items[0].getType('text/plain')).text(); },
       writeText: async value => { window.copied = value; },
     }}));
-    await page.locator('#render-trigger').click();
-    assert.equal(await page.locator('[data-render-mode="matte"]').getAttribute('aria-pressed'), 'true');
-    await page.locator('[data-render-mode="raking"]').click();
+    await clickDisplay(page);
+    assert.equal(await page.locator('[data-observe-mode="matte"]').getAttribute('aria-pressed'), 'true');
+    await page.locator('[data-observe-mode="raking"]').click();
     await page.locator('#light-azimuth').fill('-70');
     await page.locator('#light-elevation').fill('12');
     await page.locator('#light-intensity').fill('140');
@@ -61,7 +91,6 @@ test('render tool and desktop copy shortcuts preserve inspection settings in sha
       await mkdir(process.env.BLIND_TEST_SCREENSHOTS, {recursive:true});
       await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/render-tool.png`});
     }
-    await page.locator('#close-panel').click();
     let update = await captureShare(page);
     assert.equal(update.state.render_mode, 'raking');
     assert.deepEqual(update.state.light, {azimuth: -70, elevation: 12, intensity: 1.4});
@@ -74,30 +103,33 @@ test('render tool and desktop copy shortcuts preserve inspection settings in sha
     await page.waitForFunction(() => window.copied?.endsWith('/i/fixture.png'));
     await page.keyboard.press(`${copyModifier}+Shift+c`);
     await page.waitForFunction(() => window.copied?.endsWith('/s/fixture'));
-    await page.locator('#render-trigger').click();
-    await page.locator('[data-render-mode="normals"]').click();
-    await page.locator('#close-panel').click();
+    await clickDisplay(page);
+    await page.locator('[data-observe-mode="normals"]').click();
     update = await captureShare(page);
     assert.equal(update.state.render_mode, 'normals');
-    await page.locator('.panel-trigger').click();
-    await page.locator('#mesh-label-text').fill('copy text');
-    await page.locator('#mesh-label-text').focus();
+    await page.locator('#scene-tree-toggle').click();
+    await page.locator('.scene-tree-edit').first().click();
+    await page.locator('.scene-tree-rename textarea:visible').fill('copy text');
+    await page.locator('.scene-tree-rename textarea:visible').focus();
     await page.evaluate(() => { window.copied = 'unchanged'; });
     await page.keyboard.press(`${copyModifier}+c`);
     assert.equal(await page.evaluate(() => window.copied), 'unchanged');
     await page.setViewportSize({width: 390, height: 700});
-    await page.locator('#mesh-label-text').blur();
+    await page.locator('.scene-tree-rename textarea:visible').blur();
     await page.keyboard.press(`${copyModifier}+Shift+c`);
     await page.waitForFunction(() => window.copied?.endsWith('/s/fixture'));
-    await page.locator('#render-trigger').click();
+    await clickDisplay(page);
+    await page.locator('#observe-scene-trigger').click();
     assert.equal(await page.locator('#render-controls').isVisible(), true);
-    const compactHeight = await page.locator('#control-panel').evaluate(element => element.getBoundingClientRect().height);
+    const compactHeight = await page.locator('.review-dock').evaluate(element => element.getBoundingClientRect().height);
     if (process.env.BLIND_TEST_SCREENSHOTS) await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/render-tool-mobile.png`});
-    await page.locator('[data-render-mode="raking"]').click();
+    await page.locator('[data-observe-category="light"]').click();
+    await page.locator('[data-observe-mode="raking"]').click();
     assert.equal(await page.locator('#light-controls').isVisible(), true);
-    assert.equal(await page.locator('[data-render-mode="raking"]').getAttribute('aria-pressed'), 'true');
-    assert.equal(await page.locator('[data-render-mode="normals"]').getAttribute('aria-pressed'), 'false');
-    const lightHeight = await page.locator('#control-panel').evaluate(element => element.getBoundingClientRect().height);
+    assert.equal(await page.locator('[data-observe-mode="raking"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(await page.locator('[data-observe-mode="normals"]').getAttribute('aria-pressed'), 'false');
+    await page.waitForTimeout(280);
+    const lightHeight = await page.locator('.review-dock').evaluate(element => element.getBoundingClientRect().height);
     assert.ok(lightHeight > compactHeight + 80);
     if (process.env.BLIND_TEST_SCREENSHOTS) {
       await page.waitForTimeout(200);
@@ -188,30 +220,161 @@ test('raking light resolves shallow bumps and pits from either direction', async
   };
   try {
     const matte = await measure('matte');
-    await page.locator('.panel-trigger').click();
-    await page.locator('[data-shading="wire"]').click();
-    await page.locator('#close-panel').click();
-    await page.locator('#render-trigger').click();
-    await page.locator('[data-render-mode="raking"]').click();
+    await clickDisplay(page);
+    await page.locator('[data-observe-mode="raking"]').click();
     await page.locator('#light-azimuth').fill('0');
-    await page.locator('#close-panel').click();
     await page.waitForTimeout(300);
     const east = await measure('east');
-    await page.locator('#render-trigger').click();
+    await clickDisplay(page);
     await page.locator('#light-azimuth').fill('180');
-    await page.locator('#close-panel').click();
     await page.waitForTimeout(300);
     const west = await measure('west');
     assert.ok(east.contrast > matte.contrast * 1.8, `east light must expose relief: ${JSON.stringify({matte,east})}`);
     assert.ok(west.contrast > matte.contrast * 1.8, `west light must expose relief: ${JSON.stringify({matte,west})}`);
     assert.ok(Math.abs(east.mean - west.mean) > 1, 'moving the light must change the relief image');
-    await page.locator('#render-trigger').click();
-    await page.locator('[data-render-mode="matte"]').click();
-    await page.locator('#close-panel').click();
+    await page.locator('[data-observe-category="shading"]').click();
+    await page.locator('[data-shading="wire"]').click();
     await page.waitForTimeout(300);
     const wire = await measure('wire');
-    assert.ok(wire.mean < east.mean * .8, 'returning to matte must restore wireframe');
+    assert.ok(wire.mean < east.mean * .8, 'wireframe must remain visible under raking light');
   } finally { await page.close(); }
+});
+
+test('observation toolbar opens a selected-entity section and shares the read-only plane', async () => {
+  const page = await openPage({width:390,height:844});
+  try {
+    await page.locator('#observe-trigger').click();
+    assert.equal(await page.locator('.dock-main').getAttribute('aria-hidden'), 'true');
+    assert.equal(await page.locator('.dock-observe').getAttribute('aria-hidden'), 'false');
+    await page.locator('#section-trigger').click();
+    assert.equal(await page.locator('.section-panel').isVisible(), false, 'section starts with a line gesture');
+    await page.locator('#section-trigger').click();
+    assert.equal(await page.locator('.section-draw-overlay').isVisible(), false, 'second click closes drawing mode');
+    await page.locator('#section-trigger').click();
+    const touch = await page.context().newCDPSession(page);
+    await touch.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints:[{x:120,y:400}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchMove',touchPoints:[{x:124,y:400}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+    assert.equal(await page.locator('.section-draw-overlay').isVisible(),true,'a short line leaves drawing ready for retry');
+    await touch.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints:[{x:120,y:400}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchMove',touchPoints:[{x:260,y:400}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+    await page.locator('.section-panel').waitFor({state:'visible'});
+    await page.waitForTimeout(250);
+    if (process.env.BLIND_TEST_SCREENSHOTS) await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/section-mobile-current.png`});
+    assert.match(await page.locator('.section-status').textContent(), /段截线/);
+    assert.deepEqual((await captureShare(page)).state.section.targets.map(target => target.mesh),[0,1],
+      'a new section includes every visible triangle Mesh by default');
+    assert.equal(await page.locator('.section-scope-count').textContent(),'2/2');
+    await page.locator('.section-panel header button').first().click();
+    await page.locator('.section-scope input[data-mesh="1"]').uncheck();
+    assert.deepEqual((await captureShare(page)).state.section.targets.map(target => target.mesh),[0],
+      'the picker can isolate the anchor Mesh');
+    await page.locator('.section-scope input[data-mesh="1"]').check();
+    const combined = (await captureShare(page)).state.section;
+    assert.deepEqual(combined.targets.map(target => target.mesh), [0,1], 'one plane includes two explicit Mesh targets');
+    assert.match(await page.locator('.section-status').textContent(), /个 Mesh 相交/);
+    await page.locator('.section-scope input[data-mesh="0"]').uncheck();
+    assert.deepEqual((await captureShare(page)).state.section.targets.map(target => target.mesh), [1], 'targets can exclude the original anchor Mesh');
+    await page.locator('.section-scope input[data-mesh="0"]').check();
+    await page.locator('.section-scope input[data-mesh="1"]').uncheck();
+    await page.locator('.section-panel header button').first().click();
+    const before = await page.locator('.section-status').textContent();
+    const tree = page.locator('#scene-tree-toggle');
+    if (await tree.getAttribute('aria-expanded') !== 'true') await tree.click();
+    await page.locator('.scene-tree-row').nth(1).locator('.scene-tree-visibility').click();
+    assert.equal(await page.locator('.section-status').textContent(), before, 'other entities must not contribute to this section');
+    await tree.click();
+    const state = (await captureShare(page)).state.section;
+    assert.equal(state.entity_id, 'mesh-0');
+    assert.equal(state.mesh, 0);
+    assert.equal(state.revision, 'fixture');
+    assert.ok(state.radius > 0);
+    assert.equal(await page.locator('.section-panel').isVisible(), true, 'returning to the main dock keeps the section ready to share');
+    await page.locator('button[aria-label="放大剖面"]').click();
+    const zoomed = (await captureShare(page)).state.section;
+    assert.ok(zoomed.radius < state.radius, 'zoom changes the shared section view');
+    const plot = await page.locator('.section-plot').boundingBox();
+    const zoomAt = {x:plot.x+plot.width*.65,y:plot.y+plot.height*.42};
+    const planeAt = (section, point) => {
+      const scale = Math.min((plot.width-32)/(section.radius*2),(plot.height-32)/(section.radius*2));
+      return [section.pan[0]+(point.x-plot.x-plot.width/2)/scale,
+        section.pan[1]-(point.y-plot.y-plot.height/2)/scale];
+    };
+    await page.mouse.move(zoomAt.x,zoomAt.y);
+    await page.mouse.wheel(0,-150);
+    const wheelZoomed = (await captureShare(page)).state.section;
+    assert.ok(wheelZoomed.radius < zoomed.radius);
+    const anchorBefore = planeAt(zoomed,zoomAt), anchorAfter = planeAt(wheelZoomed,zoomAt);
+    assert.ok(Math.hypot(anchorBefore[0]-anchorAfter[0],anchorBefore[1]-anchorAfter[1]) < 1e-3,
+      'wheel zoom keeps the point under the cursor stationary within a screen pixel');
+    await page.mouse.move(plot.x + plot.width * .4, plot.y + plot.height * .5);
+    await page.mouse.down();
+    await page.mouse.move(plot.x + plot.width * .6, plot.y + plot.height * .5, {steps:5});
+    await page.mouse.up();
+    const panned = (await captureShare(page)).state.section;
+    assert.ok(Math.abs(panned.pan[0]) > 0, 'plot dragging is saved with the section');
+    await page.getByRole('button',{name:'全幅显示剖面'}).click();
+    await page.locator('button[aria-label^="测量剖面距离"]').click();
+    await page.mouse.click(plot.x + 8, plot.y + 8);
+    await page.mouse.click(plot.x + plot.width - 8, plot.y + 8);
+    assert.equal((await captureShare(page)).state.section.measurements.length,0,'empty plot does not create a geometry measurement');
+    if (process.env.BLIND_TEST_SCREENSHOTS) await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/section-before-measure.png`});
+    const [firstContour,secondContour] = await sectionContourPair(page);
+    await page.mouse.click(...firstContour);
+    await page.mouse.click(...secondContour);
+    const measured = (await captureShare(page)).state.section;
+    assert.equal(measured.measurements.length, 1, 'measurement anchors are shared in plane coordinates');
+    assert.ok(Math.hypot(measured.measurements[0].b[0]-measured.measurements[0].a[0], measured.measurements[0].b[1]-measured.measurements[0].a[1]) > 0);
+    await page.mouse.move(plot.x+plot.width*.4,plot.y+plot.height*.5);
+    await page.mouse.down({button:'right'});
+    await page.mouse.move(plot.x+plot.width*.5,plot.y+plot.height*.5,{steps:4});
+    await page.mouse.up({button:'right'});
+    const rightPanned = (await captureShare(page)).state.section;
+    assert.notDeepEqual(rightPanned.pan,measured.pan,'right drag pans while the ruler is active');
+    assert.equal(rightPanned.measurements.length,1,'panning preserves the ruler');
+    const touchA = {x:plot.x+plot.width*.4,y:plot.y+plot.height*.5,id:0};
+    const touchB = {x:plot.x+plot.width*.6,y:plot.y+plot.height*.5,id:1};
+    await touch.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints:[touchA,touchB]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchMove',touchPoints:[
+      {...touchA,x:plot.x+plot.width*.3},{...touchB,x:plot.x+plot.width*.7}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+    const pinched = (await captureShare(page)).state.section;
+    assert.ok(pinched.radius < rightPanned.radius,'two fingers pinch zoom while measuring');
+    assert.equal(pinched.measurements.length,1,'pinching preserves the ruler');
+    await page.keyboard.press('Escape');
+    assert.equal(await page.locator('.section-panel').isVisible(),true,'Escape leaves the section window open');
+    assert.equal(await page.locator('button[aria-label^="测量剖面距离"]').getAttribute('aria-pressed'),'false');
+    assert.equal((await captureShare(page)).state.section.measurements.length,0,'Escape clears ruler lines');
+    await page.getByRole('button',{name:'全幅显示剖面'}).click();
+    await page.locator('button[aria-label^="测量剖面距离"]').click();
+    const [nextFirst,nextSecond] = await sectionContourPair(page);
+    await page.mouse.click(...nextFirst);
+    await page.mouse.click(...nextSecond);
+    assert.equal((await captureShare(page)).state.section.measurements.length,1);
+    const beforeResize = await page.locator('.section-plot').boundingBox();
+    const handle = await page.locator('.section-resize-handle').boundingBox();
+    const hx = handle.x + handle.width / 2, hy = handle.y + handle.height / 2;
+    await touch.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints:[{x:hx,y:hy}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchMove',touchPoints:[{x:hx,y:hy-88}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+    const afterResize = await page.locator('.section-plot').boundingBox();
+    assert.ok(afterResize.height > beforeResize.height + 60, 'dragging the handle expands the 2D viewport');
+    assert.ok((await captureShare(page)).state.section.panel_size[1] > beforeResize.height + 60);
+    await page.locator('button[aria-label="重新划线"]').click();
+    await touch.send('Input.dispatchTouchEvent', {type:'touchStart',touchPoints:[{x:120,y:400}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchMove',touchPoints:[{x:260,y:400}]});
+    await touch.send('Input.dispatchTouchEvent', {type:'touchEnd',touchPoints:[]});
+    await page.locator('.section-draw-overlay').waitFor({state:'hidden'});
+    const drawn = (await captureShare(page)).state.section;
+    assert.equal(drawn.entity_id, 'mesh-0');
+    assert.equal(drawn.fit, true, 'touch line initially fits the entire contour');
+    assert.equal(drawn.measurements?.length ?? 0, 0, 'redrawing clears stale measurements');
+    assert.ok(drawn.radius > 0);
+    await page.locator('#observe-trigger').click();
+    await page.locator('#section-trigger').click();
+    assert.equal((await captureShare(page)).state.section, null);
+  } finally {await page.close();}
 });
 
 test('JSON component selects on click and opens on double click without resize or fullscreen controls', async () => {
@@ -241,6 +404,13 @@ test('JSON component selects on click and opens on double click without resize o
     await preview.click();
     assert.equal(await page.locator('.component-dialog').evaluate(node => node.open), false);
     assert.equal(await surface.evaluate(node => node.classList.contains('selected')), true);
+    await page.locator('#scene-tree-toggle').click();
+    await page.locator('.scene-tree-edit').nth(1).click();
+    await page.locator('.scene-tree-rename textarea:visible').fill('检验报告');
+    await page.locator('.scene-tree-rename textarea:visible').press('Enter');
+    await page.locator('#scene-tree-toggle').click();
+    assert.equal(await surface.locator('.component-handle > span').textContent(), '检验报告');
+    assert.equal((await captureShare(page)).entities.find(entity => entity.id === 'report').label, '检验报告');
     await preview.dblclick();
     assert.equal(await page.locator('.component-dialog').evaluate(node => node.open), true);
     assert.equal(await page.locator('.component-dialog').getByRole('button',{name:'全屏'}).count(), 0);
@@ -364,18 +534,18 @@ for (const viewport of [{width:1280,height:800},{width:390,height:844},{width:32
     try {
       assert.equal(await page.locator('.review-dock #share-view').count(), 1, 'single-scene sharing belongs in the shared toolbar');
       const dock = await page.locator('.review-dock').boundingBox();
-      assert.ok(dock.x >= 0 && dock.x + dock.width <= viewport.width, 'all six tools must fit the viewport');
-      for (const selector of ['.panel-trigger','#close-panel','#scene-info-toggle','#brush-tool','#surface-brush','#surface-done','#fit-view']) {
+      assert.ok(dock.x >= 0 && dock.x + dock.width <= viewport.width, 'the dock must fit the viewport');
+      for (const selector of ['#scene-tree-toggle','#brush-tool','#surface-brush','#surface-done','#fit-view','#observe-trigger','#observe-back']) {
         const events = await eventsDuring(page, () => page.locator(selector).click());
         assert.equal(events.filter(e=>e.type==='resize').length, 0, `${selector} cleared a scene canvas`);
+        if (selector === '#observe-trigger') assert.equal(await page.locator('.dock-observe').getAttribute('aria-hidden'), 'false', 'observe trigger must activate the secondary dock');
       }
       assert.equal(await page.locator('.review-dock #share-view').count(), 1, 'sharing returns to the regular toolbar after editing');
       if (process.env.BLIND_TEST_SCREENSHOTS) {
-        await page.locator('.panel-trigger').click();
-        await page.locator('#opacity-range').scrollIntoViewIfNeeded();
+        if (await page.locator('#scene-tree-toggle').getAttribute('aria-expanded') !== 'true') await page.locator('#scene-tree-toggle').click();
         await mkdir(process.env.BLIND_TEST_SCREENSHOTS, {recursive:true});
         await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/${viewport.width}x${viewport.height}.png`});
-        await page.locator('#close-panel').click();
+        await page.locator('#scene-tree-toggle').click();
       }
       assertViewportResized(await viewportResizeEvents(page, {width:viewport.width+40,height:viewport.height+30}));
     } finally { await page.close(); }
@@ -391,37 +561,110 @@ test('viewport resize waits for a delayed markup observer', async () => {
   } finally { await page.close(); }
 });
 
-test('visibility beside opacity preserves opacity, selection and shared state', async () => {
+test('per-entity opacity and visibility preserve their values and shared state', async () => {
   const page = await openPage({width:390,height:844});
   try {
-    await page.locator('.panel-trigger').click();
-    const toggle = page.locator('#mesh-visible-toggle');
-    await toggle.scrollIntoViewIfNeeded();
+    await page.locator('#scene-tree-toggle').click();
+    const first = page.locator('.scene-tree-row').first();
+    const second = page.locator('.scene-tree-row').nth(1);
+    const slider = first.locator('.scene-tree-opacity');
+    const toggle = first.locator('.scene-tree-visibility');
     const geometry = await page.evaluate(() => {
-      const a=document.querySelector('label[for="opacity-range"]').getBoundingClientRect();
-      const b=document.querySelector('#mesh-visible-toggle').closest('label').getBoundingClientRect();
-      return {delta:Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2), gap:b.left-a.right};
+      const a=document.querySelector('.scene-tree-row .scene-tree-opacity').getBoundingClientRect();
+      const b=document.querySelector('.scene-tree-row .scene-tree-visibility').getBoundingClientRect();
+      return {delta:Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2), gap:b.left-a.right,width:a.width};
     });
-    assert.ok(geometry.delta < 8 && geometry.gap >= 0, 'visibility must sit beside the opacity label');
-    await page.locator('#opacity-range').fill('37');
-    await toggle.locator('..').click();
-    assert.equal(await toggle.isChecked(),false);
-    assert.equal(await page.locator('#opacity-range').inputValue(),'37');
-    await page.locator('#detail-mesh-select').selectOption('mesh-1');
-    assert.equal(await toggle.isChecked(),true);
-    await page.locator('#detail-mesh-select').selectOption('mesh-0');
-    assert.equal(await toggle.isChecked(),false);
-    assert.equal(await page.locator('#opacity-range').inputValue(),'37');
-    // The hidden native checkbox remains keyboard operable and has a visible focus cue.
-    await toggle.focus(); await page.keyboard.press('Space'); assert.equal(await toggle.isChecked(),true);
-    await page.keyboard.press('Space'); assert.equal(await toggle.isChecked(),false);
-    await page.locator('#close-panel').click();
+    assert.ok(geometry.delta < 8 && geometry.gap >= 0 && geometry.width >= 70, 'slider and visibility must fit the same row');
+    assert.equal(await page.locator('#opacity-range').count(), 0, 'the detail panel no longer duplicates opacity');
+    await slider.fill('37');
+    assert.equal(await slider.getAttribute('aria-valuetext'),'37%');
+    await toggle.click();
+    assert.equal(await toggle.getAttribute('data-visible'),'false');
+    assert.equal(await slider.inputValue(),'37');
+    assert.equal(await second.locator('.scene-tree-visibility').getAttribute('data-visible'),'true');
+    // The eye button is keyboard operable and restores the previous opacity.
+    await toggle.focus(); await page.keyboard.press('Space'); assert.equal(await toggle.getAttribute('data-visible'),'true');
+    await page.keyboard.press('Space'); assert.equal(await toggle.getAttribute('data-visible'),'false');
+    await slider.fill('0'); assert.equal(await toggle.getAttribute('data-visible'),'false');
+    await toggle.click(); assert.equal(await slider.inputValue(),'100', 'showing zero opacity restores a visible value');
+    await slider.fill('37'); await toggle.click();
+    await page.locator('#scene-tree-toggle').click();
     await page.locator('#share-view').click();
     await page.locator('#share-sheet').waitFor({state:'visible'});
     assert.equal(shared.meshes[0].visible,false);
     assert.equal(shared.meshes[0].opacity,0.37);
     assert.equal(shared.meshes[1].visible,true);
   } finally { await page.close(); }
+});
+
+test('scene color opens below its Mesh and updates only that Mesh in shares', async () => {
+  const page = await openPage({width:390,height:844});
+  try {
+    await page.locator('#scene-tree-toggle').click();
+    const first = page.locator('.scene-tree-row').first();
+    const second = page.locator('.scene-tree-row').nth(1);
+    assert.equal(await page.locator('#color-swatches').count(), 0, 'color editing lives in each scene row');
+    assert.equal(await first.locator('.scene-tree-color').evaluate(button => button.style.getPropertyValue('--swatch')), '#ffc857');
+    await first.locator('.scene-tree-color').click();
+    assert.equal(await first.locator('.scene-tree-color').getAttribute('aria-expanded'), 'true');
+    assert.equal(await page.locator('.scene-tree-color-options:visible button').count(), 6);
+    await second.locator('.scene-tree-color').click();
+    assert.equal(await first.locator('.scene-tree-color').getAttribute('aria-expanded'), 'false', 'only one palette stays open');
+    if (process.env.BLIND_TEST_SCREENSHOTS) {
+      await mkdir(process.env.BLIND_TEST_SCREENSHOTS, {recursive:true});
+      await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/scene-color-mobile.png`});
+    }
+    await second.locator('..').locator('.scene-tree-color-choice[data-color="#8f8bb2"]').click();
+    assert.equal(await second.locator('.scene-tree-color').getAttribute('aria-expanded'), 'false');
+    assert.equal(await second.locator('.scene-tree-color').evaluate(button => button.style.getPropertyValue('--swatch')), '#8f8bb2');
+    assert.equal(await first.locator('.scene-tree-color').evaluate(button => button.style.getPropertyValue('--swatch')), '#ffc857');
+    const shared = await captureShare(page);
+    assert.deepEqual(shared.meshes.map(mesh => mesh.color), ['#ffc857','#8f8bb2']);
+    await second.locator('.scene-tree-color').click();
+    await page.keyboard.press('Escape');
+    assert.equal(await second.locator('.scene-tree-color').getAttribute('aria-expanded'), 'false');
+    assert.equal(await page.locator('.scene-tree').isVisible(), true, 'Escape closes the palette before the scene list');
+  } finally { await page.close(); }
+});
+
+test('inline rename keeps long labels readable and preserves the full shared value', async () => {
+  const longName = `左上第一磨牙 · ${'扫描对照与边缘检查'.repeat(11)} · 终版`;
+  const fixture = structuredClone(scene);
+  fixture.meshes[0].label = {text: longName};
+  const page = await openPage({width:320,height:700},0,fixture);
+  try {
+    assert.equal(await page.locator('.panel-trigger').count(),0);
+    await page.locator('#scene-tree-toggle').click();
+    const item = page.locator('.scene-tree-item').first();
+    const select = item.locator('.scene-tree-select');
+    await page.waitForFunction(() => document.querySelector('.scene-tree-select')?.textContent?.includes('…'));
+    const compact = await select.textContent();
+    assert.ok(compact.startsWith('左') && compact.endsWith('版') && compact.includes('…'));
+    assert.equal(await select.getAttribute('aria-label'),longName);
+    assert.equal(await page.locator('.scene-tree-name-preview').count(),0);
+    const canvasLabel = page.locator('.mesh-label:visible').first();
+    assert.ok((await canvasLabel.textContent()).includes('…'));
+    assert.ok((await canvasLabel.boundingBox()).height < 40,'3D label cannot cover the model');
+    if (process.env.BLIND_TEST_SCREENSHOTS) {
+      await mkdir(process.env.BLIND_TEST_SCREENSHOTS,{recursive:true});
+      await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/long-name-mobile.png`});
+    }
+    await page.locator('#scene-tree-info-tab').click();
+    assert.equal(await page.locator('#scene-selected-label').textContent(),longName);
+    const bounds = await page.locator('#scene-selected-label').evaluate(element => ({height:element.clientHeight,scroll:element.scrollHeight}));
+    assert.ok(bounds.height <= 54 && bounds.scroll > bounds.height,'full name stays available in a bounded scroll area');
+    await page.locator('#scene-tree-elements-tab').click();
+    await item.locator('.scene-tree-edit').click();
+    const input = item.locator('.scene-tree-rename textarea');
+    assert.equal(await input.inputValue(),longName);
+    const renamed = `${longName.slice(0,-2)}修订`;
+    await input.fill(renamed); await input.press('Enter');
+    assert.equal(await select.getAttribute('aria-label'),renamed);
+    assert.equal((await captureShare(page)).entities[0].label,renamed);
+    await item.locator('.scene-tree-edit').click();
+    await input.fill('取消的名称'); await input.press('Escape');
+    assert.equal((await captureShare(page)).entities[0].label,renamed);
+  } finally {await page.close();}
 });
 
 test('a label spanning multiple Meshes draws a focusable frame beside individual labels', async () => {
@@ -445,9 +688,7 @@ test('opaque geometry covers ordinary labels but the selected label stays in fro
   const ungrouped = {...scene,label_groups:[]};
   const page = await openPage({width:1280,height:800},0,ungrouped);
   try {
-    await page.locator('.panel-trigger').click();
-    await page.locator('#detail-mesh-select').selectOption('mesh-1');
-    await page.locator('#close-panel').click();
+    await selectSceneMesh(page, 1);
     await page.waitForTimeout(350);
     const placeInsideMesh = () => page.evaluate(() => {
       const dot = document.querySelector('.mesh-label-anchor');
@@ -465,9 +706,7 @@ test('opaque geometry covers ordinary labels but the selected label stays in fro
     const geometry = await page.screenshot({clip});
     assert.deepEqual(ordinary, geometry, 'an ordinary label must not paint over opaque geometry');
     await label.evaluate(element => {element.style.visibility='';});
-    await page.locator('.panel-trigger').click();
-    await page.locator('#detail-mesh-select').selectOption('mesh-0');
-    await page.locator('#close-panel').click();
+    await selectSceneMesh(page, 0);
     await page.waitForTimeout(350);
     clip = await placeInsideMesh();
     const selected = await page.screenshot({clip});
@@ -492,7 +731,7 @@ test('selecting a group member lifts only its label and group caption', async ()
     }));
     assert.equal((await layer()).captions.length,0);
     for(const index of [0,1,2]) {
-      await page.locator('.panel-trigger').click();await page.locator('#detail-mesh-select').selectOption(`mesh-${index}`);await page.locator('#close-panel').click();
+      await selectSceneMesh(page, index);
       await page.waitForTimeout(100);
       const state=await layer();assert.equal(state.frames,0);
       assert.deepEqual(state.members,[["Mesh one"],["Mesh two"],["Other"]][index]);
@@ -577,9 +816,7 @@ for (const viewport of [{width:390,height:844},{width:320,height:700},{width:740
         const a=captions[i],b=captions[j];
         assert.ok(Math.min(a.x+a.width,b.x+b.width)<=Math.max(a.x,b.x) || Math.min(a.y+a.height,b.y+b.height)<=Math.max(a.y,b.y),'group captions overlap');
       }
-      await page.locator('.panel-trigger').click();
-      await page.locator('#detail-mesh-select').selectOption('mesh-3');
-      await page.locator('#close-panel').click();
+      await selectSceneMesh(page, 3);
       await page.waitForTimeout(350);
       assert.equal(await page.locator('.mesh-label:visible').count(),1);
       assert.equal(await page.locator('.mesh-label:visible').textContent(),'交付冠');
@@ -626,6 +863,7 @@ const surfaceFixture = () => ({
     camera: {position:[0.3,0.3,3],target:[0.3,0.3,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:2}},
 });
 async function captureShare(page) {
+  if (await page.locator('.dock-observe').getAttribute('aria-hidden') === 'false') await page.locator('#observe-back').click();
   await page.locator('#share-view').click(); await page.locator('#share-sheet').waitFor({state:'visible'});
   const snapshot = structuredClone(shared); await page.locator('#close-share').click(); return snapshot;
 }
@@ -634,6 +872,9 @@ test('surface points and paths survive touch editing, navigation and share reope
   const page = await openPage({width:390,height:844}, 0, surfaceFixture());
   try {
     await page.locator('#brush-tool').click();
+    assert.equal(await page.locator('[data-surface-mode="screen"]').getAttribute('aria-pressed'),'true',
+      'annotation opens with the screen brush');
+    await page.locator('[data-surface-mode="point"]').click();
     await page.locator('#surface-input').waitFor({state:'visible'});
     assert.equal(await page.locator('#surface-toolbar #share-view').count(), 1, 'sharing stays in the annotation toolbar while editing');
     const touch = await page.context().newCDPSession(page);
@@ -679,6 +920,7 @@ test('selection supports camera gestures and the inline color palette fits a nar
   const page=await openPage({width:320,height:700},0,surfaceFixture());
   try {
     await page.locator('#brush-tool').click();
+    await page.locator('[data-surface-mode="point"]').click();
     assert.equal(await page.locator('#surface-navigate').count(),0);
     assert.equal(await page.locator('#surface-color-toggle').count(),0);
     assert.equal(await page.locator('[data-surface-color]:visible').count(),4);
@@ -700,7 +942,7 @@ test('selection supports camera gestures and the inline color palette fits a nar
 test('selection recovers after an outside release and cancels a mixed edit-touch gesture', async () => {
   const page=await openPage({width:390,height:844},0,surfaceFixture());
   try {
-    await page.locator('#brush-tool').click();await page.mouse.click(195,400);
+    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="point"]').click();await page.mouse.click(195,400);
     await page.locator('[data-surface-mode="select"]').click();
     const box=await page.locator('#surface-toolbar').boundingBox();
     await page.mouse.move(box.x+20,box.y-10);await page.mouse.down();
@@ -723,8 +965,9 @@ test('selection recovers after an outside release and cancels a mixed edit-touch
 test('surface editor fits narrow screens and line closure can be undone', async () => {
   const page = await openPage({width:320,height:700},0,surfaceFixture());
   try {
-    await page.locator('#brush-tool').click(); await page.locator('#surface-input').waitFor({state:'visible'});
+    await page.locator('#brush-tool').click();
     await page.locator('[data-surface-mode="line"]').click();
+    await page.locator('#surface-input').waitFor({state:'visible'});
     for(const [x,y] of [[150,340],[190,325],[175,290]]) await page.mouse.click(x,y);
     await page.locator('#surface-close').click();
     let snapshot=await captureShare(page); const line=snapshot.state.annotations[0];
@@ -743,8 +986,9 @@ test('a continuous surface stroke is one undo step and uses sparse editing handl
   const page = await openPage({width:390,height:844},0,surfaceFixture());
   try {
     const before = await captureShare(page);
-    await page.locator('#brush-tool').click();await page.locator('#surface-input').waitFor({state:'visible'});
+    await page.locator('#brush-tool').click();
     await page.locator('[data-surface-mode="line"]').click();
+    await page.locator('#surface-input').waitFor({state:'visible'});
     await page.mouse.move(155,435);await page.mouse.down();
     for(const [x,y] of [[164,420],[171,403],[183,390],[198,378],[207,365]]) await page.mouse.move(x,y,{steps:3});
     await page.mouse.up();
@@ -767,6 +1011,7 @@ test('surface hits choose the visible mesh independently of the mesh selection',
   const page=await openPage({width:390,height:844},0,fixture);
   try {
     await page.locator('#brush-tool').click();
+    await page.locator('[data-surface-mode="point"]').click();
     assert.equal(await page.locator('#surface-target').count(),0);
     assert.equal(await page.locator('#surface-new').count(),0);
     await page.mouse.click(195,400);
@@ -776,9 +1021,9 @@ test('surface hits choose the visible mesh independently of the mesh selection',
     await page.locator('.surface-badge').filter({hasText:'点 1'}).click();
     assert.equal(await page.locator('#surface-name').inputValue(),'点 1');
     await page.waitForFunction(()=>document.querySelector('.surface-badge.selected')?.textContent.includes('点 1'));
-    await page.locator('#surface-done').click();await page.locator('.panel-trigger').click();
-    await page.locator('#detail-mesh-select').selectOption('mesh-1');await page.locator('#mesh-visible-toggle').locator('..').click();
-    await page.locator('#close-panel').click();await page.locator('#brush-tool').click();
+    await page.locator('#surface-done').click();await page.locator('#scene-tree-toggle').click();
+    await page.locator('.scene-tree-row').nth(1).locator('.scene-tree-visibility').click();
+    await page.locator('#scene-tree-toggle').click();await page.locator('#brush-tool').click();
     assert.equal(await page.locator('.surface-list-row').count(),0);
   } finally {await page.close();}
 });
@@ -786,7 +1031,7 @@ test('surface hits choose the visible mesh independently of the mesh selection',
 test('surface and screen strokes share tools, selection and undo history', async () => {
   const page=await openPage({width:390,height:844},0,surfaceFixture());
   try {
-    await page.locator('#brush-tool').click();await page.mouse.click(195,400);
+    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="point"]').click();await page.mouse.click(195,400);
     await page.locator('#surface-brush').click();
     await page.mouse.move(60,200);await page.mouse.down();await page.mouse.move(130,230,{steps:12});await page.mouse.up();
     let snapshot=await captureShare(page);assert.equal(snapshot.state.annotations.length,1);assert.equal(snapshot.state.strokes.length,1);
@@ -815,7 +1060,7 @@ test('surface and screen strokes share tools, selection and undo history', async
 test('new point, line and screen brush names remain editable after pointer release and share completion', async () => {
   const page=await openPage({width:390,height:844},0,surfaceFixture());
   try {
-    await page.locator('#brush-tool').click();await page.mouse.click(195,400);
+    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="point"]').click();await page.mouse.click(195,400);
     const name=page.locator('#surface-name');
     assert.equal(await name.isVisible(),true);assert.equal(await name.inputValue(),'点 1');
     await page.waitForTimeout(250);assert.equal(await name.isVisible(),true);
@@ -883,7 +1128,6 @@ test('annotation names stay on canvas and the list adapts to available space ind
           assert.ok(last.y>=a.y && last.y+last.height<=a.y+a.height,'last scene row stays inside its scrolling pane');
         };
         await assertSeparated();
-        if (viewport.width === 1440) {await page.locator('.panel-trigger').click();await assertSeparated();await page.locator('#close-panel').click();}
       }
       if(viewport.width===390 && viewport.height===844) {
         const boxes=await page.locator('.surface-badge').evaluateAll(es=>es.map(e=>{const r=e.getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};}));
@@ -919,12 +1163,12 @@ test('annotation names stay on canvas and the list adapts to available space ind
         await page.evaluate(()=>{Object.defineProperty(visualViewport,'height',{configurable:true,value:innerHeight});Object.defineProperty(visualViewport,'offsetTop',{configurable:true,value:0});visualViewport.dispatchEvent(new Event('resize'));});
       }
       await page.locator('#surface-done').click();
-      for(const trigger of ['.panel-trigger','#scene-info-toggle']) {
-        await page.locator(trigger).click();await page.waitForTimeout(100);
-        assert.equal(await page.locator('.surface-list').isVisible(),false);
-        assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
-        await page.locator('#close-panel').click();
-      }
+      if (await page.locator('#scene-tree-toggle').getAttribute('aria-expanded') !== 'true') await page.locator('#scene-tree-toggle').click();
+      await page.locator('#scene-tree-info-tab').click();
+      await page.waitForTimeout(100);
+      assert.equal(await page.locator('.surface-list').isVisible(),false);
+      assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
+      await page.locator('#scene-tree-toggle').click();
       assert.deepEqual((await captureShare(page)).state.annotations,before.state.annotations);
     } finally {await page.close();}
   }
@@ -973,21 +1217,21 @@ test('annotation labels follow every rendered camera frame without replacing the
   } finally {await page.close();}
 });
 
-test('opening detail and info preserves visible annotation badges, list and document', async () => {
+test('opening scene info preserves visible annotation badges, list and document', async () => {
   const fixture=surfaceFixture();fixture.state.annotations=[{id:'named-point',mesh:0,revision:'fixture',kind:'point',label:'稳定标记',color:'#ff6b5e',visible:true,closed:false,points:[[0.3,0.3,0.4]],normals:[[0.57735,0.57735,0.57735]],controls:[0]}];
   for(const viewport of [{width:320,height:700},{width:390,height:844},{width:1280,height:800},{width:740,height:420}]) {
     const page=await openPage(viewport,0,fixture);
     try {
       await page.waitForFunction(()=>document.querySelector('.surface-badge'));
       const before=await captureShare(page);
-      for(const trigger of ['.panel-trigger','#scene-info-toggle']) {
-        await page.locator(trigger).click();await page.waitForTimeout(300);
-        assert.equal(await page.locator('.surface-list').isVisible(),viewport.width>=1256 && viewport.height>=600);
-        assert.equal(await page.locator('.surface-badge').first().isVisible(),true);
-        const boxes=await page.evaluate(()=>['.surface-list','#control-panel'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};}));
-        const [a,b]=boxes;assert.ok(a.right<=b.x || b.right<=a.x || a.bottom<=b.y || b.bottom<=a.y,'panels must not overlap');
-        await page.locator('#close-panel').click();
-      }
+      if (await page.locator('#scene-tree-toggle').getAttribute('aria-expanded') !== 'true') await page.locator('#scene-tree-toggle').click();
+      await page.locator('#scene-tree-info-tab').click();
+      await page.waitForTimeout(300);
+      assert.equal(await page.locator('.surface-list').isVisible(),viewport.width>=900 && viewport.height>=600);
+      assert.equal(await page.locator('.surface-badge').first().isVisible(),true);
+      const boxes=await page.evaluate(()=>['.surface-list','#scene-tree'].map(item=>{const r=document.querySelector(item).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};}));
+      const [a,b]=boxes;assert.ok(a.right<=b.x || b.right<=a.x || a.bottom<=b.y || b.bottom<=a.y,'panels must not overlap');
+      await page.locator('#scene-tree-toggle').click();
       const after=await captureShare(page);assert.deepEqual(after.state.annotations,before.state.annotations);assert.deepEqual(after.state.camera,before.state.camera);
     } finally {await page.close();}
   }
@@ -999,7 +1243,7 @@ test('zero opacity filters annotation list and restoring opacity recovers it', a
   const page=await openPage({width:390,height:844},0,fixture);
   try {
     assert.equal(await page.locator('.surface-list-row').count(),0);
-    await page.locator('.panel-trigger').click();await page.locator('#opacity-range').fill('100');
+    await page.locator('#scene-tree-toggle').click();await page.locator('.scene-tree-row').first().locator('.scene-tree-opacity').fill('100');
     assert.equal(await page.locator('.surface-list-row').count(),1);
   } finally {await page.close();}
 });
@@ -1007,17 +1251,17 @@ test('zero opacity filters annotation list and restoring opacity recovers it', a
 test('new marks refuse the scene sample limit before producing an invalid share', async () => {
   const fixture=surfaceFixture();fixture.state.annotations=Array.from({length:4},(_,i)=>({id:`full-${i}`,mesh:0,revision:'fixture',kind:'line',label:`满 ${i}`,color:'#ff6b5e',visible:false,closed:false,points:Array.from({length:4096},()=>[0.3,0.3,0.4]),normals:Array.from({length:4096},()=>[0.57735,0.57735,0.57735]),controls:[0,4095]}));
   const page=await openPage({width:390,height:844},0,fixture);
-  try {await page.locator('#brush-tool').click();await page.mouse.click(195,400);assert.equal((await captureShare(page)).state.annotations.length,4);} finally {await page.close();}
+  try {await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="point"]').click();await page.mouse.click(195,400);assert.equal((await captureShare(page)).state.annotations.length,4);} finally {await page.close();}
 });
 
 test('undo restores Raw geometry before restoring a deleted annotation', async () => {
   const page=await openPage({width:390,height:844},0,surfaceFixture());
   try {
-    await page.locator('#brush-tool').click();await page.mouse.click(195,400);const original=(await captureShare(page)).state.annotations;
+    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="point"]').click();await page.mouse.click(195,400);const original=(await captureShare(page)).state.annotations;
     await page.locator('#surface-delete').click();await page.locator('#surface-done').click();
-    await page.locator('.panel-trigger').click();await page.locator('[data-quality="lod"]').click();
+    await page.locator('#scene-tree-toggle').click();await page.locator('#scene-tree-info-tab').click();await page.locator('[data-quality="lod"]').click();
     await page.waitForFunction(()=>document.querySelector('[data-quality="lod"]').classList.contains('active'));
-    await page.locator('#close-panel').click();await page.locator('#brush-tool').click();
+    await page.locator('#scene-tree-toggle').click();await page.locator('#brush-tool').click();
     let release;const gate=new Promise(resolve=>release=resolve);
     await page.route('**/mesh/0',async route=>{await gate;await route.fulfill({body:await readFile(new URL('../../tests/fixtures/tetra.ply',import.meta.url)),contentType:'application/ply'});});
     await page.locator('#surface-undo').click();await page.waitForFunction(()=>document.querySelector('#surface-hint').textContent.includes('恢复'));
@@ -1035,7 +1279,7 @@ test('a second touch during Raw loading cancels the pending gesture without corr
   try {
     let release;const gate=new Promise(resolve=>release=resolve);
     await page.route('**/mesh/0',async route=>{await gate;await route.fulfill({body:await readFile(new URL('../../tests/fixtures/tetra.ply',import.meta.url)),contentType:'application/ply'});});
-    await page.locator('#brush-tool').click();const touch=await page.context().newCDPSession(page);
+    await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="point"]').click();const touch=await page.context().newCDPSession(page);
     await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:195,y:400,id:1}]});
     await page.waitForFunction(()=>document.querySelector('#surface-hint').textContent.includes('准备'));
     await touch.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:195,y:400,id:1},{x:160,y:380,id:2}]});
@@ -1055,11 +1299,11 @@ test('undo derives the restored draft target from its original mesh', async () =
     await page.locator('#brush-tool').click();await page.locator('[data-surface-mode="line"]').click();
     await page.mouse.click(380,310);await page.mouse.click(400,290);await page.locator('#surface-end').click();
     // Apply actual visibility controls without exiting the annotation editor.
-    await page.locator('.panel-trigger').dispatchEvent('click');
-    await page.locator('#mesh-visible-toggle').locator('..').click();await page.locator('#close-panel').click();
+    await page.locator('#scene-tree-toggle').click();
+    await page.locator('.scene-tree-row').first().locator('.scene-tree-visibility').click();await page.locator('#scene-tree-toggle').click();
     await page.mouse.click(400,300);
     await page.locator('#surface-undo').click();await page.locator('#surface-undo').click();
-    await page.locator('.panel-trigger').dispatchEvent('click');await page.locator('#mesh-visible-toggle').locator('..').click();await page.locator('#close-panel').click();
+    await page.locator('#scene-tree-toggle').click();await page.locator('.scene-tree-row').first().locator('.scene-tree-visibility').click();await page.locator('#scene-tree-toggle').click();
     await page.mouse.click(400,290);await page.locator('#surface-end').click();
     const result=await captureShare(page);assert.equal(result.state.annotations.length,1);assert.equal(result.state.annotations[0].mesh,0);assert.ok(result.state.annotations[0].points.length>=2);
   } finally {await page.close();}
@@ -1097,7 +1341,7 @@ test('partial scenes show a persistent notice and semantic details', async () =>
     assert.match(await page.locator('.scene-artifacts').textContent(),/人工颈缘：产物缺失/);
     assert.match(await page.locator('.scene-artifacts').textContent(),/运行日志.*产物缺失/);
     assert.equal(await page.locator('.scene-artifacts a').count(),0);
-    assert.equal(await page.locator('#detail-mesh-select option').first().textContent(),'Mesh one');
+    assert.equal(await page.locator('#scene-selected-label').textContent(),'Mesh one');
   } finally { await page.close(); }
 });
 
@@ -1301,20 +1545,20 @@ test('spatial content respects depth and stays fixed during pointer and keyboard
       await page.mouse.move(400,400);await page.mouse.down();await page.mouse.move(450,410,{steps:8});await page.mouse.up();
       let after=await captureShare(page);
       assert.notDeepEqual(after.state.camera,before,'navigation must still work over overlapping content');
-      assert.deepEqual(after.components.map(c=>c.position),data.components.map(c=>c.position));
+      assert.deepEqual(after.entities.map(c=>c.position),data.components.map(c=>c.position));
       if (z>0) {
         const header=page.locator('.component-handle');const box=await header.boundingBox();
         await page.mouse.move(box.x+box.width*.2,box.y+box.height*.5);await page.mouse.down();
         await page.mouse.move(box.x+box.width*.2+30,box.y+box.height*.5+20,{steps:5});await page.mouse.up();
         const headerDrag=await captureShare(page);
-        assert.deepEqual(headerDrag.components.map(c=>c.position),data.components.map(c=>c.position),'title drags cannot move content');
+        assert.deepEqual(headerDrag.entities.map(c=>c.position),data.components.map(c=>c.position),'title drags cannot move content');
         assert.notDeepEqual(headerDrag.state.camera,after.state.camera,'title drags navigate the scene');
       }
       await page.locator('#scene-tree-toggle').click();
       const row=page.locator('.scene-tree-row').getByRole('button',{name:'Image',exact:true});
       await row.focus();await page.keyboard.press('Alt+ArrowRight');
       after=await captureShare(page);
-      assert.deepEqual(after.components.map(c=>c.position),data.components.map(c=>c.position),'position shortcuts are disabled');
+      assert.deepEqual(after.entities.map(c=>c.position),data.components.map(c=>c.position),'position shortcuts are disabled');
     } finally {await page.close();}
   }
 });
@@ -1429,30 +1673,38 @@ for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
       return page;
     };
     const page=await openMixed(mixed);
-    const checks=()=>page.locator('.scene-tree-row input').evaluateAll(inputs=>inputs.map(input=>input.checked));
+    const checks=()=>page.locator('.scene-tree-visibility').evaluateAll(buttons=>buttons.map(button=>button.dataset.visible==='true'));
     const row=name=>page.locator('.scene-tree-row').getByRole('button',{name,exact:true});
     try {
+      assert.equal(await page.locator('.scene-tree-color').count(),2,'Mesh and PTS rows show color; content rows do not');
       // A hidden, zero-opacity geometry must become visible when isolated.
       await row('Margin').dblclick(); assert.deepEqual(await checks(),[false,true,false,false]);
       let snapshot=await captureShare(page);
-      assert.deepEqual(snapshot.components.map(c=>c.visible),[false,true,false,false]);
+      assert.deepEqual(snapshot.entities.map(c=>c.visible),[false,true,false,false]);
       assert.equal(snapshot.meshes[0].opacity,.37);assert.equal(snapshot.meshes[1].opacity,1);
       assert.deepEqual(snapshot.meshes.map(m=>m.visible),[false,true]);
       await row('Log').dblclick(); assert.deepEqual(await checks(),[false,false,true,false]);
       await page.getByRole('button',{name:'全部隐藏',exact:true}).click();assert.deepEqual(await checks(),[false,false,false,false]);
       await page.waitForFunction(()=>[...document.querySelectorAll('.scene-surface')].every(e=>!e.checkVisibility()));
-      snapshot=await captureShare(page);assert.ok(snapshot.components.every(c=>!c.visible));assert.ok(snapshot.meshes.every(m=>!m.visible));
+      snapshot=await captureShare(page);assert.ok(snapshot.entities.every(c=>!c.visible));assert.ok(snapshot.meshes.every(m=>!m.visible));
       await page.getByRole('button',{name:'全部显示',exact:true}).click();assert.deepEqual(await checks(),[true,true,true,true]);
       await page.waitForFunction(()=>[...document.querySelectorAll('.scene-surface')].every(e=>e.checkVisibility()));
-      snapshot=await captureShare(page);assert.deepEqual(snapshot.components.map(c=>c.opacity),[.37,1,.6,1]);
-      assert.ok(snapshot.components.every(c=>c.visible));assert.ok(snapshot.meshes.every(m=>m.visible));
+      snapshot=await captureShare(page);assert.deepEqual(snapshot.entities.map(c=>c.opacity),[.37,1,.6,1]);
+      assert.ok(snapshot.entities.every(c=>c.visible));assert.ok(snapshot.meshes.every(m=>m.visible));
+      const logRow=row('Log').locator('xpath=ancestor::div[contains(@class,"scene-tree-row")]');
+      await logRow.locator('.scene-tree-opacity').fill('42');
+      await logRow.locator('.scene-tree-visibility').click();
+      assert.equal(await logRow.locator('.scene-tree-opacity').inputValue(),'42');
+      snapshot=await captureShare(page);assert.equal(snapshot.entities[2].visible,false);assert.equal(snapshot.entities[2].opacity,.42);
+      await logRow.locator('.scene-tree-opacity').fill('60');
+      assert.equal(await logRow.locator('.scene-tree-visibility').getAttribute('data-visible'),'true');
       await page.getByRole('button',{name:'全部隐藏',exact:true}).click();
       await row('Trace').dblclick();assert.deepEqual(await checks(),[false,false,false,true]);
       await page.waitForFunction(()=>!document.querySelector('[data-component="text"]').checkVisibility()&&document.querySelector('[data-component="example:trace"]').checkVisibility());
-      snapshot=await captureShare(page);assert.deepEqual(snapshot.components.map(c=>c.visible),[false,false,false,true]);
-      const saved={...mixed,state:snapshot.state,meshes:mixed.meshes.map((m,i)=>({...m,...snapshot.meshes[i]})),components:mixed.components.map((c,i)=>({...c,...snapshot.components[i]}))};
+      snapshot=await captureShare(page);assert.deepEqual(snapshot.entities.map(c=>c.visible),[false,false,false,true]);
+      const saved={...mixed,state:snapshot.state,meshes:mixed.meshes.map((m,i)=>({...m,...snapshot.meshes[i]})),entities:mixed.components.map((c,i)=>({...c,...snapshot.entities[i]}))};
       const reopened=await openMixed(saved);
-      try {assert.deepEqual(await reopened.locator('.scene-tree-row input').evaluateAll(inputs=>inputs.map(input=>input.checked)),[false,false,false,true]);}
+      try {assert.deepEqual(await reopened.locator('.scene-tree-visibility').evaluateAll(buttons=>buttons.map(button=>button.dataset.visible==='true')),[false,false,false,true]);}
       finally {await reopened.close();}
       if(process.env.BLIND_TEST_SCREENSHOTS) {
         await page.getByRole('button',{name:'全部显示',exact:true}).click();await page.mouse.move(0,0);
@@ -1540,9 +1792,9 @@ test('double-click keeps the mesh pivot through rotation, pan and share reopenin
       await page.mouse.move(440,400,{steps:20});await page.mouse.up();
       const snapshot=await captureShare(page);
       close(snapshot.state.camera.target,panned.target,'next rotation must preserve the panned pivot');
-      await page.locator('.panel-trigger').click();
+      await clickDisplay(page);
+      await page.locator('[data-observe-category="projection"]').click();
       await page.locator(`[data-projection="${projection==='orthographic' ? 'perspective' : 'orthographic'}"]`).click();
-      await page.locator('#close-panel').click();
       const switched=(await captureShare(page)).state.camera;
       close(switched.target,panned.target,'projection switch must preserve the panned pivot');
       close(switched.up,snapshot.state.camera.up,'projection switch must preserve roll');

@@ -1,7 +1,7 @@
 {
   "name": "blind-viewer",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "test": "node --experimental-strip-types --test src/*.test.mjs",
@@ -11,6 +11,7 @@
     "test:collection": "node --test tests/collection-interactions.mjs"
   },
   "dependencies": {
+    "lucide": "^1.48.0",
     "three": "0.185.1",
     "three-mesh-bvh": "0.9.15"
   },

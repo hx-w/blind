@@ -4,7 +4,7 @@ import { ArcballControls } from 'three/addons/controls/ArcballControls.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
-import { apiError, type LightSettings, type MeshLabelGroup, type MeshQuality, type PublicMesh, type PublicScene, type RenderMode, type SceneUpdate, type ScreenStroke, type ViewState } from './api';
+import { apiError, type LightSettings, type MeshLabelGroup, type MeshQuality, type PublicMesh, type PublicScene, type RenderMode, type SceneUpdate, type ScreenStroke, type SectionState, type ViewState } from './api';
 import { createObjectMaterial, updateObjectMaterial } from './material';
 import { MeshLabels } from './labels';
 import { SurfaceInk } from './surface-render';
@@ -63,13 +63,15 @@ export class MeshViewer {
   private readonly orthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.001, 1_000_000);
   private readonly controls: ArcballControls;
   private readonly axes = new THREE.AxesHelper(1);
+  private readonly sectionLines = new THREE.Group();
+  private readonly sectionFill = new THREE.Group();
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private readonly resizeObserver: ResizeObserver;
   private readonly visibleBounds = new THREE.Box3();
   private readonly componentBounds = new THREE.Box3();
   readonly renderListeners = new Set<() => void>();
-  componentUpdates?: () => SceneUpdate['components'];
+  entityUpdates?: () => SceneUpdate['entities'];
   get activeCamera(): THREE.PerspectiveCamera | THREE.OrthographicCamera { return this.camera; }
   invalidate(): void {
     this.dirty = true;
@@ -84,7 +86,7 @@ export class MeshViewer {
     const inBand = (bounds: THREE.Box3) => !bounds.isEmpty() && bounds.max.z >= minZ && bounds.min.z < maxZ;
     const geometry = new Set(this.models.filter(model => model.info.visible && model.info.opacity > 0 && inBand(model.bounds)).map(model => model.object));
     // Keep the same clipping contract for mesh annotations and scene helpers.
-    for (const object of [this.axes, this.surfaceInk.object]) {
+    for (const object of [this.axes, this.surfaceInk.object, this.sectionFill, this.sectionLines]) {
       if (object.visible && inBand(new THREE.Box3().setFromObject(object))) geometry.add(object);
     }
     if (!geometry.size) {
@@ -140,7 +142,9 @@ export class MeshViewer {
   }
   setMeshOpacity(index: number, opacity: number): void {
     const model = this.models[index]; if (!model) return;
-    model.info.opacity = opacity; this.applyMaterials(); this.onModelChange?.();
+    const wasVisible = model.info.opacity > 0;
+    model.info.opacity = opacity; this.applyMaterials();
+    if (wasVisible !== (opacity > 0)) this.onModelChange?.();
   }
   setComponentBounds(bounds: THREE.Box3): void { this.componentBounds.copy(bounds); this.relayout(); }
   focusBounds(bounds: THREE.Box3): void { if (!bounds.isEmpty()) this.fitBox(bounds, false); }
@@ -148,6 +152,7 @@ export class MeshViewer {
   private readonly rendererSize = new THREE.Vector2();
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   private models: Model[] = [];
+  private entityIdsByMesh = new Map<number, string>();
   private labelGroups: MeshLabelGroup[] = [];
   private state!: ViewState;
   private selected = 0;
@@ -181,7 +186,9 @@ export class MeshViewer {
     this.controls.minDistance = 0.0001;
     this.controls.maxDistance = 1_000_000;
     setHelperOpacity(this.axes, 0.78);
-    this.scene.add(this.axes, this.surfaceInk.object);
+    this.sectionLines.visible = false;
+    this.sectionFill.visible = false;
+    this.scene.add(this.axes, this.surfaceInk.object, this.sectionFill, this.sectionLines);
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(root);
@@ -196,7 +203,9 @@ export class MeshViewer {
     this.disposeModels();
     // Keep assembly captions (e.g. one model comparison) within flat component groups.
     // Only suppress a caption when the component shell already names the same group.
-    this.labelGroups = (scene.label_groups ?? []).filter(group => !scene.components?.length || !group.meshes.every(index => scene.components!.find(c => c.source.kind === 'mesh' && c.source.index === index)?.group === group.text));
+    const entities = scene.entities ?? scene.components;
+    this.entityIdsByMesh = new Map(entities?.filter(entity => entity.source.kind === 'mesh').map(entity => [entity.source.index, entity.id]) ?? scene.meshes.map((_, index) => [index, `mesh-${index}`]));
+    this.labelGroups = (scene.label_groups ?? []).filter(group => !entities?.length || !group.meshes.every(index => entities.find(c => c.source.kind === 'mesh' && c.source.index === index)?.group === group.text));
     this.state = structuredClone(scene.state);
     this.state.render_mode ??= 'matte';
     this.state.light ??= {azimuth: 45, elevation: 20, intensity: 1};
@@ -265,6 +274,76 @@ export class MeshViewer {
   get selectedModel(): ViewerMesh | undefined { return this.models[this.selected]?.info; }
   get modelInfos(): ViewerMesh[] { return this.models.map((model) => model.info); }
   get currentState(): ViewState { return this.exportState(); }
+  sectionSource(index: number): {object: THREE.Object3D; bounds: THREE.Box3; revision: string; name: string; entityId: string} | null {
+    const model = this.models[index];
+    return model && this.hasSurface(index)
+      ? {object: model.object, bounds: model.bounds.clone(), revision: model.info.revision, name: model.info.label?.text ?? model.info.name, entityId: this.entityIdsByMesh.get(index) ?? `mesh-${index}`}
+      : null;
+  }
+  sectionTarget(index: number): ReturnType<MeshViewer['sectionSource']> {
+    const info = this.models[index]?.info;
+    return info?.visible && info.opacity > 0 ? this.sectionSource(index) : null;
+  }
+  sectionPick(index: number, x: number, y: number): THREE.Vector3 | null {
+    const target = this.sectionTarget(index); if (!target) return null;
+    const rect = this.root.getBoundingClientRect();
+    this.pointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    return this.raycaster.intersectObject(target.object, true)[0]?.point.clone() ?? null;
+  }
+  sectionCameraBasis(): {right: THREE.Vector3; up: THREE.Vector3; forward: THREE.Vector3} {
+    return {
+      right: new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion),
+      up: new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion),
+      forward: this.camera.getWorldDirection(new THREE.Vector3()),
+    };
+  }
+  sectionWorldPerPixel(point: THREE.Vector3): number {
+    const height = Math.max(this.root.clientHeight, 1);
+    if (this.camera instanceof THREE.OrthographicCamera) return (this.camera.top - this.camera.bottom) / this.camera.zoom / height;
+    const depth = Math.max(point.clone().sub(this.camera.position).dot(this.camera.getWorldDirection(new THREE.Vector3())), this.camera.near);
+    return depth * 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2) / this.camera.zoom / height;
+  }
+  revealSection(normal: THREE.Vector3, axis: THREE.Vector3): void {
+    if (Math.abs(this.camera.getWorldDirection(new THREE.Vector3()).dot(normal)) > .24) return;
+    this.cancelFit();
+    const pivot = this.captureCameraPose().target;
+    const rotation = new THREE.Quaternion().setFromAxisAngle(axis.clone().normalize(), THREE.MathUtils.degToRad(24));
+    this.camera.position.sub(pivot).applyQuaternion(rotation).add(pivot);
+    this.camera.up.applyQuaternion(rotation);
+    this.controls.target.copy(pivot);
+    this.syncCamera();
+  }
+  setSection(section: SectionState | null): void {
+    const prior = this.state.section;
+    this.state.section = section;
+    if (!section || prior?.entity_id !== section.entity_id || prior.mesh !== section.mesh) this.setSectionSegments([]);
+  }
+  setSectionSegments(sections: readonly {segments: readonly {a: THREE.Vector3; b: THREE.Vector3}[]; caps: readonly THREE.BufferGeometry[]; color: string}[]): void {
+    for (const group of [this.sectionLines, this.sectionFill]) {
+      for (const child of group.children) {
+        (child as THREE.Mesh).geometry.dispose();
+        const material = (child as THREE.Mesh).material;
+        for (const item of Array.isArray(material) ? material : [material]) item.dispose();
+      }
+      group.clear();
+    }
+    for (const {segments, caps, color} of sections) {
+      const positions = new Float32Array(segments.length * 6);
+      segments.forEach(({a, b}, index) => positions.set([a.x, a.y, a.z, b.x, b.y, b.z], index * 6));
+      const lines = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({color, transparent:true, opacity:.95, depthTest:false}));
+      lines.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      lines.renderOrder = 20; this.sectionLines.add(lines);
+      const fillColor = new THREE.Color(color).lerp(new THREE.Color(0xffffff), .35);
+      for (const geometry of caps) {
+        const fill = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({color:fillColor, transparent:true, opacity:.36, side:THREE.DoubleSide, depthTest:false, depthWrite:false}));
+        fill.renderOrder = 19; this.sectionFill.add(fill);
+      }
+    }
+    this.sectionLines.visible = !!this.state.section && this.sectionLines.children.length > 0;
+    this.sectionFill.visible = !!this.state.section && this.sectionFill.children.length > 0;
+    this.invalidate();
+  }
   get focusedComponentId(): string | undefined { return this.state.focused_component_id ?? undefined; }
   setFocusedComponent(id: string): void { this.state.focused_component_id = id; }
 
@@ -404,11 +483,14 @@ export class MeshViewer {
     }
   }
 
-  setColor(color: string): void { const model = this.models[this.selected]; if (model) { model.info.color = color; this.applyMaterials(); } }
-  setLabel(text: string): void {
-    const model = this.models[this.selected];
+  setMeshColor(index: number, color: string): void {
+    const model = this.models[index]; if (!model || model.info.color === color) return;
+    model.info.color = color; this.applyMaterials(); this.onModelChange?.();
+  }
+  setLabelAt(index: number, text: string): void {
+    const model = this.models[index];
     if (!model) return;
-    model.info.label = text.trim() ? { ...model.info.label, text } : null;
+    model.info.label = text.trim() && text !== model.info.name ? { ...model.info.label, text } : null;
     this.refreshLabels();
   }
 
@@ -491,7 +573,7 @@ export class MeshViewer {
     return {
       meshes: this.models.map(({ info }) => ({ color: info.color, opacity: info.opacity, visible: info.visible, quality: info.quality, label: info.label ?? null })),
       state: this.exportState(),
-      components: this.componentUpdates?.(),
+      entities: this.entityUpdates?.(),
     };
   }
 
@@ -528,6 +610,7 @@ export class MeshViewer {
     this.models.forEach((model) => { model.object.visible = model.info.visible; });
     if (this.state.projection === 'orthographic') { this.state.projection = 'perspective'; this.setProjection('orthographic'); }
     this.applyMaterials();
+    this.setSection(this.state.section ?? null);
   }
 
   private prepareObject(object: THREE.Object3D, index: number, info: ViewerMesh): void {
@@ -546,7 +629,7 @@ export class MeshViewer {
         color: info.color,
         opacity: info.opacity,
         flat: info.format !== 'pts' && this.state.shading === 'flat',
-        wireframe: info.format !== 'pts' && this.state.shading === 'wire' && this.renderMode === 'matte',
+        wireframe: info.format !== 'pts' && this.state.shading === 'wire',
         curve: info.format === 'pts',
         renderMode: this.renderMode,
         light: this.lightSettings,
@@ -572,7 +655,7 @@ export class MeshViewer {
         color: model.info.color,
         opacity: model.info.opacity,
         flat: model.info.format !== 'pts' && this.state.shading === 'flat',
-        wireframe: model.info.format !== 'pts' && this.state.shading === 'wire' && this.renderMode === 'matte',
+        wireframe: model.info.format !== 'pts' && this.state.shading === 'wire',
         curve: model.info.format === 'pts',
         renderMode: this.renderMode,
         light: this.lightSettings,
@@ -604,6 +687,7 @@ export class MeshViewer {
       },
       strokes: this.state.strokes,
       annotations: this.annotations,
+      section: this.state.section ?? null,
     };
   }
 

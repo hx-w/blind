@@ -269,7 +269,7 @@ pub(super) async fn scene_from_manifest(
         created_at: crate::source::now() as u64,
         ttl_days: None,
         meshes,
-        components: Vec::new(),
+        entities: Vec::new(),
         label_groups: groups,
         state: Default::default(),
         attachments,
@@ -277,9 +277,9 @@ pub(super) async fn scene_from_manifest(
         collection: None,
     };
     if !plan.components.is_empty() || has_panel_groups {
-        scene.components = scene.component_descriptors();
+        scene.entities = scene.entity_descriptors();
         // Existing geometry groups and new surface groups share the same flat layout contract.
-        for (index, c) in scene.components.iter_mut().enumerate() {
+        for (index, c) in scene.entities.iter_mut().enumerate() {
             if has_panel_groups {
                 c.group = mesh_groups.get(index).cloned();
             }
@@ -298,7 +298,7 @@ pub(super) async fn scene_from_manifest(
                 Ok(mut child) => {
                     let mesh_offset = scene.meshes.len();
                     let attachment_offset = scene.attachments.len();
-                    for c in &mut child.components {
+                    for c in &mut child.entities {
                         c.id = format!("plugin-{}", resource.id);
                         c.label = resource.label.clone();
                         match &mut c.source {
@@ -316,7 +316,7 @@ pub(super) async fn scene_from_manifest(
                     }
                     scene.meshes.extend(child.meshes);
                     scene.attachments.extend(child.attachments);
-                    scene.components.extend(child.components);
+                    scene.entities.extend(child.entities);
                 }
                 Err(_) => scene.warnings.push(crate::plugin::Warning {
                     code: "COMPONENT_UNAVAILABLE".into(),
@@ -328,7 +328,7 @@ pub(super) async fn scene_from_manifest(
                 }),
             }
         }
-        if scene.components.is_empty() {
+        if scene.entities.is_empty() {
             return Err(AppError::unprocessable("No readable scene components"));
         }
         scene.schema = 5;

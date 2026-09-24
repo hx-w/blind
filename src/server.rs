@@ -254,7 +254,7 @@ impl DoctorRegistryReport {
 
 #[derive(Debug, Serialize)]
 struct PublicScene {
-    components: Vec<crate::component::SceneComponent>,
+    entities: Vec<crate::component::SceneEntity>,
     ttl_days: u32,
     source: Option<crate::source::SceneSource>,
     title: String,
@@ -647,7 +647,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        scene_schema: 6,
+        scene_schema: 7,
         image_renderer: state.renderer.is_some(),
     })
 }

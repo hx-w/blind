@@ -60,7 +60,7 @@ pub(in crate::server) async fn get_attachment(
     };
     expand_response_reservation(&state, &mut response_permit, bytes.len())?;
     if query.get("embed").is_some_and(|v| v == "1") {
-        let html = scene.components.iter().any(|c| {
+        let html = scene.entities.iter().any(|c| {
             c.component == crate::component::ComponentKind::Html
                 && c.source == crate::component::ComponentSource::Attachment(index)
         });
@@ -115,7 +115,7 @@ pub(in crate::server) async fn get_renderer(
         state.registry.sources.validate_source(scene),
     )?;
     let binding = scene
-        .components
+        .entities
         .iter()
         .find(|c| c.id == id)
         .and_then(|c| c.renderer.as_ref())

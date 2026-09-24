@@ -2,12 +2,17 @@ import './collection.css';
 import {loadCollection, shareCollection, type CollectionOverview, type SceneUpdate, type ShareResponse, type ScreenStroke, type CollectionLayout} from './api';
 import {MarkupCanvas} from './markup';
 import {takeInitialScene} from './bootstrap';
+import {installIcons} from './icons';
 
 const token = location.pathname.match(/\/s\/([^/]+)$/)?.[1] ?? '';
 if (!token) throw new Error('Missing collection token');
 const owner = sessionStorage.getItem(`blind.owner.${token}`) ?? undefined;
 const originalDock = document.querySelector('.review-dock')!.cloneNode(true) as HTMLElement;
 const originalShare = originalDock.querySelector<HTMLButtonElement>('#share-view')!;
+const mainDock = originalDock.querySelector<HTMLElement>('.dock-main')!;
+const observeDock = originalDock.querySelector<HTMLElement>('.dock-observe')!;
+const observeTrigger = originalDock.querySelector<HTMLButtonElement>('#observe-trigger')!;
+const observeBack = originalDock.querySelector<HTMLButtonElement>('#observe-back')!;
 originalShare.setAttribute('aria-label', '分享全部场景');
 const shell = document.createElement('div'); shell.className = 'app-shell collection-shell';
 const tabs = document.createElement('nav'); tabs.className = 'collection-tabs'; tabs.setAttribute('aria-label', '场景');
@@ -18,6 +23,7 @@ stage.append(inkCanvas, inkBadges);
 const dialog = document.createElement('dialog'); dialog.className = 'collection-share';
 const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status');
 shell.append(tabs, stage, originalDock, dialog, toast); document.body.replaceChildren(shell);
+installIcons(shell);
 
 let overview: CollectionOverview;
 let active = new URLSearchParams(location.search).get('scene') ?? '';
@@ -33,6 +39,8 @@ let layoutQueue = Promise.resolve();
 let toolbar: HTMLElement | undefined;
 type AnnotationMode = 'select' | 'point' | 'line' | 'screen';
 let annotationMode: AnnotationMode | null = null;
+let observeOpen = false;
+let activeObserveCategory: string | null = null;
 let color = '#ff6b5e';
 let selectedStroke: number | undefined;
 let strokeBefore: ScreenStroke[] | undefined;
@@ -77,7 +85,70 @@ function exitAnnotation(): void {
   markup.finishActive(); markup.setEnabled(false); annotationMode = null;
   shell.classList.remove('annotation-mode');
   if (toolbar) toolbar.hidden = true;
-  originalDock.append(originalShare);
+  mainDock.append(originalShare);
+}
+function setObserveToolbar(open: boolean, keyboard = false): void {
+  if (observeOpen === open) return;
+  observeOpen = open;
+  if (keyboard) originalDock.classList.add('dock-no-motion');
+  originalDock.classList.toggle('is-observing', open);
+  mainDock.classList.toggle('is-current', !open);
+  observeDock.classList.toggle('is-current', open);
+  mainDock.inert = open; observeDock.inert = !open;
+  mainDock.setAttribute('aria-hidden', String(open));
+  observeDock.setAttribute('aria-hidden', String(!open));
+  observeTrigger.setAttribute('aria-expanded', String(open));
+  if (keyboard) requestAnimationFrame(() => originalDock.classList.remove('dock-no-motion'));
+}
+observeTrigger.addEventListener('click', event => { setObserveToolbar(true, event.detail === 0); observeBack.focus({preventScroll:true}); });
+observeBack.addEventListener('click', event => { setObserveToolbar(false, event.detail === 0); observeTrigger.focus({preventScroll:true}); });
+function setObserveCategory(category: string | null): void {
+  activeObserveCategory = activeObserveCategory === category ? null : category;
+  for (const button of originalDock.querySelectorAll<HTMLButtonElement>('[data-observe-category]')) {
+    const selected = button.dataset.observeCategory === activeObserveCategory;
+    button.classList.toggle('active', selected); button.setAttribute('aria-expanded', String(selected));
+  }
+  for (const detail of originalDock.querySelectorAll<HTMLElement>('.observe-detail')) detail.hidden = detail.id !== `observe-${activeObserveCategory}` && !(activeObserveCategory === 'scene' && detail.id === 'render-controls');
+  originalDock.classList.toggle('detail-open', !!activeObserveCategory);
+  syncObserveMode();
+}
+for (const button of originalDock.querySelectorAll<HTMLButtonElement>('[data-observe-category]')) button.addEventListener('click', () => setObserveCategory(button.dataset.observeCategory ?? null));
+for (const button of originalDock.querySelectorAll<HTMLButtonElement>('[data-observe-mode]')) button.addEventListener('click', () => {
+  command(active, `observe-mode:${button.dataset.observeMode}`);
+  syncObserveMode(button.dataset.observeMode);
+});
+originalDock.querySelector('#section-trigger')?.addEventListener('click', () => { if (activeObserveCategory) setObserveCategory(null); command(active, 'section'); });
+for (const kind of ['shading', 'projection'] as const) for (const button of originalDock.querySelectorAll<HTMLButtonElement>(`[data-${kind}]`)) button.addEventListener('click', () => {
+  command(active, `observe-setting:${kind}:${button.dataset[kind]}`);
+  for (const peer of originalDock.querySelectorAll<HTMLButtonElement>(`[data-${kind}]`)) peer.classList.toggle('active', peer === button);
+});
+for (const [id, kind] of [['axes-toggle', 'axes'], ['light-toggle', 'background']] as const) originalDock.querySelector<HTMLInputElement>(`#${id}`)?.addEventListener('change', event => {
+  command(active, `observe-setting:${kind}:${(event.target as HTMLInputElement).checked}`);
+});
+for (const control of ['azimuth', 'elevation', 'intensity'] as const) originalDock.querySelector<HTMLInputElement>(`#light-${control}`)?.addEventListener('input', event => {
+  const value = Number((event.target as HTMLInputElement).value);
+  frames.get(active)?.contentWindow?.postMessage({type:'blind:scene-command', id:active, command:'observe-light', control, value}, location.origin);
+  originalDock.querySelector(`#light-${control}-value`)!.textContent = `${control === 'intensity' ? value : value}${control === 'intensity' ? '%' : '°'}`;
+});
+function syncObserveMode(mode?: string): void {
+  mode ??= frames.get(active)?.contentDocument?.querySelector<HTMLButtonElement>('[data-observe-mode].active')?.dataset.observeMode;
+  for (const button of originalDock.querySelectorAll<HTMLButtonElement>('[data-observe-mode]')) {
+    const selected = button.dataset.observeMode === mode;
+    button.classList.toggle('active', selected); button.setAttribute('aria-pressed', String(selected));
+  }
+  originalDock.classList.toggle('observe-raking', mode === 'raking' && activeObserveCategory === 'light');
+  originalDock.querySelector<HTMLElement>('#light-controls')!.hidden = mode !== 'raking' || activeObserveCategory !== 'light';
+  const source = frames.get(active)?.contentDocument;
+  if (source) {
+    for (const kind of ['shading','projection'] as const) {
+      const selected = source.querySelector<HTMLButtonElement>(`[data-${kind}].active`)?.dataset[kind];
+      for (const button of originalDock.querySelectorAll<HTMLButtonElement>(`[data-${kind}]`)) button.classList.toggle('active', button.dataset[kind] === selected);
+    }
+    for (const id of ['axes-toggle','light-toggle','light-azimuth','light-elevation','light-intensity'] as const) {
+      const target = originalDock.querySelector<HTMLInputElement>(`#${id}`), input = source.querySelector<HTMLInputElement>(`#${id}`);
+      if (target && input) { target.value = input.value; target.checked = input.checked; }
+    }
+  }
 }
 function renderInkBadges(): void {
   inkBadges.replaceChildren();
@@ -238,7 +309,6 @@ async function layout(): Promise<void> {
   const nextMode = cols ? 'split' : 'tabs';
   if (nextMode !== mode) {
     exitAnnotation();
-    showPanelMode(null);
     for (const id of [...frames.keys()]) await unmount(id);
   }
   mode = nextMode;
@@ -262,18 +332,11 @@ function updateFocus(): void {
     if (ready.has(id)) command(id, id === active ? 'activate' : 'deactivate');
   }
 }
-function showPanelMode(mode: 'mesh' | 'render' | 'info' | null): void {
-  for (const [selector, value] of [['.panel-trigger', 'mesh'], ['#render-trigger', 'render'], ['#scene-info-toggle', 'info']] as const) {
-    const button = originalDock.querySelector<HTMLButtonElement>(selector);
-    button?.classList.toggle('active', mode === value);
-    button?.setAttribute('aria-expanded', String(mode === value));
-  }
-}
 function focus(id: string): void {
   if (!cards.has(id) || id === active) return;
   active = id; shareLinks = undefined;
   if (annotationMode) { markup.finishActive(); markup.setEnabled(false); }
-  showPanelMode(null);
+  syncObserveMode();
   if (mode === 'tabs') scheduleLayout(); else updateFocus();
   if (annotationMode && ready.has(id)) {
     sendScope(id);
@@ -287,6 +350,7 @@ window.addEventListener('message', event => {
   if (event.source !== frames.get(id)?.contentWindow) return;
   if (event.data.type === 'blind:scene-ready') {
     ready.add(id); ensureToolbar(id); sendScope(id); command(id, id === active ? 'activate' : 'deactivate');
+    if (id === active) syncObserveMode();
     if (id === active && annotationMode) {command(id,'annotate');sendSurface('mode',annotationMode);syncToolbar();}
   }
   if (event.data.type === 'blind:scene-focus') focus(id);
@@ -304,7 +368,6 @@ window.addEventListener('message', event => {
     markup.clear(); selectedStroke=undefined; strokeHistory.length=0; strokeFuture.length=0;
     notify('视角已改变，批注已隐藏');
   }
-  if (event.data.type === 'blind:scene-panel' && id === active) showPanelMode(event.data.mode);
   if (event.data.type === 'blind:scene-error') notify(`${overview.scenes.find(scene => scene.id === id)?.title}：${event.data.message}`);
   if (event.data.type === 'blind:scene-shortcut' && id === active) void copyLink(event.data.kind as 'view' | 'image');
 });
@@ -393,8 +456,8 @@ window.addEventListener('keydown', event => {
   event.preventDefault();
   void copyLink(event.shiftKey ? 'view' : 'image');
 });
-for (const [selector, action] of [['#fit-view','fit'], ['.panel-trigger','details'], ['#render-trigger','render'], ['#brush-tool','annotate'], ['#scene-info-toggle','info']] as const) {
-  originalDock.querySelector(selector)?.addEventListener('click', () => action==='annotate' ? beginAnnotation() : command(active, action));
+for (const [selector, action] of [['#fit-view','fit'], ['#brush-tool','annotate']] as const) {
+  originalDock.querySelector(selector)?.addEventListener('click', () => action==='annotate' ? (setObserveToolbar(false), beginAnnotation()) : command(active, action));
 }
 
 try {

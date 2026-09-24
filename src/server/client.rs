@@ -124,7 +124,7 @@ pub(super) async fn scene_from_sources(
     if paths.is_empty() {
         return Err(AppError::bad_request("a scene needs at least one file"));
     }
-    use crate::component::{ComponentKind, ComponentSource, SceneComponent};
+    use crate::component::{ComponentKind, ComponentSource, SceneEntity};
     if !display.is_empty() && display.len() != paths.len() {
         return Err(AppError::bad_request(
             "Display option count must match resources",
@@ -137,7 +137,7 @@ pub(super) async fn scene_from_sources(
     }
     let mut meshes = Vec::new();
     let mut attachments = Vec::new();
-    let mut components = Vec::new();
+    let mut entities = Vec::new();
     for (i, path) in paths.iter().enumerate() {
         let options = display.get(i).cloned().unwrap_or_default();
         options
@@ -189,7 +189,7 @@ pub(super) async fn scene_from_sources(
         } else {
             ComponentSource::Attachment(attachments.len())
         };
-        components.push(SceneComponent {
+        entities.push(SceneEntity {
             id: format!("resource-{}", i + 1),
             state: None,
             component: kind.clone(),
@@ -245,10 +245,10 @@ pub(super) async fn scene_from_sources(
         });
     }
     let title = title.unwrap_or_else(|| {
-        if components.len() == 1 {
-            components[0].label.clone()
+        if entities.len() == 1 {
+            entities[0].label.clone()
         } else {
-            format!("{} elements", components.len())
+            format!("{} elements", entities.len())
         }
     });
     Ok(SceneDescriptor {
@@ -258,7 +258,7 @@ pub(super) async fn scene_from_sources(
         created_at: crate::source::now() as u64,
         ttl_days: None,
         meshes,
-        components,
+        entities,
         attachments,
         warnings: Vec::new(),
         collection: None,

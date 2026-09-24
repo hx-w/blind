@@ -1,10 +1,10 @@
 # Scene components
 
-Blind shares files into **one scene**. A component is a display of one source;
-flat groups organize related components. There is no separate timeline or nested
-scene. All geometry in a group retains its relative coordinates. Content surfaces
-occupy world-space rectangles, participate in camera projection and Fit, and can
-be moved independently.
+Blind shares files into **one scene**. A component is a renderer type; an entity
+is one placed instance of that type bound to a source. Flat groups organize
+entities. There is no separate timeline or nested scene. All geometry in a group
+retains its relative coordinates. Content surfaces occupy world-space rectangles
+and participate in camera projection and Fit.
 
 ## Share without configuration
 
@@ -59,7 +59,7 @@ absolute local paths and configured `oss://ALIAS/BUCKET/KEY` references work too
 Unknown fields are rejected. Labels and group names contain 1–120 characters.
 At most 256 resources are accepted. Surface files are limited to 64 MiB.
 
-Unpositioned components are arranged in stable, flat groups in the XY plane.
+Unpositioned entities are arranged in stable, flat groups in the XY plane.
 Geometry keeps its internal relative alignment; surfaces sit beside geometry.
 Explicit positions are absolute world-space coordinates and are never tiled.
 `size` applies only to surfaces, in scene units; default is `[110,70]`.
@@ -70,16 +70,22 @@ its path for an additional instance. A scene may consist entirely of surfaces.
 ## Interaction
 
 - Drag empty space to orbit; existing zoom/pan and Fit controls still work.
-- The scene list selects elements and toggles visibility. It opens by default
+- The scene list selects entities. Each row has an opacity slider and a visibility
+  button; hiding retains the slider value, and dragging it above zero shows the
+  entity again. It opens by default
   only at widths of at least 1100px and heights of at least 600px. It can be
-  opened manually on smaller screens. The list has no property inspector.
-- Details shows common visibility/opacity and type-appropriate settings.
-  Hiding retains nonzero opacity. Zero opacity is hidden; enabling it restores
-  full opacity. Changing opacity above zero shows the element.
+  opened manually on smaller screens. Its 信息 tab holds source details and warnings.
+- Mesh and PTS rows show the current color before the name. Clicking the color
+  opens preset choices below that row; a choice updates only that geometry entity.
+- Every row has a rename action next to the name. Long names show their
+  beginning and end in the row and in 3D; 信息 reveals a scrollable full name.
+  The inline editor accepts the complete label. Mesh Raw/LOD quality sits in the
+  scene list's 信息 tab. Visibility and opacity live in the scene list.
+  Zero opacity is hidden; showing a
+  zero-opacity entity restores full opacity.
 - Surface sizes come from the share configuration. Dragging a surface title navigates
   the scene; the viewer has no drag resize control.
-- Select geometry, then Alt-drag to move it in the camera plane. In the scene
-  list, Alt-arrow moves any selected element in XY; Shift increases the step.
+- Entity positions are fixed during review. The source configuration sets placement.
 - Surface content does not consume scene gestures. Click once to select, double click
   or press Enter to expand and interact. Escape / **返回场景** returns to the same layout.
   Spatial opacity does not reduce expanded readability. Perfetto and HTML own keyboard input
@@ -90,14 +96,36 @@ its path for an additional instance. A scene may consist entirely of surfaces.
 - On macOS, Cmd+C copies an image link for the current view, and Cmd+Shift+C
   copies its view link. On other desktop systems use Ctrl. Text selection and editable fields keep
   their normal copy behavior.
-- The Render tool switches between the existing shadowless matte appearance,
-  adjustable raking light, and surface normals. The chosen mode and light settings
-  are saved in view and image links. Inspection modes show filled surfaces even if
-  wireframe is selected in Details; returning to the matte mode restores wireframe.
+- 观察 opens a second dock ordered by 着色、光照、投影、场景、剖面.
+  Each category expands its controls inside the dock; 剖面 starts drawing. 场景 contains axes and background switches. Raking-light angles and
+  strength appear below the tools only when relevant. 返回 restores the main dock. The chosen mode and light settings
+  are saved in view and image links. Shading remains independent of lighting:
+  a wireframe stays a wireframe under all three lighting modes.
+- 剖面 starts from the selected visible triangle Mesh. Clicking the tool directly
+  starts a line gesture, which defines a camera-relative plane. All visible
+  triangle Meshes join that plane by default; the count in the section window
+  opens a picker to isolate a subset. A checked Mesh without an intersection
+  is marked there. The position
+  slider scans parallel planes. Closed contours become translucent matte planes.
+  The plot can zoom, drag to pan, fit all contours, and place up to two rulers.
+  Ruler points snap to nearby contours; a point on a contour also shows its
+  distance to an opposite contour when a valid crossing exists. Only the Meshes
+  selected for this section contribute, so a second Mesh can show an inter-Mesh gap.
+  While measuring, right or middle drag pans; on touch screens, two fingers pan
+  and pinch to zoom. The wheel zooms around the pointer, and Escape leaves the
+  ruler and clears its lines. Drag the upper-left handle to resize the panel.
+  Pan, size, and measurements are saved in shares. Distances use source mesh
+  coordinates; Blind does not assume a physical unit.
+  Line length provides a fallback plot window, not the intersection extent.
+  The section plane and each selected target's entity and source revision survive sharing.
+  The section window can combine multiple visible Meshes in one plot, with each
+  Mesh shown in its own color and automatically fitted when added. The view tilts
+  slightly after drawing to reveal the matte section plane. PTS and point clouds
+  stay visible but do not expose a triangle section.
 
 ## Renderer contract
 
-`web/src/scene-components.ts` defines the shared component schema,
+`web/src/scene-components.ts` defines the shared entity schema,
 `ComponentCapabilities`, `ComponentRuntime` and `ComponentRegistry`. Each
 renderer registers its type and declares supported presentations (`spatial`,
 `focus`, `fullscreen` for legacy plugins), movement, and input ownership by presentation.
@@ -105,17 +133,18 @@ The protocol still accepts `resizable` for older plugins, but the Viewer ignores
 and has no drag resize control. A legacy plugin declaring only `fullscreen` opens
 in the focus dialog without requesting browser fullscreen.
 The host owns grouping, selection, scene list, layout, focus container and sharing.
-Renderers implement bounds, position, visibility, opacity, presentation, focus,
+Renderers implement bounds, position, visibility, opacity, label, presentation, focus,
 selection and disposal. Geometry adapters retain the existing mesh loader, LOD,
 materials, picking and annotations. Surface adapters share a frame; their content
 factories own loading, interaction and cleanup.
 
-The serialized descriptor (scene schema 5) separates `components` from source
-storage. Every component binds to `{kind:"mesh"|"attachment",index:N}`; source
+The serialized descriptor separates `entities` from source storage. Every entity
+binds to `{kind:"mesh"|"attachment",index:N}`; source
 paths and credentials are never sent in this binding. Source URLs remain revision
 checked by the server. Viewer updates accept **only** ID and mutable presentation
 fields; a viewer cannot replace a source or type through a layout update.
-Old scene descriptors are adapted to the same component interface on read.
+Stored descriptors and public payloads using `components` remain readable.
+Legacy geometry-only scenes synthesize one entity per Mesh or PTS resource.
 
 ## Plugin components (API 1)
 
