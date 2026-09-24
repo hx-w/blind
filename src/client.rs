@@ -48,7 +48,7 @@ enum ClientCommand {
     /// Share files as scene components through the registered Blind server.
     #[command(
         long_about = "Share files with automatic display selection. PLY/STL/OBJ → mesh, PTS → points, logs/text → text, ordinary JSON → json, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
-        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n  blind share --config collection.json --format json\n  generate_collection | blind share --config - --format json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n  {\"kind\":\"collection\",\"schema_version\":1,\"title\":\"Case review\",\"active_scene_id\":\"design\",\"scenes\":[{\"id\":\"design\",\"title\":\"Design\",\"resources\":[{\"path\":\"crown.ply\"}]},{\"id\":\"scan\",\"title\":\"Scan\",\"resources\":[{\"path\":\"scan.ply\"}]}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config, or cwd for --config -, or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, json, html, image or plugin:name. Collection children accept resources/groups or one plugin uri. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply, except --stateless for collections."
+        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n  blind share --config collection.json --format json\n  generate_collection | blind share --config - --format json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n  {\"kind\":\"collection\",\"schema_version\":1,\"title\":\"Case review\",\"active_scene_id\":\"design\",\"scenes\":[{\"id\":\"design\",\"title\":\"Design\",\"resources\":[{\"path\":\"crown.ply\"}]},{\"id\":\"scan\",\"title\":\"Scan\",\"resources\":[{\"path\":\"scan.ply\"}]}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config, or cwd for --config -, or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, json, html, image or plugin:name. Collection children accept resources/groups or one plugin uri. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
     )]
     Share {
         /// File paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
@@ -81,9 +81,6 @@ enum ClientCommand {
         /// Public Blind origin used in generated links (for example https://blind.example.com).
         #[arg(long)]
         host: Option<String>,
-        /// Emit a long self-contained /v/ link instead of storing a short-link registry row.
-        #[arg(long)]
-        stateless: bool,
         /// Link lifetime in whole days; 0 keeps it until its sources become invalid.
         #[arg(long, value_name = "DAYS", default_value_t = crate::scene::DEFAULT_TTL_DAYS)]
         ttl: u32,
@@ -111,7 +108,6 @@ enum OutputFormat {
 
 struct ShareOptions {
     host: Option<String>,
-    stateless: bool,
     ttl_days: u32,
     format: OutputFormat,
 }
@@ -263,7 +259,6 @@ pub async fn run() -> Result<()> {
             labels,
             components,
             host,
-            stateless,
             ttl,
             format,
         } => {
@@ -275,7 +270,6 @@ pub async fn run() -> Result<()> {
                 components,
                 ShareOptions {
                     host,
-                    stateless,
                     ttl_days: ttl,
                     format,
                 },
@@ -897,7 +891,6 @@ async fn share(
 ) -> Result<()> {
     let ShareOptions {
         host,
-        stateless,
         ttl_days,
         format,
     } = options;
@@ -918,10 +911,6 @@ async fn share(
         }
     };
     if let Some(collection) = input.collection {
-        anyhow::ensure!(
-            !stateless,
-            "collection shares require a short link; omit --stateless"
-        );
         if load()?.is_none() {
             join(false, true, false, None, None, None).await?;
         }
@@ -940,7 +929,7 @@ async fn share(
             "collection":{"title":collection.title,"active_scene_id":collection.active_scene_id,"scenes":scenes},
             "origin":host,"ttl_days":ttl_days
         }))).await?;
-        return print_share_payload(payload, format, ttl_days, false);
+        return print_share_payload(payload, format, ttl_days);
     }
     if input
         .meshes
@@ -973,8 +962,8 @@ async fn share(
             paths.len()
         );
     }
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"display":input.display,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"stateless":stateless,"ttl_days":ttl_days}))).await?;
-    print_share_payload(payload, format, ttl_days, stateless)
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"display":input.display,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"ttl_days":ttl_days}))).await?;
+    print_share_payload(payload, format, ttl_days)
 }
 
 fn share_path(p: &PathBuf) -> Result<String> {
@@ -991,15 +980,10 @@ fn share_path(p: &PathBuf) -> Result<String> {
         .map(|p| p.to_string_lossy().into_owned())
 }
 
-fn print_share_payload(
-    payload: Value,
-    format: OutputFormat,
-    ttl_days: u32,
-    stateless: bool,
-) -> Result<()> {
+fn print_share_payload(payload: Value, format: OutputFormat, ttl_days: u32) -> Result<()> {
     let confirmed_ttl = payload["ttl_days"].as_u64();
     if confirmed_ttl.is_some_and(|days| days != u64::from(ttl_days))
-        || (confirmed_ttl.is_none() && (ttl_days != crate::scene::DEFAULT_TTL_DAYS || stateless))
+        || (confirmed_ttl.is_none() && ttl_days != crate::scene::DEFAULT_TTL_DAYS)
     {
         bail!(
             "Server did not confirm the requested link lifetime; update the Blind server and retry"
@@ -1238,10 +1222,6 @@ mod tests {
             (
                 vec!["blind", "share", "--config", "scene.json", "--ttl", "30"],
                 30,
-            ),
-            (
-                vec!["blind", "share", "mesh.ply", "--stateless", "--ttl", "1"],
-                1,
             ),
         ] {
             let ClientCommand::Share { ttl, .. } = Cli::try_parse_from(args).unwrap().command

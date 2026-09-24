@@ -3,6 +3,24 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-09-24
+
+### Changed
+
+- All shares now use short links. The `--stateless` option and `/v/` links have
+  been removed, so existing long links must be shared again.
+
+### Fixed
+
+- Open a collection child link in that scene, and keep annotation controls
+  available if another child fails to load.
+- Load scene details once at startup, avoid creating a 3D viewer for invalid
+  links, and stop drawing frames while the viewer is idle.
+- Expand large JSON previews in batches, and avoid repeated source reads when
+  auditing links that reference the same asset.
+- Limit memory held by concurrent asset responses; clearing all links no longer
+  reads their sources first.
+
 ## [0.17.3] - 2026-09-23
 
 ### Fixed

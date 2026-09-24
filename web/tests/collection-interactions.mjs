@@ -48,9 +48,19 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
       args:['--use-angle=swiftshader','--enable-unsafe-swiftshader']});
     const page = await browser.newPage({viewport:{width:1280,height:800}});
     const errors = [];
+    let overviewRequests = 0;
+    page.on('request', request => {
+      if (request.method() === 'GET' && request.url() === `${origin}/api/v1/scenes/${shared.viewer_url.split('/').at(-1)}`) overviewRequests++;
+    });
     page.on('pageerror', error => errors.push(error.message));
     await page.goto(shared.viewer_url);
     await page.locator('.collection-shell.collection-split').waitFor();
+    assert.equal(overviewRequests, 1, 'opening a collection should fetch its overview once');
+    const childPage = await browser.newPage({viewport:{width:1280,height:800}});
+    await childPage.goto(shared.scenes[1].viewer_url);
+    await childPage.locator('#loading-state').waitFor({state:'hidden'});
+    assert.equal(await childPage.locator('.collection-shell').count(), 0, 'a child viewer URL should open one scene');
+    await childPage.close();
     assert.equal(await page.locator('.collection-shell .topbar').count(), 0);
     assert.equal(await page.locator('.collection-shell .review-dock #share-view').count(), 1);
     assert.ok((await page.locator('.collection-stage').boundingBox()).y <= 10);
@@ -200,6 +210,14 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await widePage.locator('.collection-shell.collection-split').waitFor();
     assert.equal(await widePage.locator('.collection-card').count(), 5);
     await widePage.close();
+    const failedPage = await browser.newPage({viewport:{width:390,height:844}});
+    await failedPage.route('**/api/v1/scenes/*?scene=*', route => route.abort());
+    await failedPage.goto(shared.viewer_url);
+    await failedPage.locator('.collection-shell').waitFor();
+    await failedPage.locator('#brush-tool').click();
+    assert.equal(await failedPage.locator('.collection-shell > .review-dock').isVisible(), true,
+      'failed child scenes must not hide the only touch controls');
+    await failedPage.close();
   } finally {
     await browser?.close();
     if (server) { server.kill(); await new Promise(resolve => server.once('exit', resolve)); }

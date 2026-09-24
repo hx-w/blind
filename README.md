@@ -149,8 +149,7 @@ SFTP is unnecessary in this case. The first `blind share` can register locally
 automatically if no Client registration exists. Different OS users, or a host
 Client accessing a containerized Server, use the remote SFTP flow.
 
-Use `--stateless` for a long self-contained link. See
-[registration, recovery and deployment](docs/client-server.md) for details.
+See [registration, recovery and deployment](docs/client-server.md) for details.
 
 Open `owner_url` on your phone for your own review. Give other people
 `viewer_url` or `image_url`.
@@ -199,7 +198,7 @@ from the config file's directory; group members are 1-based resource indices:
 ```
 
 `--config` is mutually exclusive with positional Meshes, `--title`, and
-`--label`; `--host`, `--stateless`, and `--format` still apply. Unknown JSON
+`--label`; `--host` and `--format` still apply. Unknown JSON
 fields, empty resources, bad labels, duplicate group members, and out-of-range
 indices fail before any scene is registered. See `blind share --help` for the
 complete contract.
@@ -224,9 +223,8 @@ collection URL, a composite image URL, and scene-specific view and image URLs. A
 directly into `blind share --config - --format json`; relative paths then use
 the current directory. Each child has its own camera, selection, and styles.
 The viewer splits when every pane fits, otherwise it shows scene tabs. Its
-single toolbar acts on the focused scene. Collections require short links, so
-`--stateless` does not apply. See [the sharing contract](docs/sharing.md) for
-the full schema and reshare API.
+single toolbar acts on the focused scene. Collections use short links. See
+[the sharing contract](docs/sharing.md) for the full schema and reshare API.
 
 In the interactive viewer, choose a Mesh in **详情** and edit **3D 标注**.
 Labels use a small leader and an attachment dot, follow the Mesh in 3D, and keep
@@ -298,8 +296,6 @@ this contract instead of reimplementing scene or lifecycle logic.
 - One finger or primary drag uses a full arcball rotation without polar limits.
 - Two fingers pinch to zoom and move together to pan.
 - Fit frames all visible Meshes.
-- The axis control selects canonical front, back, left, right, top, or bottom
-  views.
 - Details selects the current Mesh and keeps visibility, opacity, color, and
   presentation controls together.
 - Each Mesh loads as LOD by default. Details can switch it to Raw without
@@ -403,8 +399,7 @@ blind doctor --clean-invalid
 blind doctor --clear-all
 ```
 
-These actions affect `/s/` short links. Stateless `/v/` links have no SQLite
-row to list or delete.
+These actions affect `/s/` short links.
 
 ## Sharing
 
@@ -426,8 +421,7 @@ active-scene limit; reaching that limit rejects new links instead of evicting ol
 
 Browser reshares inherit the lifetime setting and preserve annotations. A changed
 snapshot starts its own lifetime; sharing an identical active snapshot reuses its
-link without extending its expiry. `--stateless` also honors `--ttl` for newly
-created links; older stateless links keep their original no-expiry behavior.
+link without extending its expiry.
 Non-default lifetimes require a server that confirms TTL support.
 
 The share action captures the current camera, presentation state, and visible
@@ -449,9 +443,6 @@ responding. Restarting the server keeps links valid. The internal scene key
 encrypts link payloads; it is not a login credential and has no routine
 user-facing maintenance command. The PAT remains the credential for control
 API operations.
-
-`blind share --stateless` is the explicit exception: it emits a long encrypted
-`/v/` URL and writes no registry row.
 
 Interactive WebGL and offscreen WebGPU use the same matte material definition,
 color-space rules, camera state, deterministic overlap bias, and light model.
@@ -562,7 +553,6 @@ can still require a cold compilation.
 | `GET /api/v1/scenes/:token/meshes/:index/lod` | Scene capability | Generate or stream an in-memory review LOD |
 | `POST /api/v1/scenes/:token/share` | Scene capability | Capture camera and style state |
 | `GET /s/:code` | Short scene capability | Open the default viewer link |
-| `GET /v/:token` | Stateless scene capability | Open an explicit long link |
 | `GET /i/:token.png` | Scene capability | Render a fresh PNG |
 
 ## License

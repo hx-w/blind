@@ -1,7 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    fs,
-    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -139,8 +137,13 @@ pub fn target_primitives(mesh_count: usize) -> usize {
         .clamp(MIN_MESH_PRIMITIVES, MAX_MESH_PRIMITIVES)
 }
 
-pub fn build(path: &Path, format: MeshFormat, target_primitives: usize) -> Result<LodAsset> {
-    build_bytes(&fs::read(path)?, format, target_primitives)
+#[cfg(test)]
+pub fn build(
+    path: &std::path::Path,
+    format: MeshFormat,
+    target_primitives: usize,
+) -> Result<LodAsset> {
+    build_bytes(&std::fs::read(path)?, format, target_primitives)
 }
 
 pub fn build_bytes(bytes: &[u8], format: MeshFormat, target_primitives: usize) -> Result<LodAsset> {

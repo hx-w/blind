@@ -20,8 +20,7 @@ reverse proxy with appropriate access control.
 Default public and owner capabilities are independently generated six-character
 secrets with per-client invalid-code rate limiting and a seven-day absolute
 lifetime. They are intended for trusted private networks, not as a replacement
-for internet-facing authentication. Use `blind share --stateless` only when a
-long self-contained capability is preferable.
+for internet-facing authentication.
 
 ## Remote sources
 

@@ -69,7 +69,7 @@ Mesh labels stay attached as the camera changes. The interactive viewer projects
 their anchors into screen space and lays out readable text with a leader and
 attachment dot. Hidden Meshes and anchors outside the camera view hide their
 labels. Label placement adapts to the viewport and available space; text and
-world-space anchors are preserved in both registry and stateless scene records.
+world-space anchors are preserved in registry scene records.
 Labels spanning multiple Meshes draw a low-obstruction corner frame around the
 visible members. Their label is selectable and fits the camera to the group.
 Individual labels remain visible and participate in the same collision avoidance.
@@ -130,7 +130,7 @@ digits, `_`, or `-` (up to 64 characters). Collection and child titles are
 1 to 120 characters. At most 256 resources are allowed in total.
 `active_scene_id` is optional and defaults to the first child. Relative paths
 use the config file's directory, or the working directory with `--config -`.
-Unknown fields fail validation. `--stateless` is unavailable for collections.
+Unknown fields fail validation.
 
 ```sh
 blind share --config collection.json --format json
@@ -168,9 +168,7 @@ the old link stays unchanged.
 
 The interactive viewer reports unavailable Meshes and retains successfully
 loaded ones, so one failed source does not throw away a large review scene.
-Unknown short-code requests are rate limited per client. `blind share
---stateless` remains available for a long, self-contained `/v/` link that
-writes no registry row.
+Unknown short-code requests are rate limited per client.
 
 ## Instant image rendering
 

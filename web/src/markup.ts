@@ -94,12 +94,6 @@ export class MarkupCanvas {
 
   setColor(color: string): void { this.color = color; }
 
-  undo(): void {
-    this.cancelActive();
-    if (!this.strokes.pop()) return;
-    this.changed();
-  }
-
   clear(): void {
     this.cancelActive();
     if (this.strokes.length === 0) return;

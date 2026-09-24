@@ -1,11 +1,14 @@
+use std::path::Path;
+#[cfg(test)]
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use tokio::io::AsyncReadExt;
 
 pub const PALETTE: [&str; 6] = [
@@ -503,19 +506,8 @@ impl SceneDescriptor {
             .collect()
     }
 
-    pub fn link_ttl_days(&self, stateless: bool) -> u32 {
-        self.ttl_days
-            .unwrap_or(if stateless { 0 } else { DEFAULT_TTL_DAYS })
-    }
-
-    pub fn stateless_expired_at(&self, now: u64) -> bool {
-        match self.ttl_days {
-            Some(days) if days > 0 => self
-                .created_at
-                .checked_add(u64::from(days) * 86_400)
-                .is_none_or(|expires| expires <= now),
-            _ => false,
-        }
+    pub fn link_ttl_days(&self) -> u32 {
+        self.ttl_days.unwrap_or(DEFAULT_TTL_DAYS)
     }
 
     pub fn set_labels(&mut self, labels: Vec<Option<MeshLabel>>) -> Result<()> {
@@ -595,6 +587,7 @@ impl SceneDescriptor {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn create(paths: &[PathBuf], title: Option<String>) -> Result<Self> {
         if paths.is_empty() {
             bail!("at least one Mesh path is required");
@@ -665,6 +658,7 @@ impl SceneDescriptor {
     }
 
     /// Cheap staleness gate: every source file must still exist with the recorded size.
+    #[cfg(test)]
     pub async fn verify_source_lengths(&self) -> Result<(), SceneGone> {
         for mesh in &self.meshes {
             let path = Path::new(&mesh.path);
@@ -676,6 +670,7 @@ impl SceneDescriptor {
         Ok(())
     }
 
+    #[cfg(test)]
     pub async fn validate(&self) -> Result<(), SceneGone> {
         self.verify_source_lengths().await?;
         for mesh in &self.meshes {
@@ -835,12 +830,13 @@ impl SceneDescriptor {
     }
 }
 
+#[cfg(test)]
 fn modified_nanos(metadata: &std::fs::Metadata) -> Option<u64> {
     let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
     u64::try_from(duration.as_nanos()).ok()
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn change_nanos(metadata: &std::fs::Metadata) -> Option<u64> {
     use std::os::unix::fs::MetadataExt;
     let seconds = u64::try_from(metadata.ctime()).ok()?;
@@ -848,7 +844,7 @@ fn change_nanos(metadata: &std::fs::Metadata) -> Option<u64> {
     seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 fn change_nanos(_metadata: &std::fs::Metadata) -> Option<u64> {
     None
 }
@@ -922,10 +918,12 @@ impl MeshFormat {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 #[error("scene source is gone")]
 pub struct SceneGone;
 
+#[cfg(test)]
 pub async fn hash_file(path: &Path) -> Result<String> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha256::new();
@@ -1195,7 +1193,7 @@ mod tests {
         };
         scene.set_labels(vec![Some(label.clone())]).unwrap();
         let codec = crate::token::TokenCodec::new([17; 32]);
-        let token = codec.seal(crate::token::Scope::Public, &scene).unwrap();
+        let token = codec.seal(&scene).unwrap();
         let mut reopened = codec.open(&token).unwrap().scene;
         assert_eq!(reopened.meshes[0].label, Some(label.clone()));
 
@@ -1237,10 +1235,7 @@ mod tests {
         scene.set_label_groups(vec![group.clone()]).unwrap();
 
         let codec = crate::token::TokenCodec::new([19; 32]);
-        let reopened = codec
-            .open(&codec.seal(crate::token::Scope::Public, &scene).unwrap())
-            .unwrap()
-            .scene;
+        let reopened = codec.open(&codec.seal(&scene).unwrap()).unwrap().scene;
         assert_eq!(reopened.label_groups, [group]);
         for invalid in [vec![0], vec![0, 0], vec![0, 2]] {
             assert!(

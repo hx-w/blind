@@ -23,6 +23,8 @@
 .json-node > summary { width: max-content; max-width: 100%; padding: 2px 7px 2px 1px; border-radius: 4px; cursor: pointer; list-style-position: inside; }
 .json-node > summary:hover, .json-node > summary:focus-visible { background: var(--surface-2); }
 .json-children { margin-left: 10px; padding-left: 13px; border-left: 1px solid var(--line); }
+.json-more { display: block; margin: 4px 0 4px 18px; padding: 2px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--text); cursor: pointer; }
+.json-more:hover, .json-more:focus-visible { background: var(--surface-2); }
 .json-leaf { padding: 1px 0 1px 18px; white-space: pre; }
 .json-key { color: var(--text); }.json-shape, .json-muted { color: var(--text-tertiary); }
 .json-string { color: oklch(0.76 0.11 155); }.json-number { color: oklch(0.78 0.11 70); }.json-boolean { color: oklch(0.75 0.10 255); }.json-null { color: var(--text-tertiary); }

@@ -61,6 +61,7 @@ export const jsonContent: ContentFactory = (url) => {
     catch { throw new Error('JSON 格式无效或不是 UTF-8'); }
     const tree = document.createElement('div'); tree.className = 'json-tree'; tree.setAttribute('role', 'tree');
     let remaining = 5000;
+    const pageSize = 100;
     const add = (parent: HTMLElement, key: string | null, item: unknown, depth: number): void => {
       if (remaining-- <= 0 || depth > 32) {
         const cut = document.createElement('span'); cut.className = 'json-muted'; cut.textContent = '… 其余内容已折叠'; parent.append(cut); return;
@@ -70,26 +71,35 @@ export const jsonContent: ContentFactory = (url) => {
       };
       if (item !== null && typeof item === 'object') {
         const array = Array.isArray(item);
-        const entries = array ? item.length : countKeys(item);
-        const details = document.createElement('details'); details.className = 'json-node'; details.open = depth < 2;
+        const keys = array ? undefined : Object.keys(item);
+        const entries = array ? item.length : keys!.length;
+        const details = document.createElement('details'); details.className = 'json-node'; details.open = depth === 0;
         const summary = document.createElement('summary'); summary.append(keyNode());
         const shape = document.createElement('span'); shape.className = 'json-shape';
         shape.textContent = `${array ? '[' : '{'} ${entries > 5000 ? '5000+' : entries} ${array ? '项' : '键'} ${array ? ']' : '}'}`; summary.append(shape);
         details.append(summary);
         const children = document.createElement('div'); children.className = 'json-children';
-        if (array) {
-          for (let index = 0; index < item.length; index++) {
-            if (remaining <= 0) { add(children, null, undefined, depth + 1); break; }
-            add(children, String(index), item[index], depth + 1);
+        let next = 0;
+        let more: HTMLButtonElement | undefined;
+        const fill = () => {
+          more?.remove(); more = undefined;
+          const end = Math.min(next + pageSize, entries);
+          while (next < end && remaining > 0) {
+            const childKey = array ? String(next) : keys![next];
+            const child = array ? (item as unknown[])[next] : (item as Record<string, unknown>)[childKey];
+            add(children, childKey, child, depth + 1);
+            next++;
           }
-        } else {
-          for (const childKey in item) {
-            if (!Object.hasOwn(item, childKey)) continue;
-            if (remaining <= 0) { add(children, null, undefined, depth + 1); break; }
-            add(children, childKey, (item as Record<string, unknown>)[childKey], depth + 1);
+          if (next < entries && remaining > 0) {
+            more = document.createElement('button'); more.type = 'button'; more.className = 'json-more'; more.textContent = `显示更多（剩余 ${entries - next} 项）`;
+            more.addEventListener('click', fill); children.append(more);
+          } else if (next < entries) {
+            const cut = document.createElement('span'); cut.className = 'json-muted'; cut.textContent = '… 其余内容已折叠'; children.append(cut);
           }
-        }
+        };
+        details.addEventListener('toggle', () => { if (details.open && next === 0) fill(); });
         details.append(children); parent.append(details);
+        if (details.open) fill();
       } else {
         const row = document.createElement('div'); row.className = 'json-leaf'; row.append(keyNode());
         const literal = document.createElement('span'); literal.className = `json-${item === null ? 'null' : typeof item}`;
@@ -99,11 +109,6 @@ export const jsonContent: ContentFactory = (url) => {
         } else literal.textContent = String(item);
         row.append(literal); parent.append(row);
       }
-    };
-    const countKeys = (item: object): number => {
-      let count = 0;
-      for (const key in item) if (Object.hasOwn(item, key) && ++count > 5000) break;
-      return count;
     };
     add(tree, null, value, 0); element.replaceChildren(tree);
   }).catch(error => {

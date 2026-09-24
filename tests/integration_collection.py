@@ -119,7 +119,6 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
         assert api(f'/api/v1/scenes/{new_token}/meshes/0?scene=scan')[0] == 410
         assert api(f'/api/v1/scenes/{new_token}/meshes/0?scene=design')[0] == 200
         assert api(f'/api/v1/scenes/{new_token}')[0] == 200
-        assert cli('share', '--config', '-', '--stateless', input=json.dumps(config), ok=False).find('short link') >= 0
         cli('leave')
         assert api(f'/api/v1/scenes/{token}')[0] == 410
         assert api(f'/s/{new_token}')[0] == 410

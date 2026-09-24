@@ -10,6 +10,7 @@ import { MarkupCanvas } from './markup';
 import { MeshViewer } from './viewer';
 import { SurfaceEditor } from './surface';
 import { installShortcuts } from './shortcuts';
+import {takeInitialScene} from './bootstrap';
 
 const $ = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -72,9 +73,9 @@ const toast = $('#toast');
 const brushTool = $('#brush-tool') as HTMLButtonElement;
 const palette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 
-// The viewer may be mounted under a configured base path, so the s/v marker
+// The viewer may be mounted under a configured base path, so the short-link marker
 // can sit after an arbitrary prefix (e.g. /blind/s/{token}).
-const token = location.pathname.match(/\/(?:s|v)\/([^/]+)$/)?.[1];
+const token = location.pathname.match(/\/s\/([^/]+)$/)?.[1];
 const sessionKey = token && sceneId ? `blind.collection.${token}.${sceneId}` : undefined;
 // With a <base href> injected, fragment-only links resolve against the base
 // URL and would navigate away from the scene; scroll and focus manually.
@@ -82,7 +83,7 @@ $('.skip-link').addEventListener('click', (event) => {
   event.preventDefault();
   viewerElement.focus();
 });
-let owner = token ? restoreOwner(token) : undefined;
+let owner = token ? sessionStorage.getItem(`blind.owner.${token}`) ?? undefined : undefined;
 let scene: PublicScene | undefined;
 let sceneReady = false;
 let components: ComponentViewer | undefined;
@@ -190,7 +191,7 @@ async function start(): Promise<void> {
   }
   try {
     startLongLoadHint();
-    scene = await loadScene(token, owner);
+    scene = takeInitialScene<PublicScene>() ?? await loadScene(token, owner);
     if (embedded && sessionKey) {
       try {
         const saved = JSON.parse(sessionStorage.getItem(sessionKey) ?? 'null') as import('./api').SceneUpdate | null;
@@ -294,17 +295,6 @@ function startLongLoadHint(): void {
 function finishLoading(): void {
   window.clearTimeout(longLoadTimer);
   loading.hidden = true;
-}
-
-function restoreOwner(sceneToken: string): string | undefined {
-  const params = new URLSearchParams(location.hash.slice(1));
-  const fromHash = params.get('owner') ?? undefined;
-  if (fromHash) {
-    sessionStorage.setItem(`blind.owner.${sceneToken}`, fromHash);
-    history.replaceState(null, '', location.pathname + location.search);
-    return fromHash;
-  }
-  return sessionStorage.getItem(`blind.owner.${sceneToken}`) ?? undefined;
 }
 
 function hideViewerControls(): void {

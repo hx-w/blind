@@ -99,8 +99,6 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         status, html = api('/')
         assets = re.findall(rb'(?:src|href)="(/assets/[^"]+)"', html)
         assert assets and all(api(a.decode())[0] == 200 for a in assets), 'viewer assets must be served at the root'
-        stateless = json.loads(run([BIN/'blind', 'share', mesh, '--stateless', '--format', 'json'], env))
-        assert stateless['viewer_url'].startswith(origin+'/v/')
         token = output['viewer_url'].rsplit('/', 1)[1]
         status, scene = api('/api/v1/scenes/'+token)
         assert status == 200 and scene['source']['user'] == pwd.getpwuid(os.getuid()).pw_name
@@ -140,17 +138,14 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
             if days == 0:
                 permanent_token = ttl_token
                 permanent_reshare = reshared_token
-        assert output['ttl_days'] == 7 and stateless['ttl_days'] == 7
-        permanent_long = json.loads(run([BIN/'blind', 'share', ttl_mesh, '--ttl', '0', '--stateless', '--format', 'json'], env))
-        assert permanent_long['ttl_days'] == 0
-        assert api('/api/v1/scenes/'+permanent_long['viewer_url'].rsplit('/', 1)[1])[1]['ttl_days'] == 0
+        assert output['ttl_days'] == 7
         ttl_mesh.unlink()
         assert api('/api/v1/scenes/'+permanent_token+'/meshes/0')[0] == 410
         assert api('/api/v1/scenes/'+permanent_token)[0] == 410
         assert api('/api/v1/control/doctor/clean-invalid', server_config['pat'], {})[0] == 200
         assert registry.execute('SELECT count(*) FROM scenes WHERE code IN (?,?)', (permanent_token, permanent_reshare)).fetchone()[0] == 0
         registry.close()
-        print('PASS: default/custom/permanent TTL, annotation reshare, PNG, stateless TTL and source-invalid cleanup')
+        print('PASS: default/custom/permanent TTL, annotation reshare, PNG, source-invalid cleanup')
 
         sshd = shutil.which('sshd') or '/usr/sbin/sshd'
         sftp_server = next(p for p in ['/usr/libexec/sftp-server', '/usr/lib/openssh/sftp-server', '/usr/lib/ssh/sftp-server'] if Path(p).is_file())

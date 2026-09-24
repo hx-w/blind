@@ -12,7 +12,7 @@ blind status --json
 
 The Client preserves everything after the first `://`, including a nested URL
 and query. One plugin URI is allowed per share, without `--label` overrides.
-`--title`, `--host`, `--stateless`, and `--format` retain their usual meanings.
+`--title`, `--host`, and `--format` retain their usual meanings.
 Unknown schemes are rejected by the target Server. A failed remote connection
 never falls back to a local Server.
 

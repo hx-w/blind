@@ -13,7 +13,8 @@ use subtle::ConstantTimeEq;
 
 use crate::{
     config::{Config, random_b64, registry_path},
-    scene::{SceneDescriptor, hash_file},
+    scene::{MeshRef, SceneDescriptor},
+    source::{Observed, SceneSource, SourceError, Sources},
     token::{Scope, TokenCodec},
 };
 
@@ -96,13 +97,43 @@ struct InvalidRow {
 }
 
 struct ObservedSource {
+    path: String,
     byte_size: u64,
+    modified_ns: Option<u64>,
+    change_ns: Option<u64>,
     revision: String,
 }
 
+impl ObservedSource {
+    fn matches(&self, mesh: &MeshRef, check_metadata: bool) -> bool {
+        self.path == mesh.path
+            && self.byte_size == mesh.byte_size
+            && self.revision == mesh.revision
+            && (!check_metadata
+                || (mesh
+                    .modified_ns
+                    .is_none_or(|value| self.modified_ns == Some(value))
+                    && mesh
+                        .change_ns
+                        .is_none_or(|value| self.change_ns == Some(value))))
+    }
+}
+
+impl From<Observed> for ObservedSource {
+    fn from(observed: Observed) -> Self {
+        Self {
+            path: observed.path,
+            byte_size: observed.size,
+            modified_ns: observed.modified_ns,
+            change_ns: observed.change_ns,
+            revision: observed.revision,
+        }
+    }
+}
+
 struct SourceCache {
-    entries: HashMap<String, Option<ObservedSource>>,
-    insertion_order: VecDeque<String>,
+    entries: HashMap<(Option<String>, String), ObservedSource>,
+    insertion_order: VecDeque<(Option<String>, String)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -225,13 +256,13 @@ impl Registry {
                 return Ok(existing);
             }
         }
-        let days = scene.link_ttl_days(false);
+        let days = scene.link_ttl_days();
         let expires_at = if days == 0 {
             i64::MAX
         } else {
             now + i64::from(days) * 86_400
         };
-        let payload = self.codec.seal(Scope::Public, scene)?;
+        let payload = self.codec.seal(scene)?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -604,20 +635,22 @@ async fn scene_sources_are_valid(
 async fn single_scene_sources_are_valid(
     scene: &SceneDescriptor,
     cache: &mut SourceCache,
-    sources: &crate::source::Sources,
-) -> Result<bool, crate::source::SourceError> {
-    if scene.source.is_some() || scene.meshes.iter().any(|m| crate::oss::is_oss(&m.path)) {
-        return match sources.validate(scene).await {
-            Ok(()) => Ok(true),
-            Err(crate::source::SourceError::Gone) => Ok(false),
-            Err(error) => Err(error),
-        };
-    }
+    sources: &Sources,
+) -> Result<bool, SourceError> {
+    sources.validate_source(scene)?;
     for mesh in &scene.meshes {
-        let Some(observed) = cache.observe(&mesh.path).await else {
-            return Ok(false);
+        let observed = match cache
+            .observe(sources, scene.source.as_ref(), &mesh.path)
+            .await
+        {
+            Ok(observed) => observed,
+            Err(SourceError::Gone) | Err(SourceError::TooLarge) => return Ok(false),
+            Err(error) => return Err(error),
         };
-        if observed.byte_size != mesh.byte_size || observed.revision != mesh.revision {
+        if !observed.matches(
+            mesh,
+            scene.source.is_some() || crate::oss::is_oss(&mesh.path),
+        ) {
             return Ok(false);
         }
     }
@@ -634,29 +667,31 @@ impl SourceCache {
         }
     }
 
-    async fn observe(&mut self, source: &str) -> Option<&ObservedSource> {
-        if !self.entries.contains_key(source) {
-            let observed = async {
-                let path = Path::new(source);
-                let metadata = tokio::fs::metadata(path).await.ok()?;
-                if !metadata.is_file() {
-                    return None;
-                }
-                Some(ObservedSource {
-                    byte_size: metadata.len(),
-                    revision: hash_file(path).await.ok()?,
-                })
-            }
-            .await;
+    async fn observe(
+        &mut self,
+        sources: &Sources,
+        source: Option<&SceneSource>,
+        path: &str,
+    ) -> Result<&ObservedSource, SourceError> {
+        let key = (
+            if crate::oss::is_oss(path) {
+                None
+            } else {
+                source.map(|source| source.id.clone())
+            },
+            path.to_owned(),
+        );
+        if !self.entries.contains_key(&key) {
+            let observed = ObservedSource::from(sources.observe(source, path, false).await?);
             if self.entries.len() >= Self::MAX_ENTRIES
                 && let Some(oldest) = self.insertion_order.pop_front()
             {
                 self.entries.remove(&oldest);
             }
-            self.insertion_order.push_back(source.to_owned());
-            self.entries.insert(source.to_owned(), observed);
+            self.insertion_order.push_back(key.clone());
+            self.entries.insert(key.clone(), observed);
         }
-        self.entries.get(source).and_then(Option::as_ref)
+        Ok(&self.entries[&key])
     }
 }
 
@@ -952,7 +987,7 @@ mod tests {
             .unwrap();
         let valid = registry.register(&scene).unwrap();
 
-        let payload = registry.codec.seal(Scope::Public, &scene).unwrap();
+        let payload = registry.codec.seal(&scene).unwrap();
         let current = now();
         {
             let connection = registry.lock().unwrap();

@@ -433,58 +433,71 @@ async fn doctor(clean_invalid: bool, clear_all: bool) -> Result<()> {
     } else {
         DoctorAction::Audit
     };
-    let (report, through_server, repaired_secret) =
-        match server::doctor_registry(&config, action).await? {
-            Some(report) => (report, true, false),
-            None => {
-                let _lease = server::acquire_offline_maintenance_lease()?;
-                match Registry::open(&config) {
-                    Err(error) if clear_all && config.secret_bytes().is_err() => {
-                        let removed = Registry::clear_without_key().with_context(|| {
-                            format!("could not clear registry after invalid scene key: {error:#}")
-                        })?;
-                        config.repair_invalid_secret()?;
-                        let registry = Registry::open(&config)?;
-                        registry.repair()?;
-                        (DoctorRegistryReport::cleared(removed), false, true)
-                    }
-                    Err(error) if clear_all && registry::is_key_mismatch(&error) => {
-                        let removed = Registry::clear_without_key()?;
-                        let registry = Registry::open(&config)?;
-                        registry.repair()?;
+    let (report, through_server, repaired_secret) = match server::doctor_registry(&config, action)
+        .await?
+    {
+        Some(report) => (report, true, false),
+        None => {
+            let _lease = server::acquire_offline_maintenance_lease()?;
+            match Registry::open(&config) {
+                Err(error) if clear_all && config.secret_bytes().is_err() => {
+                    let removed = Registry::clear_without_key().with_context(|| {
+                        format!("could not clear registry after invalid scene key: {error:#}")
+                    })?;
+                    config.repair_invalid_secret()?;
+                    let registry = Registry::open(&config)?;
+                    registry.repair()?;
+                    (DoctorRegistryReport::cleared(removed), false, true)
+                }
+                Err(error) if clear_all && registry::is_key_mismatch(&error) => {
+                    let removed = Registry::clear_without_key()?;
+                    let registry = Registry::open(&config)?;
+                    registry.repair()?;
+                    (DoctorRegistryReport::cleared(removed), false, false)
+                }
+                Err(error) => return Err(error),
+                Ok(registry) => {
+                    registry.repair()?;
+                    if matches!(action, DoctorAction::ClearAll) {
+                        let removed = registry.clear()?;
                         (DoctorRegistryReport::cleared(removed), false, false)
-                    }
-                    Err(error) => return Err(error),
-                    Ok(registry) => {
-                        registry.repair()?;
+                    } else {
                         let audit = registry.audit().await?;
                         let removed = match action {
                             DoctorAction::Audit => 0,
                             DoctorAction::CleanInvalid => registry.clean_invalid(&audit).await?,
-                            DoctorAction::ClearAll => registry.clear()?,
+                            DoctorAction::ClearAll => unreachable!(),
                         };
                         (DoctorRegistryReport::new(&audit, removed), false, false)
                     }
                 }
             }
-        };
+        }
+    };
     println!(
         "ok  sqlite  integrity, schema, index, WAL, and permissions ready at {}{}",
         config::registry_path()?.display(),
         if through_server { " (live server)" } else { "" }
     );
-    println!(
-        "ok  links   {} valid, {} invalid, {} total",
-        report.valid,
-        report.invalid(),
-        report.total()
-    );
-    println!("    valid         {}", report.valid);
-    println!("    expired       {}", report.expired);
-    println!("    source gone   {}", report.source_gone);
-    println!("    unavailable   {}", report.unavailable);
-    println!("    tombstoned    {}", report.tombstoned);
-    println!("    corrupt       {}", report.corrupt);
+    if report.audit_skipped {
+        println!(
+            "ok  links   {} removed without source audit",
+            report.removed
+        );
+    } else {
+        println!(
+            "ok  links   {} valid, {} invalid, {} total",
+            report.valid,
+            report.invalid(),
+            report.total()
+        );
+        println!("    valid         {}", report.valid);
+        println!("    expired       {}", report.expired);
+        println!("    source gone   {}", report.source_gone);
+        println!("    unavailable   {}", report.unavailable);
+        println!("    tombstoned    {}", report.tombstoned);
+        println!("    corrupt       {}", report.corrupt);
+    }
     for line in lod_cache_lines(report.lod_cache.as_ref(), through_server) {
         println!("{line}");
     }

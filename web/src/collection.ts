@@ -1,15 +1,11 @@
 import './collection.css';
 import {loadCollection, shareCollection, type CollectionOverview, type SceneUpdate, type ShareResponse, type ScreenStroke, type CollectionLayout} from './api';
 import {MarkupCanvas} from './markup';
+import {takeInitialScene} from './bootstrap';
 
-const token = location.pathname.match(/\/(?:s|v)\/([^/]+)$/)?.[1] ?? '';
+const token = location.pathname.match(/\/s\/([^/]+)$/)?.[1] ?? '';
 if (!token) throw new Error('Missing collection token');
-const hashOwner = new URLSearchParams(location.hash.slice(1)).get('owner');
-if (hashOwner) {
-  sessionStorage.setItem(`blind.owner.${token}`, hashOwner);
-  history.replaceState(null, '', location.pathname + location.search);
-}
-const owner = hashOwner ?? sessionStorage.getItem(`blind.owner.${token}`) ?? undefined;
+const owner = sessionStorage.getItem(`blind.owner.${token}`) ?? undefined;
 const originalDock = document.querySelector('.review-dock')!.cloneNode(true) as HTMLElement;
 const originalShare = originalDock.querySelector<HTMLButtonElement>('#share-view')!;
 originalShare.setAttribute('aria-label', '分享全部场景');
@@ -170,8 +166,11 @@ function syncToolbar(): void {
   }
 }
 function beginAnnotation(): void {
-  ensureToolbar(active); annotationMode='point'; shell.classList.add('annotation-mode');
-  toolbar?.querySelector('.surface-actions')?.append(originalShare);
+  if (!ready.has(active)) { notify('场景尚未就绪，无法标注'); return; }
+  ensureToolbar(active);
+  if (!toolbar) { notify('标注工具暂时不可用'); return; }
+  annotationMode='point'; shell.classList.add('annotation-mode');
+  toolbar.querySelector('.surface-actions')?.append(originalShare);
   sendScope(active);
   command(active,'annotate'); syncToolbar();
 }
@@ -292,7 +291,7 @@ window.addEventListener('message', event => {
   }
   if (event.data.type === 'blind:scene-focus') focus(id);
   if (event.data.type === 'blind:scene-tool-mode' && id === active) {
-    if (event.data.annotation && !annotationMode) {
+    if (event.data.annotation && !annotationMode && ready.has(id)) {
       ensureToolbar(id);
       const selected=frames.get(id)?.contentDocument?.querySelector<HTMLButtonElement>('#surface-toolbar [data-surface-mode][aria-pressed="true"]');
       annotationMode=(selected?.dataset.surfaceMode as AnnotationMode | undefined) || 'select';
@@ -399,7 +398,7 @@ for (const [selector, action] of [['#fit-view','fit'], ['.panel-trigger','detail
 }
 
 try {
-  overview = await loadCollection(token, owner);
+  overview = takeInitialScene<CollectionOverview>() ?? await loadCollection(token, owner);
   strokeLayout=overview.layout ?? undefined;
   markup.load(overview.strokes ?? []);
   if (!overview.scenes.some(scene => scene.id === active)) active = overview.active_scene_id;

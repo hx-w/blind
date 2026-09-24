@@ -269,6 +269,31 @@ test('large JSON uses a bounded preview with a link to the original file', async
   } finally { await page.close(); }
 });
 
+test('JSON preview creates branches on demand and pages large arrays', async () => {
+  const data = structuredClone(scene); data.meshes = []; data.label_groups = []; data.state.strokes = [];
+  data.attachments = [{id:'json',label:'Large array',byte_size:60000,url:'/test/attachments/0',unavailable:null}];
+  data.components = [{id:'json',component:'json',source:{kind:'attachment',index:0},label:'Large array',group:null,
+    position:[0,0,0],size:[80,50],visible:true,opacity:1}];
+  const page = await browser.newPage({viewport:{width:900,height:700}});
+  try {
+    await page.route('**/api/v1/scenes/**', route => route.request().method() === 'GET' ? route.fulfill({json:data}) : route.continue());
+    await page.route('**/test/attachments/*', route => route.fulfill({contentType:'application/json',body:JSON.stringify({rows:Array.from({length:10000},(_,i) => ({index:i}))})}));
+    await page.goto(`${origin}/s/fixture`);
+    await page.locator('#loading-state').waitFor({state:'hidden'});
+    const tree = page.locator('.component-json .json-tree');
+    await tree.waitFor();
+    assert.ok(await tree.locator('.json-node').count() <= 2);
+    await page.locator('[data-component="json"] .component-enter').dblclick();
+    const dialogTree = page.locator('.component-dialog .json-tree');
+    await dialogTree.waitFor();
+    await dialogTree.locator('details').nth(1).evaluate(node => { node.open = true; });
+    await dialogTree.locator('.json-more').waitFor();
+    assert.ok(await dialogTree.locator('.json-node').count() <= 102);
+    await dialogTree.locator('.json-more').click();
+    assert.ok(await dialogTree.locator('.json-node').count() <= 202);
+  } finally { await page.close(); }
+});
+
 after(async () => { await browser?.close(); server?.closeAllConnections(); await new Promise(resolve => server ? server.close(resolve) : resolve()); });
 
 async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null, meshes = null) {

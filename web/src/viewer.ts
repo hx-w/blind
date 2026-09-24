@@ -71,7 +71,13 @@ export class MeshViewer {
   readonly renderListeners = new Set<() => void>();
   componentUpdates?: () => SceneUpdate['components'];
   get activeCamera(): THREE.PerspectiveCamera | THREE.OrthographicCamera { return this.camera; }
-  invalidate(): void { this.dirty = true; }
+  invalidate(): void {
+    this.dirty = true;
+    if (!this.frameRequested) {
+      this.frameRequested = true;
+      requestAnimationFrame(this.animate);
+    }
+  }
   navigatePointer(event: PointerEvent): void { this.renderer.domElement.dispatchEvent(new PointerEvent('pointerdown', event)); }
   navigateWheel(event: WheelEvent): void { this.renderer.domElement.dispatchEvent(new WheelEvent('wheel', event)); }
   renderGeometryBand(canvas: HTMLCanvasElement, minZ: number, maxZ: number): void {
@@ -145,7 +151,8 @@ export class MeshViewer {
   private labelGroups: MeshLabelGroup[] = [];
   private state!: ViewState;
   private selected = 0;
-  private dirty = true;
+  private dirty = false;
+  private frameRequested = false;
   private fitAnimation?: number;
   private pointerStart: { x: number; y: number } | null = null;
   private lastTap = { index: -1, time: 0 };
@@ -181,8 +188,8 @@ export class MeshViewer {
     this.renderer.domElement.addEventListener('pointerdown', this.pointerDown);
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
     this.controls.addEventListener('start', () => { this.cancelFit(); this.prepareOrbit(); this.onViewChangeStart?.(); });
-    this.controls.addEventListener('change', () => { this.updateClipping(); this.dirty = true; });
-    this.animate();
+    this.controls.addEventListener('change', () => { this.updateClipping(); this.invalidate(); });
+    this.invalidate();
   }
 
   async load(scene: PublicScene, skipHidden = false): Promise<void> {
@@ -264,7 +271,7 @@ export class MeshViewer {
   setInteractionEnabled(enabled: boolean): void { this.controls.enabled = enabled; this.interactionEnabled = enabled; this.pointerStart = null; }
   get annotations(): SurfaceAnnotation[] { return this.state?.annotations ?? []; }
   setAnnotations(marks: SurfaceAnnotation[], selected?: string, preview?: Vec3): void {
-    this.state.annotations = marks; this.annotationSelection = selected; this.annotationPreview = preview; this.dirty = true;
+    this.state.annotations = marks; this.annotationSelection = selected; this.annotationPreview = preview; this.invalidate();
   }
   hasSurface(index: number): boolean {
     let found = false;
@@ -405,14 +412,14 @@ export class MeshViewer {
     this.refreshLabels();
   }
 
-  refreshLabels(): void { this.labels.invalidateLayout(); this.dirty = true; }
+  refreshLabels(): void { this.labels.invalidateLayout(); this.invalidate(); }
   setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); this.onModelChange?.(); } }
   setShading(shading: ViewState['shading']): void { this.state.shading = shading; this.applyMaterials(); }
   get renderMode(): RenderMode { return this.state.render_mode ?? 'matte'; }
   get lightSettings(): LightSettings { return {...(this.state.light ?? {azimuth: 45, elevation: 20, intensity: 1})}; }
   setRenderMode(mode: RenderMode): void { this.state.render_mode = mode; this.applyMaterials(); }
   setLight(settings: LightSettings): void { this.state.light = {...settings}; this.applyMaterials(); }
-  setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.dirty = true; }
+  setAxes(visible: boolean): void { this.state.axes = visible; this.axes.visible = visible; this.invalidate(); }
   setBackground(background: ViewState['background']): void {
     this.state.background = background;
     const theme = background === 'light' ? shader.background_light : shader.background_dark;
@@ -422,7 +429,7 @@ export class MeshViewer {
     document.documentElement.dataset.theme = background;
     document.documentElement.style.setProperty('--scene-background', theme);
     document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme);
-    this.dirty = true;
+    this.invalidate();
   }
 
   setProjection(projection: ViewState['projection']): void {
@@ -495,7 +502,7 @@ export class MeshViewer {
     this.orthographic.left = -orthographicHeight * aspect / 2; this.orthographic.right = orthographicHeight * aspect / 2;
     this.orthographic.top = orthographicHeight / 2; this.orthographic.bottom = -orthographicHeight / 2; this.orthographic.updateProjectionMatrix();
     this.updateClipping();
-    this.dirty = true;
+    this.invalidate();
   }
 
   // Single bookkeeping point for both load paths, so the raw/LOD accounting
@@ -513,7 +520,7 @@ export class MeshViewer {
     this.resizeHelpers();
     this.prepareOrbit();
     this.updateClipping();
-    this.dirty = true;
+    this.invalidate();
   }
 
   private applyState(): void {
@@ -571,7 +578,7 @@ export class MeshViewer {
         light: this.lightSettings,
       });
     }));
-    this.dirty = true;
+    this.invalidate();
   }
 
   private restoreCamera(state: ViewState): void {
@@ -710,7 +717,7 @@ export class MeshViewer {
     // setCamera calculates its radius before moving the gizmo to the new
     // target. Refresh via the public API so the first drag matches later zooms.
     this.controls.update();
-    this.dirty = true;
+    this.invalidate();
   }
 
   // Refresh the cached joint bounds; only visibility and model changes alter them.
@@ -721,7 +728,7 @@ export class MeshViewer {
   private resizeHelpers(): void {
     const box = this.visibleBounds; if (box.isEmpty()) return; const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.001);
     this.axes.scale.setScalar(size * 0.09); this.axes.position.copy(box.min);
-    this.dirty = true;
+    this.invalidate();
   }
   private pointerDown = (event: PointerEvent): void => { this.pointerStart = { x: event.clientX, y: event.clientY }; };
   private pointerUp = (event: PointerEvent): void => {
@@ -748,20 +755,19 @@ export class MeshViewer {
   };
   private disposeModels(): void { for (const model of this.models) { this.scene.remove(model.object); disposeObject(model.object); } this.models = []; }
   private animate = (): void => {
-    requestAnimationFrame(this.animate);
-    if (this.dirty) {
-      const width = Math.max(this.root.clientWidth, 1); const height = Math.max(this.root.clientHeight, 1);
-      this.renderer.getSize(this.rendererSize);
-      // Resizing clears the drawing buffer, even at the same size. Do it only
-      // when needed, immediately before rendering, never in ResizeObserver.
-      if (this.rendererSize.x !== width || this.rendererSize.y !== height) this.renderer.setSize(width, height, false);
-      this.surfaceInk.update(this.annotations, this.camera, width, height, index => !!this.models[index]?.info.visible && this.models[index].info.opacity > 0, (point, index) => this.surfacePointVisible(point, index), this.annotationSelection, this.annotationPreview);
-      for (const render of this.renderListeners) render();
-      this.renderer.render(this.scene, this.camera);
-      this.labels.render(this.models, this.labelGroups, this.camera, this.selected);
-      this.onRender?.();
-      this.dirty = false;
-    }
+    this.frameRequested = false;
+    if (!this.dirty) return;
+    this.dirty = false;
+    const width = Math.max(this.root.clientWidth, 1); const height = Math.max(this.root.clientHeight, 1);
+    this.renderer.getSize(this.rendererSize);
+    // Resizing clears the drawing buffer, even at the same size. Do it only
+    // when needed, immediately before rendering, never in ResizeObserver.
+    if (this.rendererSize.x !== width || this.rendererSize.y !== height) this.renderer.setSize(width, height, false);
+    this.surfaceInk.update(this.annotations, this.camera, width, height, index => !!this.models[index]?.info.visible && this.models[index].info.opacity > 0, (point, index) => this.surfacePointVisible(point, index), this.annotationSelection, this.annotationPreview);
+    for (const render of this.renderListeners) render();
+    this.renderer.render(this.scene, this.camera);
+    this.labels.render(this.models, this.labelGroups, this.camera, this.selected);
+    this.onRender?.();
   };
 }
 

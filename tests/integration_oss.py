@@ -181,6 +181,10 @@ with tempfile.TemporaryDirectory(prefix='blind-oss-test-') as temp:
         assert api('/api/v1/scenes', pat, {'paths': [first]})[0] == 200
         (tmp/'local.ply').write_bytes(PAYLOAD)
         assert api('/api/v1/scenes', pat, {'paths': ['local.ply', first]})[0] == 200
+        state['requests'].clear()
+        audit = json.loads(api('/api/v1/control/doctor', pat)[1])
+        assert audit['valid'] >= 3
+        assert sorted((access, bucket) for access, bucket, _ in state['requests']) == [('key-a', 'bucket-a'), ('key-b', 'bucket-b')]
         state['mode'] = '403'
         assert api(mesh_url)[0] == 503
         audit = json.loads(api('/api/v1/control/doctor', pat)[1])
@@ -288,6 +292,12 @@ with tempfile.TemporaryDirectory(prefix='blind-oss-test-') as temp:
         assert api(f'/api/v1/scenes/{token}/meshes/0')[0] == 410
         assert 'archive' in run('oss', 'list')
         print('PASS: oversized replacement, same-size mutation, 404 and alias removal invalidate shares')
+
+        state['requests'].clear()
+        cleared = json.loads(api('/api/v1/control/doctor/clear-all', pat, {})[1])
+        assert cleared['audit_skipped'] and cleared['removed'] > 0 and cleared['corrupt'] == 0
+        assert not state['requests']
+        print('PASS: doctor caches repeated source hashes and clear-all skips remote reads')
     finally:
         release_read.set()
         server.terminate()
