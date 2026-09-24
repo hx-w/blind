@@ -53,7 +53,8 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
                 data = r.read()
                 return r.status, json.loads(data) if 'json' in r.headers.get('Content-Type', '') else data
         except urllib.error.HTTPError as e:
-            return e.code, json.loads(e.read())
+            data = e.read()
+            return e.code, json.loads(data) if 'json' in e.headers.get('Content-Type', '') else data.decode('utf-8', 'replace')
 
     def start(args, name, environment=env):
         log = open(tmp/(name+'.log'), 'w+')
@@ -206,7 +207,9 @@ LogLevel VERBOSE
         assert api('/api/v1/clients/join', envelope['token'], request)[0] != 200
         print('PASS: reusable and revocable invitations, independent identities, writable-key rejection, verified read-only SFTP')
 
-        status, output = api('/api/v1/client/scenes', a['credential'], {'paths':[str(mesh)], 'source_id':b['source']['id'], 'ttl_days':0})
+        status, error = api('/api/v1/client/scenes', a['credential'], {'paths':[str(mesh)], 'source_id':b['source']['id'], 'ttl_days':0})
+        assert status == 422 and 'source_id' in error, error
+        status, output = api('/api/v1/client/scenes', a['credential'], {'paths':[str(mesh)], 'ttl_days':0})
         assert status == 200, output
         assert output['ttl_days'] == 0
         assert output['source']['id'] == a['source']['id']
