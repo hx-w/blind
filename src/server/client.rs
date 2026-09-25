@@ -562,22 +562,19 @@ async fn create_collection_scene(
     })
     .map_err(anyhow::Error::from)?;
     let collection = scene.collection.as_ref().unwrap();
-    let mut entries = vec![(&collection.first_id, &scene)];
-    entries.extend(
-        collection
-            .scenes
-            .iter()
-            .map(|entry| (&entry.id, &entry.scene)),
-    );
+    let entries: Vec<_> = scene.scene_entries().collect();
     response["kind"] = serde_json::json!("collection");
     response["active_scene_id"] = serde_json::json!(collection.active_scene_id);
-    response["scenes"] = serde_json::json!(entries.iter().map(|(id, part)| serde_json::json!({
-        "id":id,"title":part.title,
-        "viewer_url":format!("{}?scene={id}", response["viewer_url"].as_str().unwrap_or_default()),
-        "image_url":format!("{}?scene={id}", response["image_url"].as_str().unwrap_or_default()),
-        "resources":part.meshes.iter().map(|m| serde_json::json!({"path":m.path,"revision":m.revision})).collect::<Vec<_>>(),
-        "warnings":part.warnings
-    })).collect::<Vec<_>>());
+    response["scenes"] = serde_json::json!(entries.iter().map(|(id, part)| {
+        let id = id.expect("collection scenes have IDs");
+        serde_json::json!({
+            "id":id,"title":part.title,
+            "viewer_url":format!("{}?scene={id}", response["viewer_url"].as_str().unwrap_or_default()),
+            "image_url":format!("{}?scene={id}", response["image_url"].as_str().unwrap_or_default()),
+            "resources":part.meshes.iter().map(|m| serde_json::json!({"path":m.path,"revision":m.revision})).collect::<Vec<_>>(),
+            "warnings":part.warnings
+        })
+    }).collect::<Vec<_>>());
     response["status"] = serde_json::json!(if entries
         .iter()
         .any(|(_, part)| !part.warnings.is_empty())

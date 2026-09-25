@@ -11,14 +11,11 @@ pub(super) async fn get_scene(
     let owner = owner_matches(&headers, &state, &opened);
     if let Some(collection) = &opened.scene.collection {
         if !query.contains_key("scene") {
-            let mut scenes =
-                vec![serde_json::json!({"id":collection.first_id,"title":opened.scene.title})];
-            scenes.extend(
-                collection
-                    .scenes
-                    .iter()
-                    .map(|entry| serde_json::json!({"id":entry.id,"title":entry.scene.title})),
-            );
+            let scenes: Vec<_> = opened
+                .scene
+                .scene_entries()
+                .map(|(id, scene)| serde_json::json!({"id":id.expect("collection scenes have IDs"),"title":scene.title}))
+                .collect();
             return Ok((
                 no_store(),
                 Json(serde_json::json!({
@@ -286,21 +283,6 @@ pub(super) fn expand_response_reservation(
     Ok(())
 }
 
-#[cfg(test)]
-mod response_budget_tests {
-    use super::*;
-
-    #[test]
-    fn response_releases_memory_only_when_body_is_dropped() {
-        let memory = Arc::new(tokio::sync::Semaphore::new(1));
-        let permit = memory.clone().try_acquire_owned().unwrap();
-        let body = budgeted_body(Bytes::from_static(b"mesh"), permit);
-        assert_eq!(memory.available_permits(), 0);
-        drop(body);
-        assert_eq!(memory.available_permits(), 1);
-    }
-}
-
 pub(super) fn lod_memory_permits(byte_size: u64) -> u32 {
     byte_size
         .saturating_mul(LOD_MEMORY_EXPANSION)
@@ -412,25 +394,19 @@ pub(super) async fn render_image(
             render_single_image(&state, token, scene, Some(id), true, None).await?
         } else {
             tokio::time::timeout(Duration::from_secs(180), async {
-                let mut images = Vec::with_capacity(collection.scenes.len() + 1);
-                for (index, (id, scene)) in std::iter::once((&collection.first_id, &opened.scene))
-                    .chain(
-                        collection
-                            .scenes
-                            .iter()
-                            .map(|entry| (&entry.id, &entry.scene)),
-                    )
-                    .enumerate()
-                {
+                let scene_count = opened.scene.scene_entries().count();
+                let mut images = Vec::with_capacity(scene_count);
+                for (index, (id, scene)) in opened.scene.scene_entries().enumerate() {
+                    let id = id.expect("collection scenes have IDs");
                     let size = crate::collection_image::scene_viewport_size(
-                        collection.scenes.len() + 1,
+                        scene_count,
                         collection.layout,
                         index,
                     )
                     .map_err(|error| AppError::internal(&error.to_string()))?;
                     let png = render_single_image(&state, token, scene, Some(id), true, Some(size))
                         .await?;
-                    images.push((id.clone(), scene.title.clone(), png));
+                    images.push((id.to_owned(), scene.title.clone(), png));
                 }
                 let active = collection.active_scene_id.clone();
                 let layout = collection.layout;
@@ -618,12 +594,10 @@ pub(super) async fn view_scene(
         )?;
     }
     let mut response = serve_index(state.config.base_path())?;
-    let mut scenes = vec![&opened.scene];
-    if let Some(collection) = &opened.scene.collection {
-        scenes.extend(collection.scenes.iter().map(|entry| &entry.scene));
-    }
-    let mut origins: Vec<_> = scenes
-        .into_iter()
+    let mut origins: Vec<_> = opened
+        .scene
+        .scene_entries()
+        .map(|(_, scene)| scene)
         .flat_map(|scene| &scene.entities)
         .filter_map(|c| c.renderer.as_ref())
         .flat_map(|r| r.frame_origins.iter())
@@ -683,4 +657,19 @@ pub(super) async fn asset(
             },
         )
         .body(Body::from(asset.data.into_owned()))?)
+}
+
+#[cfg(test)]
+mod response_budget_tests {
+    use super::*;
+
+    #[test]
+    fn response_releases_memory_only_when_body_is_dropped() {
+        let memory = Arc::new(tokio::sync::Semaphore::new(1));
+        let permit = memory.clone().try_acquire_owned().unwrap();
+        let body = budgeted_body(Bytes::from_static(b"mesh"), permit);
+        assert_eq!(memory.available_permits(), 0);
+        drop(body);
+        assert_eq!(memory.available_permits(), 1);
+    }
 }

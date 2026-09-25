@@ -97,9 +97,7 @@ export interface MeshLabelGroup {
 }
 
 export interface PublicScene {
-  entities?: SceneEntity[];
-  /** Read old scene payloads during migration. */
-  components?: SceneEntity[];
+  entities: SceneEntity[];
   ttl_days?: number;
   source?: { id: string; name: string; host: string; user: string } | null;
   title: string;

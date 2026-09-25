@@ -16,6 +16,15 @@ const scene = {
   state: { selected: 0, shading: 'flat', projection: 'perspective', background: 'dark', axes: false,
     frame: { width: 1280, height: 800 }, camera: null, strokes: [{color:'#ff6b5e',aspect:1.6,points:[[0.2,0.2],[0.4,0.3]]}] },
 };
+function publicScene(data) {
+  if (data.entities) return data;
+  return {...data,entities:data.meshes.map((mesh,index)=>({
+    id:`mesh-${index}`,component:mesh.format==='pts'?'points':'mesh',source:{kind:'mesh',index},
+    label:mesh.label?.text ?? mesh.name,
+    group:data.label_groups?.find(group=>group.meshes.includes(index))?.text ?? null,
+    position:mesh.translation ?? [0,0,0],size:null,visible:mesh.visible,opacity:mesh.opacity,
+  }))};
+}
 let browser, server, origin, shared;
 async function clickDisplay(page) {
   if (await page.locator('.dock-observe').getAttribute('aria-hidden') === 'true') await page.locator('#observe-trigger').click();
@@ -33,17 +42,19 @@ async function sectionContourPair(page) {
     const {width,height} = canvas;
     const pixels = canvas.getContext('2d').getImageData(0,0,width,height).data;
     let left = null, right = null;
+    const rect=canvas.getBoundingClientRect();
     for (let y=8;y<height-8;y+=2) for (let x=8;x<width-8;x+=2) {
       const offset = (y*width+x)*4;
       const [red,green,blue] = pixels.subarray(offset,offset+3);
       const blueContour = blue > 185 && blue > red+55 && blue > green+25;
       const amberContour = red > 220 && green > 140 && blue < 140;
       if (!blueContour && !amberContour) continue;
+      const clientX=rect.left+(x+.5)*rect.width/width, clientY=rect.top+(y+.5)*rect.height/height;
+      if (document.elementFromPoint(clientX,clientY) !== canvas) continue;
       if (!left || x<left.x) left={x,y};
       if (!right || x>right.x) right={x,y};
     }
     if (!left || !right || right.x-left.x<25) throw new Error(`No usable contour in the section plot: ${JSON.stringify({width,height,left,right})}`);
-    const rect=canvas.getBoundingClientRect();
     return [left,right].map(point=>[rect.left+(point.x+.5)*rect.width/width,rect.top+(point.y+.5)*rect.height/height]);
   });
 }
@@ -57,7 +68,7 @@ before(async () => {
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({viewer_url: `${origin}/s/fixture`, image_url: `${origin}/i/fixture.png`, origin, hosts: []}));
       } else if (path.startsWith('/api/v1/scenes/')) {
-        res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(scene));
+        res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(publicScene(scene)));
       } else if (path.startsWith('/mesh/')) {
         res.setHeader('Content-Type', 'application/ply'); res.end(fixture);
       } else if (path.startsWith('/assets/') && !path.includes('..')) {
@@ -128,7 +139,7 @@ test('render tool and desktop copy shortcuts preserve inspection settings in sha
     assert.equal(await page.locator('#light-controls').isVisible(), true);
     assert.equal(await page.locator('[data-observe-mode="raking"]').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.locator('[data-observe-mode="normals"]').getAttribute('aria-pressed'), 'false');
-    await page.waitForTimeout(280);
+    await page.waitForFunction(height => document.querySelector('.review-dock').getBoundingClientRect().height > height + 80, compactHeight);
     const lightHeight = await page.locator('.review-dock').evaluate(element => element.getBoundingClientRect().height);
     assert.ok(lightHeight > compactHeight + 80);
     if (process.env.BLIND_TEST_SCREENSHOTS) {
@@ -381,7 +392,7 @@ test('JSON component selects on click and opens on double click without resize o
   const data = structuredClone(scene); data.label_groups = []; data.state.strokes = [];
   data.meshes = data.meshes.slice(0, 1);
   data.attachments = [{id:'json',label:'Report',byte_size:40,url:'/test/attachments/0',unavailable:null}];
-  data.components = [
+  data.entities = [
     {id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',group:null,position:[0,0,0],size:null,visible:true,opacity:1},
     {id:'report',component:'json',source:{kind:'attachment',index:0},label:'Report',group:null,position:[40,0,0],size:[40,32],visible:true,opacity:1},
   ];
@@ -424,7 +435,7 @@ test('JSON component selects on click and opens on double click without resize o
 test('large JSON uses a bounded preview with a link to the original file', async () => {
   const data = structuredClone(scene); data.meshes = []; data.label_groups = []; data.state.strokes = [];
   data.attachments = [{id:'large',label:'Large report',byte_size:4 * 1024 * 1024 + 100,url:'/test/attachments/0',unavailable:null}];
-  data.components = [{id:'large',component:'json',source:{kind:'attachment',index:0},label:'Large report',group:null,
+  data.entities = [{id:'large',component:'json',source:{kind:'attachment',index:0},label:'Large report',group:null,
     position:[0,0,0],size:[80,50],visible:true,opacity:1}];
   const page = await browser.newPage({viewport:{width:900,height:700}});
   try {
@@ -442,7 +453,7 @@ test('large JSON uses a bounded preview with a link to the original file', async
 test('JSON preview creates branches on demand and pages large arrays', async () => {
   const data = structuredClone(scene); data.meshes = []; data.label_groups = []; data.state.strokes = [];
   data.attachments = [{id:'json',label:'Large array',byte_size:60000,url:'/test/attachments/0',unavailable:null}];
-  data.components = [{id:'json',component:'json',source:{kind:'attachment',index:0},label:'Large array',group:null,
+  data.entities = [{id:'json',component:'json',source:{kind:'attachment',index:0},label:'Large array',group:null,
     position:[0,0,0],size:[80,50],visible:true,opacity:1}];
   const page = await browser.newPage({viewport:{width:900,height:700}});
   try {
@@ -469,7 +480,7 @@ after(async () => { await browser?.close(); server?.closeAllConnections(); await
 async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null, meshes = null) {
   const page = await browser.newPage({viewport, deviceScaleFactor: 2});
   if (meshes) await page.route('**/mesh/*', route => route.fulfill({contentType:'application/ply', body: meshes[Number(new URL(route.request().url()).pathname.split('/').at(-1))]}));
-  if (sceneOverride) await page.route('**/api/v1/scenes/**', route => route.request().method() === 'GET' ? route.fulfill({json:sceneOverride}) : route.continue());
+  if (sceneOverride) await page.route('**/api/v1/scenes/**', route => route.request().method() === 'GET' ? route.fulfill({json:publicScene(sceneOverride)}) : route.continue());
   if (markupResizeDelay) await page.addInitScript(delay => {
     const NativeResizeObserver = window.ResizeObserver;
     window.ResizeObserver = class extends NativeResizeObserver {
@@ -685,8 +696,9 @@ test('a label spanning multiple Meshes draws a focusable frame beside individual
 });
 
 test('opaque geometry covers ordinary labels but the selected label stays in front', async () => {
-  const ungrouped = {...scene,label_groups:[]};
-  const page = await openPage({width:1280,height:800},0,ungrouped);
+  const plane=planePly(5);
+  const ungrouped = {...scene,label_groups:[],meshes:scene.meshes.map(mesh=>({...mesh,byte_size:Buffer.byteLength(plane)}))};
+  const page = await openPage({width:1280,height:800},0,ungrouped,[plane,plane]);
   try {
     await selectSceneMesh(page, 1);
     await page.waitForTimeout(350);
@@ -744,7 +756,7 @@ test('selecting a group member lifts only its label and group caption', async ()
   } finally {await page.close();}
 });
 
-test('an ordinary group label remains pointer-accessible through wireframe openings', async () => {
+test('an ordinary group label remains pointer-accessible over a wireframe scene', async () => {
   const fixtureScene = structuredClone(scene);
   fixtureScene.meshes.push({...fixtureScene.meshes[1],name:'Third Mesh',label:{text:'Third Mesh'}});
   fixtureScene.state.selected = 2;
@@ -755,7 +767,7 @@ test('an ordinary group label remains pointer-accessible through wireframe openi
       const group = document.querySelector('.mesh-group-label');
       const dot = document.querySelector('.mesh-label-anchor');
       const root = document.querySelector('.canvas-root').getBoundingClientRect();
-      const x = Number(dot.getAttribute('cx'))+8, y = Number(dot.getAttribute('cy'))+8;
+      const x = Number(dot.getAttribute('cx'))+60, y = Number(dot.getAttribute('cy'))+8;
       // Pointer-down triggers a render. Keep this synthetic test position fixed
       // while the normal label layout recomputes its inline transform.
       const style = document.createElement('style');
@@ -783,7 +795,7 @@ for (const viewport of [{width:390,height:844},{width:320,height:700},{width:740
       name:`${name} / ${role}`,label:{text:`${name} / ${role}`},source_url:`/dense-mesh/${group*2+member}`})));
     dense.label_groups=names.map((text,index)=>({text,meshes:[index*2,index*2+1]}));
     const page = await browser.newPage({viewport,deviceScaleFactor:2});
-    await page.route('**/api/v1/scenes/**',route=>route.fulfill({json:dense}));
+    await page.route('**/api/v1/scenes/**',route=>route.fulfill({json:publicScene(dense)}));
     await page.route('**/dense-mesh/*',route=>{
       const index=Number(route.request().url().split('/').at(-1)), group=Math.floor(index/2);
       const lines=fixture.toString().trim().split('\n'), start=lines.indexOf('end_header')+1;
@@ -1387,7 +1399,7 @@ test('wireframe gaps expose component input while painted edges remain occluders
     const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#ff0000'}]};
     data.state={...data.state,projection,shading,strokes:[],camera:{position:[0,0,10],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
     data.attachments=[{id:'log',label:'Occluded log',byte_size:20,url:'/wireframe-log'}];
-    data.components=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
+    data.entities=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
       {id:'log',component:'text',source:{kind:'attachment',index:0},label:'Log',position:[0,0,-1],size:[4,4],visible:true,opacity:1}];
     const page=await browser.newPage({viewport:{width:800,height:800},deviceScaleFactor:2});
     await page.route('**/wireframe-log',r=>r.fulfill({contentType:'text/plain',body:'Visible through wireframe'}));
@@ -1511,7 +1523,7 @@ test('spatial content respects depth and stays fixed during pointer and keyboard
     const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#ff0000'}, {...scene.meshes[1],translation:[100,0,0]}]};
     data.state={...data.state,selected:1,strokes:[],camera:{position:[0,0,10],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
     data.attachments=[{id:'image',label:'Depth image',byte_size:100,url:'/depth.svg'}];
-    data.components=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
+    data.entities=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
       {id:'image',component:type,source:{kind:'attachment',index:0},label:'Image',position:[0,0,z],size:[4,4],visible:true,opacity:1},
       {id:'other-mesh',component:'mesh',source:{kind:'mesh',index:1},label:'Other mesh',position:[100,0,0],visible:true,opacity:1}];
     const page=await browser.newPage({viewport:{width:800,height:800}});
@@ -1523,11 +1535,11 @@ test('spatial content respects depth and stays fixed during pointer and keyboard
       const p=await centerPixel(page);
       assert.ok(z<0 ? p[0]>p[2]*2 : type==='image' ? p[2]>p[0]*2 : p[0]<p[2]*2,`${type} depth ${z}: ${p}`);
       if (type==='image' && z>0) {
-        data.components[1].opacity=.5;
+        data.entities[1].opacity=.5;
         await page.reload();await page.waitForFunction(()=>document.documentElement.dataset.renderStatus==='ready');
         const mixed=await centerPixel(page);
         assert.ok(mixed[0]>60 && mixed[2]>mixed[0] && mixed[1]<5,`half-opacity image must blend with the rear mesh, not the scene background: ${mixed}`);
-        data.components[1].opacity=1;
+        data.entities[1].opacity=1;
       }
       await page.goto(`${origin}/s/fixture`);await page.locator('#loading-state').waitFor({state:'hidden'});
       if(z<0) {
@@ -1545,20 +1557,20 @@ test('spatial content respects depth and stays fixed during pointer and keyboard
       await page.mouse.move(400,400);await page.mouse.down();await page.mouse.move(450,410,{steps:8});await page.mouse.up();
       let after=await captureShare(page);
       assert.notDeepEqual(after.state.camera,before,'navigation must still work over overlapping content');
-      assert.deepEqual(after.entities.map(c=>c.position),data.components.map(c=>c.position));
+      assert.deepEqual(after.entities.map(c=>c.position),data.entities.map(c=>c.position));
       if (z>0) {
         const header=page.locator('.component-handle');const box=await header.boundingBox();
         await page.mouse.move(box.x+box.width*.2,box.y+box.height*.5);await page.mouse.down();
         await page.mouse.move(box.x+box.width*.2+30,box.y+box.height*.5+20,{steps:5});await page.mouse.up();
         const headerDrag=await captureShare(page);
-        assert.deepEqual(headerDrag.entities.map(c=>c.position),data.components.map(c=>c.position),'title drags cannot move content');
+        assert.deepEqual(headerDrag.entities.map(c=>c.position),data.entities.map(c=>c.position),'title drags cannot move content');
         assert.notDeepEqual(headerDrag.state.camera,after.state.camera,'title drags navigate the scene');
       }
       await page.locator('#scene-tree-toggle').click();
       const row=page.locator('.scene-tree-row').getByRole('button',{name:'Image',exact:true});
       await row.focus();await page.keyboard.press('Alt+ArrowRight');
       after=await captureShare(page);
-      assert.deepEqual(after.entities.map(c=>c.position),data.components.map(c=>c.position),'position shortcuts are disabled');
+      assert.deepEqual(after.entities.map(c=>c.position),data.entities.map(c=>c.position),'position shortcuts are disabled');
     } finally {await page.close();}
   }
 });
@@ -1572,7 +1584,7 @@ test('translucent DOM layers blend once and respect intervening geometry from bo
   })));
   const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#00ff00'}]};
   data.attachments=['red','blue'].map(color=>({id:color,label:color,byte_size:100,url:`/alpha-${color}.png`}));
-  data.components=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Middle mesh',position:[0,0,0],visible:true,opacity:1},
+  data.entities=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Middle mesh',position:[0,0,0],visible:true,opacity:1},
     {id:'rear',component:'image',source:{kind:'attachment',index:0},label:'Red rear',position:[0,0,-1],size:[4,4],visible:true,opacity:1},
     {id:'front',component:'image',source:{kind:'attachment',index:1},label:'Blue front',position:[0,0,1],size:[4,4],visible:true,opacity:.5}];
   await page.route('**/alpha-*.png',r=>r.fulfill({contentType:'image/png',body:Buffer.from(colors[r.request().url().includes('red')?'red':'blue'],'base64')}));
@@ -1580,7 +1592,7 @@ test('translucent DOM layers blend once and respect intervening geometry from bo
   await page.route('**/mesh/0',r=>r.fulfill({body:planePly(2)}));
   try {
     for(const projection of ['perspective','orthographic']) for(const side of [1,-1]) for(const geometry of [false,true]) {
-      data.meshes[0].visible=data.components[0].visible=geometry;
+      data.meshes[0].visible=data.entities[0].visible=geometry;
       data.state={...data.state,projection,strokes:[],camera:{position:[0,0,10*side],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
       await page.goto(`${origin}/s/fixture?render=1`);
       await page.waitForFunction(()=>document.documentElement.dataset.renderStatus==='ready');
@@ -1645,7 +1657,7 @@ test('PNG export does not read hidden unavailable geometry', async () => {
   const page = await browser.newPage({viewport:{width:1200,height:900}});
   let hiddenReads = 0;
   try {
-    await page.route('**/api/v1/scenes/**', route => route.fulfill({json:exported}));
+    await page.route('**/api/v1/scenes/**', route => route.fulfill({json:publicScene(exported)}));
     await page.route('**/mesh/1*', route => {hiddenReads++;return route.fulfill({status:410,body:'gone'});});
     await page.goto(`${origin}/s/fixture?render=1`);
     await page.waitForFunction(() => document.documentElement.dataset.renderStatus === 'ready');
@@ -1658,7 +1670,7 @@ for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
     const mixed=structuredClone(scene); mixed.label_groups=[]; mixed.state.strokes=[];
     mixed.meshes=mixed.meshes.map((m,i)=>({...m,name:i?'Margin':'Scan',label:undefined,format:i?'pts':'ply',opacity:i?0:.37,visible:true}));
     mixed.attachments=['Log','Trace'].map((label,i)=>({id:`a${i}`,label,byte_size:16,url:`/test/attachments/${i}`,unavailable:null}));
-    mixed.components=['mesh','points','text','example:trace'].map((component,i)=>({id:`c${i}`,component,
+    mixed.entities=['mesh','points','text','example:trace'].map((component,i)=>({id:`c${i}`,component,
       source:{kind:i<2?'mesh':'attachment',index:i<2?i:i-2},label:['Scan','Margin','Log','Trace'][i],group:i<2?'Geometry':'Diagnostics',
       position:[i*4,0,0],size:i<2?null:[3,2],visible:i!==3,opacity:[.37,0,.6,0][i],
       ...(i===3?{renderer:{plugin:'example',revision:'fixture',name:'trace',capabilities:{movable:false,resizable:false,presentations:['spatial','focus']}}}:{})}));
@@ -1702,7 +1714,7 @@ for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
       await row('Trace').dblclick();assert.deepEqual(await checks(),[false,false,false,true]);
       await page.waitForFunction(()=>!document.querySelector('[data-component="text"]').checkVisibility()&&document.querySelector('[data-component="example:trace"]').checkVisibility());
       snapshot=await captureShare(page);assert.deepEqual(snapshot.entities.map(c=>c.visible),[false,false,false,true]);
-      const saved={...mixed,state:snapshot.state,meshes:mixed.meshes.map((m,i)=>({...m,...snapshot.meshes[i]})),entities:mixed.components.map((c,i)=>({...c,...snapshot.entities[i]}))};
+      const saved={...mixed,state:snapshot.state,meshes:mixed.meshes.map((m,i)=>({...m,...snapshot.meshes[i]})),entities:mixed.entities.map((c,i)=>({...c,...snapshot.entities[i]}))};
       const reopened=await openMixed(saved);
       try {assert.deepEqual(await reopened.locator('.scene-tree-visibility').evaluateAll(buttons=>buttons.map(button=>button.dataset.visible==='true')),[false,false,false,true]);}
       finally {await reopened.close();}

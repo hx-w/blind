@@ -101,7 +101,7 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   png=http(shared['image_url'])[1];assert png.startswith(b'\x89PNG')
   grouped=json.loads(cli('share','demo://grouped','--format','json',environment=remote).stdout)
   gscene=json.loads(http(origin+'/api/v1/scenes/'+grouped['viewer_url'].rsplit('/',1)[1])[1])
-  assert [c['group'] for c in gscene['components']]==['Stage one']*4+['Stage two']*2
+  assert [c['group'] for c in gscene['entities']]==['Stage one']*4+['Stage two']*2
   assert len(gscene['meshes'])==6
   positions=[m['translation'] for m in gscene['meshes']]
   assert positions[0]==positions[1] and positions[2]==positions[3] and positions[4]==positions[5]
@@ -109,8 +109,8 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   collision=json.loads(cli('share','demo://collision','--format','json',environment=remote).stdout)
   ccode=collision['viewer_url'].rsplit('/',1)[1]
   cscene=json.loads(http(origin+'/api/v1/scenes/'+ccode)[1])
-  assert len({c['id'] for c in cscene['components']})==len(cscene['components'])
-  update={'state':cscene['state'],'meshes':[{k:m[k] for k in ['color','opacity','visible','quality']} for m in cscene['meshes']], 'components':[{k:c.get(k) for k in ['id','position','size','visible','opacity']} for c in cscene['components']]}
+  assert len({c['id'] for c in cscene['entities']})==len(cscene['entities'])
+  update={'state':cscene['state'],'meshes':[{k:m[k] for k in ['color','opacity','visible','quality']} for m in cscene['meshes']], 'entities':[{k:c.get(k) for k in ['id','position','size','visible','opacity']} for c in cscene['entities']]}
   assert http(origin+'/api/v1/scenes/'+ccode+'/share',data=update)[0]==200
   partial=json.loads(cli('share','demo://partial','--format','json',environment=remote).stdout);assert partial['status']=='partial'
   pscene=json.loads(http(origin+'/api/v1/scenes/'+partial['viewer_url'].rsplit('/',1)[1])[1])

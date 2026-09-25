@@ -1,6 +1,8 @@
 # Sharing contract
 
-Blind sharing is encrypted and ephemeral. Every Mesh remains owned by its source path on the host.
+Blind sharing uses encrypted, immutable links. Links expire after seven days by
+default; `--ttl` can set another lifetime or `0` for no time expiry. Every Mesh
+remains owned by its source path on the host.
 
 ## Link forms
 
@@ -17,7 +19,7 @@ The encrypted descriptor contains:
 
 - Schema version, title, and creation time.
 - Canonical source path, format, byte size, and SHA-256 revision for every Mesh.
-- Registered source ID, hostname, OS user and display name (optional for legacy local scenes).
+- Registered source ID, hostname, OS user and display name (absent in some earlier local scenes).
 - Visibility, selected Mesh, color, and opacity.
 - An optional label per Mesh: `{"text":"供体 A","anchor":[0,1,2]}`.
   Text is limited to 120 characters; the optional anchor is a finite world-space
@@ -64,8 +66,8 @@ The reshare body is limited to 8 MiB.
 Surface marks survive camera changes and reshares without recomputing their
 geometry. Their source Mesh is kept at Raw quality. Marks are hidden with the
 Mesh and occluded by geometry; PNG exports use the same stored samples. Editing
-handles and names are editor UI and are not included in PNGs. Legacy states
-without annotations load an empty collection. As with all scene edits, sharing
+handles and names are editor UI and are not included in PNGs. Saved states
+without annotations load an empty annotation list. As with all scene edits, sharing
 creates a new immutable snapshot and leaves the old URL unchanged.
 
 A read-only section is stored in `state.section`. It binds the plane to a Mesh
@@ -82,10 +84,9 @@ world-space anchors are preserved in registry scene records.
 Labels spanning multiple Meshes draw a low-obstruction corner frame around the
 visible members. Their label is selectable and fits the camera to the group.
 Individual labels remain visible and participate in the same collision avoidance.
-The native geometry renderer omits Mesh labels on older geometry-only scenes.
-Scenes using entities or a section use Viewer export, which includes visible
-labels and the section window. Viewer export requires Chrome/Chromium on the
-Server.
+Image links include visible Mesh and group labels. Scenes using entities or a
+section use Viewer export, which also includes the section window. Viewer export
+requires Chrome/Chromium on the Server.
 
 For API clients, scene creation accepts an optional `labels` array parallel to
 `paths`, containing label objects or `null`. Scene/share Mesh entries expose a
@@ -96,7 +97,10 @@ Scene creation also accepts `label_groups`, an array of `{text, meshes}` objects
 The CLI exposes both cases through one repeatable option: `--label '1=牙冠'`
 for one Mesh and `--label '1,2=参考牙'` for a group.
 
-For large resource sets, `blind share --config FILE` reads this strict schema:
+For large resource sets, `blind share --config FILE` accepts a single-scene
+manifest with `resources`, or a collection with independent `scenes`. Resources
+inside each scene become entities; nested collections are unsupported. The
+single-scene input has this strict schema:
 
 ```json
 {
@@ -171,7 +175,7 @@ the old link stays unchanged.
    Mesh. A cached LOD request checks the target's canonical path, size, and
    modification time instead of scanning the whole scene.
 4. A confirmed deletion, revision change or source revocation returns `410 Gone`. An offline host, timeout, host-key mismatch or denied access returns `503 Service Unavailable` without tombstoning the scene. Doctor retains temporarily unavailable scenes.
-5. A link expires absolutely seven days after its first registration. Registering an identical active scene reuses its code and does not extend that lifetime.
+5. A link expires seven days after registration by default. `--ttl` selects another number of days, or `0` for no time expiry. Registering an identical active scene reuses its code and does not extend that lifetime.
 6. The registry permits 10,000 active scenes and at most 12,000 total rows. Expired and invalid tombstones are pruned and SQLite reuses released pages.
 7. Restarting the server does not invalidate active links because the registry and scene key persist in the user configuration.
 8. `blind doctor` audits the registry, `--clean-invalid` removes invalid short

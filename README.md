@@ -1,7 +1,7 @@
 # Blind
 
 [![Release](https://img.shields.io/github/v/release/hx-w/blind)](https://github.com/hx-w/blind/releases/latest)
-[![macOS](https://img.shields.io/badge/platform-macOS-4b5563)](https://github.com/hx-w/blind#requirements)
+[![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4b5563)](https://github.com/hx-w/blind#install)
 [![License: MIT](https://img.shields.io/github/license/hx-w/blind)](LICENSE)
 
 Instant mobile 3D review across your team's machines.
@@ -95,8 +95,7 @@ curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | sh
 `blind update` updates that executable and restarts its managed macOS
 LaunchAgent or Linux systemd user service when one is installed.
 `BLIND_VERSION` and `BLIND_INSTALL_DIR` select a version and installation
-directory. The installer never invokes sudo. Client/Server registration is
-available starting with v0.7.0.
+directory. The installer never invokes sudo.
 
 Prebuilt releases support macOS 14+ on Apple Silicon and Intel, plus native
 x86_64 Linux servers. Docker remains optional; see the
@@ -235,8 +234,8 @@ Meshes hide their labels. Clear the text to remove a label; share the current
 view to save edits in a new link. Existing links keep their original labels.
 Group labels draw a restrained corner frame around visible members and can be
 selected to fit the whole group. Per-Mesh labels can coexist with group labels.
-Each label accepts up to 120 characters. Labels appear in interactive links;
-server-rendered PNG links currently include geometry and screen strokes only.
+Each label accepts up to 120 characters. View and image links include visible
+Mesh and group labels, along with screen and surface annotations.
 
 To keep Blind running after login:
 
@@ -304,7 +303,7 @@ this contract instead of reimplementing scene or lifecycle logic.
   changing the camera and reports Raw size, LOD size, saved bytes, and the
   saving percentage.
 - Shared view snapshots preserve the selected Raw or LOD quality for every
-  Mesh. Legacy links without this state still open as LOD.
+  Mesh. Links created before this setting open as LOD.
 - The first cold load shows completed Mesh count while the server generates
   LODs. At most four Meshes are requested concurrently, and a single large Mesh
   remains indeterminate until meshoptimizer returns. Individual failures are
@@ -440,9 +439,10 @@ XChaCha20-Poly1305, then stored in a local bounded registry. The default link
 has an absolute seven-day lifetime unless `--ttl` overrides it. Blind reuses the code for an identical
 active scene, permits at most 10,000 active scenes, and caps retained rows at
 12,000 so SQLite cannot grow without bound. It contains no PAT and no Mesh
-bytes. Every route verifies the SHA-256 revision of every source before
-responding. Restarting the server keeps links valid. The internal scene key
-encrypts link payloads; it is not a login credential and has no routine
+bytes. Blind validates each source on creation; later Raw and cold-LOD requests
+hash only the requested source, while cached LOD requests check its path, size,
+and modification time. Restarting the server keeps links valid. The internal
+scene key encrypts link payloads; it is not a login credential and has no routine
 user-facing maintenance command. The PAT remains the credential for control
 API operations.
 
@@ -531,11 +531,11 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Release has one responsibility: build and publish. A stable tag builds the viewer
-and native binaries, packages the three archives, generates SHA-256 checksums and
-publishes the GitHub Release. Run local checks before tagging; the Release
-workflow does not run tests. The first build, a toolchain change, or cache eviction
-can still require a cold compilation.
+Pull requests and main-branch pushes run CI checks. A stable tag must pass the
+same verification before the Release workflow builds the viewer and native
+binaries, packages the three archives, generates SHA-256 checksums, and publishes
+the GitHub Release. Run local checks before tagging too. The first build, a
+toolchain change, or cache eviction can still require a cold compilation.
 
 ## API
 

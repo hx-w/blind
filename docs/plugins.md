@@ -178,7 +178,7 @@ continue to apply after the plugin is removed.
 
 The same manifest is accepted by `blind share --config FILE`; local geometry
 URIs in a file resolve relative to that file. Attachments must be OSS references.
-Legacy unversioned `{resources:[{path,label}],groups}` files remain supported.
+Unversioned `{resources:[{path,label}],groups}` files remain supported.
 
 Package version, protocol version and manifest version are separate. Optional
 additive wire fields are ignored. Required behavior belongs in `requires`:

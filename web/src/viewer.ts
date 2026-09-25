@@ -201,11 +201,9 @@ export class MeshViewer {
 
   async load(scene: PublicScene, skipHidden = false): Promise<void> {
     this.disposeModels();
-    // Keep assembly captions (e.g. one model comparison) within flat component groups.
-    // Only suppress a caption when the component shell already names the same group.
-    const entities = scene.entities ?? scene.components;
-    this.entityIdsByMesh = new Map(entities?.filter(entity => entity.source.kind === 'mesh').map(entity => [entity.source.index, entity.id]) ?? scene.meshes.map((_, index) => [index, `mesh-${index}`]));
-    this.labelGroups = (scene.label_groups ?? []).filter(group => !entities?.length || !group.meshes.every(index => entities.find(c => c.source.kind === 'mesh' && c.source.index === index)?.group === group.text));
+    const entities = scene.entities;
+    this.entityIdsByMesh = new Map(entities.filter(entity => entity.source.kind === 'mesh').map(entity => [entity.source.index, entity.id]));
+    this.labelGroups = scene.label_groups;
     this.state = structuredClone(scene.state);
     this.state.render_mode ??= 'matte';
     this.state.light ??= {azimuth: 45, elevation: 20, intensity: 1};

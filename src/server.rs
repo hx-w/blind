@@ -1092,6 +1092,28 @@ impl From<axum::http::Error> for AppError {
     }
 }
 
+fn source_result<T>(
+    state: &AppState,
+    token: &str,
+    result: Result<T, SourceError>,
+) -> Result<T, AppError> {
+    result.map_err(|error| match error {
+        SourceError::Gone => {
+            if !token.is_empty() {
+                mark_scene_gone(state, token);
+            }
+            AppError::gone("Scene source changed, was deleted, or was revoked")
+        }
+        SourceError::Unavailable(reason) => {
+            tracing::warn!(%reason,"source unavailable");
+            AppError::unavailable(
+                "Source host is temporarily unavailable; retry after it reconnects",
+            )
+        }
+        SourceError::TooLarge => AppError::unprocessable("Source exceeds the 512 MiB file limit"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1190,26 +1212,4 @@ mod tests {
             .is_err()
         );
     }
-}
-
-fn source_result<T>(
-    state: &AppState,
-    token: &str,
-    result: Result<T, SourceError>,
-) -> Result<T, AppError> {
-    result.map_err(|error| match error {
-        SourceError::Gone => {
-            if !token.is_empty() {
-                mark_scene_gone(state, token);
-            }
-            AppError::gone("Scene source changed, was deleted, or was revoked")
-        }
-        SourceError::Unavailable(reason) => {
-            tracing::warn!(%reason,"source unavailable");
-            AppError::unavailable(
-                "Source host is temporarily unavailable; retry after it reconnects",
-            )
-        }
-        SourceError::TooLarge => AppError::unprocessable("Source exceeds the 512 MiB file limit"),
-    })
 }

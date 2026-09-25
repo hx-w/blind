@@ -93,10 +93,10 @@ pub enum Command {
     },
     #[command(
         about = "Update Blind to the latest verified GitHub release",
-        long_about = "Download the latest Blind release for this Mac, verify its SHA-256 checksum and archive contents, and atomically replace the current executable. Blind never uses sudo. If a managed background service is installed, it is reconciled with the new binary."
+        long_about = "Download the latest Blind release for this machine, verify its SHA-256 checksum and archive contents, and atomically replace the current executable. Blind never uses sudo. If a managed background service is installed, it is reconciled with the new binary."
     )]
     Update,
-    #[command(about = "Install or remove the macOS background service")]
+    #[command(about = "Manage the per-user background service")]
     Service {
         #[command(subcommand)]
         command: ServiceCommand,
@@ -105,11 +105,11 @@ pub enum Command {
 
 #[derive(Subcommand)]
 pub enum ServiceCommand {
-    #[command(about = "Install and start Blind as a per-user launchd service")]
+    #[command(about = "Install and start the per-user Blind service")]
     Install,
-    #[command(about = "Stop and remove the per-user launchd service")]
+    #[command(about = "Stop and remove the per-user Blind service")]
     Uninstall,
-    #[command(about = "Report whether the launchd service is installed")]
+    #[command(about = "Report whether the per-user Blind service is installed")]
     Status,
 }
 

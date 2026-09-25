@@ -110,7 +110,16 @@ binary. `blind service install` creates a systemd user service, and
 checks future releases. The Linux Server uses native file locks; no Docker or
 source checkout is required.
 
-The Docker recipe remains available when process isolation is preferred:
+For startup before the user logs in, enable lingering for the service account
+with `loginctl enable-linger USER`. As that account, check
+`systemctl --user is-enabled blind.service` and
+`systemctl --user is-active blind.service`.
+On systems where the home directory is mounted late, arrange for the systemd
+user manager to start after that mount; the user manager must be able to read
+the unit before it can start Blind. Verify both the configured local health
+endpoint and the public HTTPS `/api/v1/health` route after deployment.
+
+An optional Docker deployment is available when process isolation is preferred:
 
 Build the viewer, then build the Linux binary (Rust 1.90 or newer):
 
@@ -130,7 +139,7 @@ BLIND_UID=$(id -u) BLIND_GID=$(id -g) docker compose -f deploy/compose.yaml up -
 The example binds HTTP only to `127.0.0.1:7401`, keeps the container filesystem
 read-only and mounts only configuration storage. It does not mount or copy
 remote originals. SFTP needs `ssh-keygen`, provided by `openssh-client` in the
-image. Mesa's Vulkan software renderer supports legacy geometry PNGs on hosts
+image. Mesa's Vulkan software renderer supports geometry PNGs on hosts
 without a GPU. Chromium exports component scenes; the included seccomp profile
 permits its nested user-namespace sandbox while retaining dropped capabilities,
 no-new-privileges and the 4 GiB service limit. See [profile provenance](../deploy/seccomp-chromium.md).

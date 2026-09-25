@@ -44,7 +44,7 @@ pub struct SceneDescriptor {
     pub schema: u8,
     pub title: String,
     pub created_at: u64,
-    /// None preserves legacy descriptors; zero explicitly disables time expiry.
+    /// None preserves earlier descriptors; zero explicitly disables time expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_days: Option<u32>,
     pub meshes: Vec<MeshRef>,
@@ -566,16 +566,23 @@ impl Default for ViewState {
 }
 
 impl SceneDescriptor {
+    /// Every scene in a share, in display order. Standalone scenes have no ID;
+    /// collection scenes all have one. This keeps the persisted first-child
+    /// layout at the storage boundary instead of repeating it in consumers.
+    pub fn scene_entries(&self) -> impl Iterator<Item = (Option<&str>, &SceneDescriptor)> {
+        let collection = self.collection.as_ref();
+        std::iter::once((collection.map(|c| c.first_id.as_str()), self)).chain(
+            collection
+                .into_iter()
+                .flat_map(|c| c.scenes.iter())
+                .map(|entry| (Some(entry.id.as_str()), &entry.scene)),
+        )
+    }
+
     pub fn scene_by_id(&self, id: &str) -> Option<&SceneDescriptor> {
-        let collection = self.collection.as_ref()?;
-        if id == collection.first_id {
-            return Some(self);
-        }
-        collection
-            .scenes
-            .iter()
-            .find(|entry| entry.id == id)
-            .map(|entry| &entry.scene)
+        self.collection.as_ref()?;
+        self.scene_entries()
+            .find_map(|(scene_id, scene)| (scene_id == Some(id)).then_some(scene))
     }
 
     pub fn scene_by_id_mut(&mut self, id: &str) -> Option<&mut SceneDescriptor> {
@@ -937,12 +944,8 @@ impl SceneDescriptor {
     pub fn full_text(&self, viewer_url: &str, image_url: &str) -> String {
         if let Some(collection) = &self.collection {
             let mut lines = vec![format!("Blind collection: {}", collection.title)];
-            for (id, scene) in std::iter::once((&collection.first_id, self)).chain(
-                collection
-                    .scenes
-                    .iter()
-                    .map(|entry| (&entry.id, &entry.scene)),
-            ) {
+            for (id, scene) in self.scene_entries() {
+                let id = id.expect("collection scenes have IDs");
                 lines.push(format!("\n{} ({id}):", scene.title));
                 lines.extend(scene.meshes.iter().map(|mesh| format!("- {}", mesh.path)));
                 lines.extend(
@@ -1584,6 +1587,52 @@ mod tests {
         });
         let scene: SceneDescriptor = serde_json::from_value(value).unwrap();
         assert!(scene.label_groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persisted_collection_keeps_first_scene_and_component_alias() {
+        let path = PathBuf::from("tests/fixtures/tetra.ply");
+        let mut first = SceneDescriptor::create(std::slice::from_ref(&path), Some("First".into()))
+            .await
+            .unwrap();
+        first.entities = first.entity_descriptors();
+        let second = SceneDescriptor::create(&[path], Some("Second".into()))
+            .await
+            .unwrap();
+        let mut saved = serde_json::to_value(&first).unwrap();
+        let entities = saved.as_object_mut().unwrap().remove("entities").unwrap();
+        saved["components"] = entities;
+        saved["collection"] = serde_json::json!({
+            "title": "Review",
+            "first_id": "first",
+            "active_scene_id": "second",
+            "scenes": [{"id": "second", "scene": second}]
+        });
+
+        let opened: SceneDescriptor = serde_json::from_value(saved).unwrap();
+        let entries = opened.scene_entries().collect::<Vec<_>>();
+        assert_eq!(
+            entries.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            [Some("first"), Some("second")]
+        );
+        assert_eq!(opened.scene_by_id("first").unwrap().title, "First");
+        assert_eq!(opened.scene_by_id("second").unwrap().title, "Second");
+        assert_eq!(
+            opened
+                .scene_by_id("first")
+                .unwrap()
+                .entity_descriptors()
+                .len(),
+            1
+        );
+        assert_eq!(
+            opened
+                .scene_by_id("second")
+                .unwrap()
+                .entity_descriptors()
+                .len(),
+            1
+        );
     }
 
     #[test]

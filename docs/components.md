@@ -1,8 +1,8 @@
 # Scene components
 
-Blind shares files into **one scene**. A component is a renderer type; an entity
-is one placed instance of that type bound to a source. Flat groups organize
-entities. There is no separate timeline or nested scene. All geometry in a group
+Within each scene, Blind shares files as entities. A component is a renderer
+type; an entity is one placed instance of that type bound to a source. Flat
+groups organize entities. There is no separate timeline or nested scene. All geometry in a group
 retains its relative coordinates. Content surfaces occupy world-space rectangles
 and participate in camera projection and Fit.
 
@@ -63,7 +63,7 @@ Unpositioned entities are arranged in stable, flat groups in the XY plane.
 Geometry keeps its internal relative alignment; surfaces sit beside geometry.
 Explicit positions are absolute world-space coordinates and are never tiled.
 `size` applies only to surfaces, in scene units; default is `[110,70]`.
-The legacy `groups: [{"label":"Reference", "members":[1,2]}]` and grouped
+The `groups: [{"label":"Reference", "members":[1,2]}]` form and grouped
 `--label` syntax also map to flat groups. A resource belongs to one group; repeat
 its path for an additional instance. A scene may consist entirely of surfaces.
 
@@ -128,9 +128,9 @@ its path for an additional instance. A scene may consist entirely of surfaces.
 `web/src/scene-components.ts` defines the shared entity schema,
 `ComponentCapabilities`, `ComponentRuntime` and `ComponentRegistry`. Each
 renderer registers its type and declares supported presentations (`spatial`,
-`focus`, `fullscreen` for legacy plugins), movement, and input ownership by presentation.
+`focus`, `fullscreen` for earlier plugins), movement, and input ownership by presentation.
 The protocol still accepts `resizable` for older plugins, but the Viewer ignores it
-and has no drag resize control. A legacy plugin declaring only `fullscreen` opens
+and has no drag resize control. A plugin declaring only `fullscreen` opens
 in the focus dialog without requesting browser fullscreen.
 The host owns grouping, selection, scene list, layout, focus container and sharing.
 Renderers implement bounds, position, visibility, opacity, label, presentation, focus,
@@ -143,8 +143,10 @@ binds to `{kind:"mesh"|"attachment",index:N}`; source
 paths and credentials are never sent in this binding. Source URLs remain revision
 checked by the server. Viewer updates accept **only** ID and mutable presentation
 fields; a viewer cannot replace a source or type through a layout update.
-Stored descriptors and public payloads using `components` remain readable.
-Legacy geometry-only scenes synthesize one entity per Mesh or PTS resource.
+Stored descriptors named `components` remain readable at the server boundary;
+share updates also accept that older field name. Public scene payloads always
+expose `entities`. Older geometry-only descriptors synthesize an entity per
+Mesh or PTS resource on the server.
 
 ## Plugin components (API 1)
 
@@ -213,7 +215,7 @@ preview. Page CSP is restricted to the origins declared by that scene's pinned
 components, without global business-specific exceptions.
 
 
-Resolver manifests can return `components` alongside legacy geometry `resources`,
+Resolver manifests can return `components` alongside geometry `resources`,
 `panels` and downloadable `attachments`. Require `components.v1`, plus
 `archive.members` if used. Each component has `id`, `uri`, `label`, `component`,
 optional `member`, `group`, `position` and `size`. Example:
@@ -238,7 +240,7 @@ PNG export uses the formal Viewer for scenes using the component contract,
 including their position, opacity, labels and plugin content. It awaits text loads,
 image decode, HTML load, fonts and each visible plugin's `ready` message. Failed
 or timed-out components fail export explicitly. Hidden components are not awaited.
-Legacy geometry scenes retain the native renderer; component groups use the Viewer
+Geometry scenes without stored entities use the native renderer; component groups use the Viewer
 even when they contain only geometry, keeping automatic layout consistent.
 
 Component-scene export requires Chrome/Chromium on the Server (included in the Docker

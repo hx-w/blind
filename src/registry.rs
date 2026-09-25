@@ -583,7 +583,7 @@ impl Registry {
                 entry.scene.created_at = 0;
             }
         }
-        // Explicit default TTL and legacy short scenes have identical lifetimes.
+        // Explicit default TTL and earlier short scenes have identical lifetimes.
         if canonical.ttl_days == Some(crate::scene::DEFAULT_TTL_DAYS) {
             canonical.ttl_days = None;
         }
@@ -609,12 +609,10 @@ async fn scene_sources_are_valid(
     cache: &mut SourceCache,
     sources: &crate::source::Sources,
 ) -> Result<bool, crate::source::SourceError> {
-    if let Some(collection) = &scene.collection {
+    if scene.collection.is_some() {
         let mut valid = false;
         let mut unavailable = None;
-        for child in
-            std::iter::once(scene).chain(collection.scenes.iter().map(|entry| &entry.scene))
-        {
+        for (_, child) in scene.scene_entries() {
             match single_scene_sources_are_valid(child, cache, sources).await {
                 Ok(true) => valid = true,
                 Ok(false) | Err(crate::source::SourceError::Gone) => {}

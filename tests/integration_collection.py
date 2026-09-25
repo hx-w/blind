@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
                 time.sleep(.1)
         else:
             raise AssertionError('server not ready')
-        assert json.loads(api('/api/v1/health')[1])['scene_schema'] == 6
+        assert json.loads(api('/api/v1/health')[1])['scene_schema'] == 7
 
         fixture = ROOT / 'tests/fixtures/tetra.ply'
         second = temp / 'second.ply'
@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
 
         def update(part, color, shading):
             part['state']['shading'] = shading
-            part['state']['focused_component_id'] = part['components'][0]['id']
+            part['state']['focused_component_id'] = part['entities'][0]['id']
             return {'state': part['state'], 'meshes': [{
                 'color': color, 'opacity': 1, 'visible': True, 'quality': 'raw'
             }]}
@@ -102,7 +102,7 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
         new_scan = json.loads(api(f'/api/v1/scenes/{new_token}?scene=scan')[1])
         assert (new_design['meshes'][0]['color'], new_design['state']['shading']) == ('#ff0000', 'wire')
         assert (new_scan['meshes'][0]['color'], new_scan['state']['shading']) == ('#00ff00', 'smooth')
-        assert new_scan['state']['focused_component_id'] == scan['components'][0]['id']
+        assert new_scan['state']['focused_component_id'] == scan['entities'][0]['id']
         assert json.loads(api(f'/api/v1/scenes/{token}')[1])['active_scene_id'] == 'design'
         status, png, _ = api(f'/i/{new_token}.png?scene=scan')
         assert status == 200, png

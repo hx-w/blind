@@ -58,14 +58,7 @@ export class ComponentRegistry<Context> {
   }
 }
 export function sceneEntities(scene: PublicScene): SceneEntity[] {
-  if (scene.entities?.length) return structuredClone(scene.entities);
-  if (scene.components?.length) return structuredClone(scene.components);
-  return scene.meshes.map((mesh, index) => ({
-    id: `mesh-${index}`, component: mesh.format === 'pts' ? 'points' : 'mesh', source: {kind: 'mesh', index},
-    label: mesh.label?.text ?? mesh.name,
-    group: scene.label_groups?.find(g => g.meshes.includes(index))?.text ?? null,
-    position: mesh.translation ?? [0, 0, 0], size: null, visible: mesh.visible, opacity: mesh.opacity,
-  }));
+  return structuredClone(scene.entities);
 }
 export function entityUpdate(spec: SceneEntity): EntityUpdate {
   return {...(spec.state === undefined ? {} : {state:spec.state}), id: spec.id, label:spec.label, position: spec.position ? [...spec.position] : null, size: spec.size ? [...spec.size] : null, visible: spec.visible, opacity: spec.opacity};

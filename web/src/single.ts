@@ -198,8 +198,8 @@ async function start(): Promise<void> {
         if (saved && saved.meshes?.length === scene.meshes.length) {
           scene.state = saved.state;
           scene.meshes.forEach((mesh, index) => Object.assign(mesh, saved.meshes[index]));
-          const entities = scene.entities ?? scene.components;
-          if (entities && saved.entities) {
+          const entities = scene.entities;
+          if (saved.entities) {
             for (const component of entities) {
               const update = saved.entities.find(candidate => candidate.id === component.id);
               if (update) Object.assign(component, update);
@@ -227,7 +227,7 @@ async function start(): Promise<void> {
     title.insertAdjacentElement('afterend', artifactList);
     startLongLoadHint();
     await meshViewer.load(scene, exportMode);
-    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !(scene.entities ?? scene.components)?.some(c => c.source.kind === 'attachment')) {
+    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !scene.entities.some(c => c.source.kind === 'attachment')) {
       throw new Error('No models could be loaded');
     }
     $('[data-copy="image"]').hidden = false;

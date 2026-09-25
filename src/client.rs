@@ -603,7 +603,11 @@ struct ShareInput {
     meshes: Vec<PathBuf>,
     title: Option<String>,
     labels: ParsedLabels,
-    collection: Option<CollectionInput>,
+}
+
+enum SharePlan {
+    Scene(Box<ShareInput>),
+    Collection(CollectionInput),
 }
 
 struct CollectionInput {
@@ -617,7 +621,7 @@ struct CollectionSceneInput {
     input: ShareInput,
 }
 
-fn read_share_config(path: &Path) -> Result<ShareInput> {
+fn read_share_config(path: &Path) -> Result<SharePlan> {
     let (bytes, base) = if path == Path::new("-") {
         let mut bytes = Vec::new();
         std::io::stdin()
@@ -691,7 +695,6 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
                             meshes: Vec::new(),
                             groups: Vec::new(),
                         },
-                        collection: None,
                     })
                 }
                 _ => bail!(
@@ -711,21 +714,11 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
             ids.contains(&active_scene_id),
             "active_scene_id does not name a scene"
         );
-        return Ok(ShareInput {
-            display: Vec::new(),
-            manifest: None,
-            meshes: Vec::new(),
-            title: None,
-            labels: ParsedLabels {
-                meshes: Vec::new(),
-                groups: Vec::new(),
-            },
-            collection: Some(CollectionInput {
-                title: config.title,
-                active_scene_id,
-                scenes,
-            }),
-        });
+        return Ok(SharePlan::Collection(CollectionInput {
+            title: config.title,
+            active_scene_id,
+            scenes,
+        }));
     }
     if value.get("schema_version").is_some() {
         let mut manifest: crate::plugin::ShareManifest = serde_json::from_value(value)?;
@@ -749,7 +742,7 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
         for attachment in &manifest.attachments {
             crate::oss::Location::parse(&attachment.uri)?;
         }
-        return Ok(ShareInput {
+        return Ok(SharePlan::Scene(Box::new(ShareInput {
             display: Vec::new(),
             meshes: manifest
                 .resources
@@ -762,12 +755,11 @@ fn read_share_config(path: &Path) -> Result<ShareInput> {
                 groups: Vec::new(),
             },
             manifest: Some(manifest),
-            collection: None,
-        });
+        })));
     }
     let config: ShareConfig = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid share config {}", path.display()))?;
-    parse_share_config(config, &base)
+    parse_share_config(config, &base).map(|input| SharePlan::Scene(Box::new(input)))
 }
 
 fn valid_scene_id(id: &str) -> bool {
@@ -877,7 +869,6 @@ fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
             meshes: mesh_labels,
             groups,
         },
-        collection: None,
     })
 }
 
@@ -895,42 +886,44 @@ async fn share(
         format,
     } = options;
     let config_mode = config.is_some();
-    let input = match config {
+    let plan = match config {
         Some(path) => read_share_config(&path)?,
         None => {
             let labels = parse_labels(&labels, meshes.len())?;
             let display = parse_components(&components, meshes.len())?;
-            ShareInput {
+            SharePlan::Scene(Box::new(ShareInput {
                 display,
                 manifest: None,
                 meshes,
                 title,
                 labels,
-                collection: None,
-            }
+            }))
         }
     };
-    if let Some(collection) = input.collection {
-        if load()?.is_none() {
-            join(false, true, false, None, None, None).await?;
+    let input = match plan {
+        SharePlan::Scene(input) => input,
+        SharePlan::Collection(collection) => {
+            if load()?.is_none() {
+                join(false, true, false, None, None, None).await?;
+            }
+            let c = load()?.context("not registered")?;
+            let mut scenes = Vec::new();
+            for part in collection.scenes {
+                let paths = part
+                    .input
+                    .meshes
+                    .iter()
+                    .map(share_path)
+                    .collect::<Result<Vec<_>>>()?;
+                scenes.push(json!({"id":part.id,"title":part.input.title,"paths":paths,"display":part.input.display,"labels":part.input.labels.meshes,"label_groups":part.input.labels.groups}));
+            }
+            let payload = api(&c.server, "/api/v1/client/scenes", &c.credential, Some(json!({
+                "collection":{"title":collection.title,"active_scene_id":collection.active_scene_id,"scenes":scenes},
+                "origin":host,"ttl_days":ttl_days
+            }))).await?;
+            return print_share_payload(payload, format, ttl_days);
         }
-        let c = load()?.context("not registered")?;
-        let mut scenes = Vec::new();
-        for part in collection.scenes {
-            let paths = part
-                .input
-                .meshes
-                .iter()
-                .map(share_path)
-                .collect::<Result<Vec<_>>>()?;
-            scenes.push(json!({"id":part.id,"title":part.input.title,"paths":paths,"display":part.input.display,"labels":part.input.labels.meshes,"label_groups":part.input.labels.groups}));
-        }
-        let payload = api(&c.server, "/api/v1/client/scenes", &c.credential, Some(json!({
-            "collection":{"title":collection.title,"active_scene_id":collection.active_scene_id,"scenes":scenes},
-            "origin":host,"ttl_days":ttl_days
-        }))).await?;
-        return print_share_payload(payload, format, ttl_days);
-    }
+    };
     if input
         .meshes
         .iter()
@@ -1297,7 +1290,9 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let input = read_share_config(&config_path).unwrap();
+        let SharePlan::Scene(input) = read_share_config(&config_path).unwrap() else {
+            panic!("expected a single scene");
+        };
         assert_eq!(input.title.as_deref(), Some("Large review"));
         assert_eq!(
             input.meshes[0],

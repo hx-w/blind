@@ -3,6 +3,18 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-09-25
+
+### Changed
+
+- Normalize single-scene and collection sharing through one internal scene plan
+  while keeping existing JSON configs and saved links readable.
+- Remove obsolete viewer compatibility paths and align documentation with the
+  current entity, label, image export, and link-lifetime behavior.
+- Keep geometric group labels visible when the server emits entities, and
+  describe Linux service commands accurately in CLI help.
+- Run the verification suite in CI before publishing tagged releases.
+
 ## [1.0.0] - 2026-09-24
 
 ### Added
@@ -299,7 +311,7 @@ All notable changes to Blind are documented here. This project follows
 - Server invitations are now permanent and reusable for trusted-team
   onboarding. `blind invite --revoke-all` rotates access without revoking
   existing registered sources, while cancelling pending registrations.
-  Upgrading invalidates legacy temporary invitations.
+  Upgrading invalidates previously issued temporary invitations.
 - Scenes no longer have a 64-Mesh ceiling. LOD allocation now keeps a fixed
   150,000-primitive scene target down to one primitive per Mesh, so scenes with
   thousands of inputs do not grow the browser payload without bound.
@@ -349,7 +361,7 @@ All notable changes to Blind are documented here. This project follows
 - Remote source bytes feed LOD and PNG generation entirely in memory.
 - Temporarily unavailable sources return 503 and survive doctor cleanup;
   confirmed source changes, deletions, and revocation return 410.
-- `/s/`, `/i/`, `/v/`, owner capabilities and legacy local descriptors remain compatible.
+- `/s/`, `/i/`, `/v/`, owner capabilities and previously saved local descriptors remain compatible.
 - Restore static viewer assets when running without a base path.
 
 ## [0.6.1] - 2026-09-14

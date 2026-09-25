@@ -112,7 +112,7 @@ export class ComponentViewer {
     viewer.renderListeners.add(this.render); this.viewport.addEventListener('change', this.viewportChanged);
     viewer.entityUpdates = () => this.entries.map(e => entityUpdate(e.spec));
     this.refreshBounds();
-    if (!scene.state.camera && (scene.entities?.length || scene.components?.length)) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
+    if (!scene.state.camera && scene.entities.length) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
     if (this.entries[0]) this.select(this.entries.find(e => e.spec.id === viewer.focusedComponentId)?.spec ?? this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec ?? this.entries[0].spec, false);
     this.render();
   }
@@ -171,7 +171,10 @@ export class ComponentViewer {
         const original = originals.get(entry.spec.id)!;
         if (!original.position) this.position(entry, new THREE.Vector3().fromArray(entry.spec.position ?? [0, 0, 0]).add(offset).toArray() as Vec3);
       }
-      if (plan.label) {
+      const geometricLabel = this.scene.label_groups.some(group =>
+        group.text === plan.label && group.meshes.length === plan.entries.length &&
+        plan.entries.every(entry => entry.spec.source.kind === 'mesh' && group.meshes.includes(entry.spec.source.index)));
+      if (plan.label && !geometricLabel) {
         const caption = document.createElement('span'); caption.textContent = plan.label; this.groupLabels.append(caption);
         this.captions.push({element: caption, entries: plan.entries});
       }

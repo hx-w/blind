@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+          package-manager-cache: false
+      - name: Install viewer dependencies
+        run: npm ci --prefix web
+      - name: Test and build viewer
+        run: |
+          npm test --prefix web
+          npm run build --prefix web
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Check and build Rust
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
+          cargo build --locked
+      - name: Install browser and image test dependencies
+        run: |
+          ./web/node_modules/.bin/playwright install --with-deps chromium
+          python3 -m pip install --user Pillow
+          echo "BLIND_RENDER_BROWSER=$(node -e 'process.stdout.write(require("./web/node_modules/playwright").chromium.executablePath())')" >> "$GITHUB_ENV"
+      - name: Test browser and sharing flows
+        run: |
+          npm run test:browser --prefix web
+          npm run test:collection --prefix web
+          python3 tests/integration_collection.py
+          python3 tests/integration_components.py
+          python3 tests/integration_plugins.py
+          python3 tests/integration_oss.py

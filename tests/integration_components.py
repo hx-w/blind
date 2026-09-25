@@ -62,9 +62,9 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         (tmp/'page.html').write_text('<h1>Report</h1><script>document.title="isolated"</script>')
         mesh = ROOT/'tests/fixtures/tetra.ply'
         token, scene = share(mesh, tmp/'run.log', tmp/'trace.json', tmp/'page.html')
-        assert [c['component'] for c in scene['components']] == ['mesh','text','example:panel','html']
-        assert [c['source'] for c in scene['components']] == [{'kind':'mesh','index':0}]+[{'kind':'attachment','index':i} for i in range(3)]
-        assert all('path' not in json.dumps(c) for c in scene['components'])
+        assert [c['component'] for c in scene['entities']] == ['mesh','text','example:panel','html']
+        assert [c['source'] for c in scene['entities']] == [{'kind':'mesh','index':0}]+[{'kind':'attachment','index':i} for i in range(3)]
+        assert all('path' not in json.dumps(c) for c in scene['entities'])
         assert len(scene['meshes']) == 1 and len(scene['attachments']) == 3
         for attachment in scene['attachments']:
             assert api('/'+attachment['url'])[0] == 200
@@ -76,13 +76,13 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         assert 'https:' not in headers['Content-Security-Policy']
         assert api('/'+scene['attachments'][0]['url']+'?embed=1')[0] == 400
         plain_token, plain = share(tmp/'capture.json')
-        assert plain['components'][0]['component'] == 'json' and not plain['meshes']
+        assert plain['entities'][0]['component'] == 'json' and not plain['meshes']
         assert api(f'/i/{plain_token}.png')[0] == 200
         _, explicit = share(tmp/'capture.json', '--component','example:panel')
-        assert explicit['components'][0]['component'] == 'example:panel'
+        assert explicit['entities'][0]['component'] == 'example:panel'
         # Full PNG export must contain the sandboxed plugin, not only WebGL geometry.
         plugin_token, plugin_scene = share(tmp/'trace.json')
-        renderer_url = f"/api/v1/scenes/{plugin_token}/renderers/{plugin_scene['components'][0]['id']}"
+        renderer_url = f"/api/v1/scenes/{plugin_token}/renderers/{plugin_scene['entities'][0]['id']}"
         status, pinned_html, headers = api(renderer_url)
         assert status == 200 and 'sandbox allow-scripts' in headers['Content-Security-Policy']
         assert 'https://example.org' in api(f'/s/{plugin_token}')[2]['Content-Security-Policy']
@@ -111,30 +111,30 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         cli('share',mesh,'--component','points',ok=False)
         (tmp/'scene.json').write_text(json.dumps({'resources':[{'path':str(mesh),'group':'Geometry'},{'path':'capture.json','component':'example:panel','label':'Timeline','group':'Diagnostics','position':[10,20,30],'size':[120,70]},{'path':str(mesh),'label':'Second','group':'Geometry'}]}))
         token, scene = share('--config',tmp/'scene.json')
-        assert [c['group'] for c in scene['components']] == ['Geometry','Diagnostics','Geometry']
-        assert scene['components'][1]['label'] == 'Timeline'
+        assert [c['group'] for c in scene['entities']] == ['Geometry','Diagnostics','Geometry']
+        assert scene['entities'][1]['label'] == 'Timeline'
         assert scene['meshes'][1]['label']['text'] == 'Second'
-        assert scene['components'][2]['source']['index'] == 1
-        update = {'meshes':[{key:m[key] for key in ['color','opacity','visible','quality']} for m in scene['meshes']], 'state':scene['state'], 'components':[{key:c[key] for key in ['id','position','size','visible','opacity']} for c in scene['components']]}
+        assert scene['entities'][2]['source']['index'] == 1
+        update = {'meshes':[{key:m[key] for key in ['color','opacity','visible','quality']} for m in scene['meshes']], 'state':scene['state'], 'entities':[{key:c[key] for key in ['id','position','size','visible','opacity']} for c in scene['entities']]}
         update['meshes'][0]['label'] = {'text':'Renamed geometry'}
-        update['components'][0].update(position=[40,50,60],visible=False,opacity=.3)
-        update['components'][1].update(position=[-20,0,7],visible=False,state={'selection':'row-2'})
+        update['entities'][0].update(position=[40,50,60],visible=False,opacity=.3)
+        update['entities'][1].update(position=[-20,0,7],visible=False,state={'selection':'row-2'})
         status, body, _ = api(f'/api/v1/scenes/{token}/share',update)
         assert status == 200, body
         new_token = json.loads(body)['viewer_url'].rsplit('/',1)[1]
         _, new_body, _ = api(f'/api/v1/scenes/{new_token}')
         saved = json.loads(new_body)
         assert saved['meshes'][0]['translation'] == [40,50,60]
-        assert saved['meshes'][0]['opacity'] == saved['components'][0]['opacity']
+        assert saved['meshes'][0]['opacity'] == saved['entities'][0]['opacity']
         assert saved['meshes'][0]['visible'] is False
-        assert saved['components'][0]['label'] == 'Renamed geometry'
-        assert saved['components'][1]['position'] == [-20,0,7]
-        assert saved['components'][1]['visible'] is False
-        assert saved['components'][1]['state'] == {'selection':'row-2'}
-        update['components'][1]['id'] = update['components'][0]['id']
+        assert saved['entities'][0]['label'] == 'Renamed geometry'
+        assert saved['entities'][1]['position'] == [-20,0,7]
+        assert saved['entities'][1]['visible'] is False
+        assert saved['entities'][1]['state'] == {'selection':'row-2'}
+        update['entities'][1]['id'] = update['entities'][0]['id']
         assert api(f'/api/v1/scenes/{token}/share',update)[0] == 400
-        update['components'][1]['id'] = scene['components'][1]['id']
-        update['components'][1]['source'] = {'kind':'attachment','index':0}
+        update['entities'][1]['id'] = scene['entities'][1]['id']
+        update['entities'][1]['source'] = {'kind':'attachment','index':0}
         assert api(f'/api/v1/scenes/{token}/share',update)[0] == 422
         # A failed HTML source must reject PNG export, never render an error document as success.
         html_token, _ = share(tmp/'page.html')
