@@ -3,6 +3,19 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-09-29
+
+### Added
+
+- Share a local directory as one scene with `blind share ./`, or include
+  subdirectories with `--recursive`, using supported built-in and server plugin formats.
+- Show scene titles, descriptions and PNG previews when sharing viewer links,
+  including collections and individual collection scenes.
+
+### Fixed
+
+- Load viewer assets and export PNGs correctly when Blind runs under a path prefix.
+
 ## [1.1.0] - 2026-09-29
 
 ### Added
