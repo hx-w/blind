@@ -569,12 +569,12 @@ plugins on Clients. See [plugin installation, configuration and protocol](docs/p
 
 ### Scene components
 
-Share Mesh and PTS geometry, text, JSON, HTML and images in one grouped scene.
+Share Mesh and PTS geometry, text, Markdown, JSON, HTML and images in one grouped scene.
 Each placed instance is an entity with a label and visibility. Installed plugins
 add component types; Cyclops provides order resolution and trace analysis:
 
 ```sh
-blind share jaw.ply run.log tracing.json
+blind share jaw.ply review.md run.log tracing.json
 blind share capture.json --component cyclops:trace
 ```
 

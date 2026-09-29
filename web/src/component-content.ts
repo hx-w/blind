@@ -51,6 +51,27 @@ export const textContent: ContentFactory = (url) => {
   const ready = report(pre, bytes(url, abort.signal).then(buffer => { pre.textContent = new TextDecoder().decode(buffer); }));
   return {element, ready, dispose: () => abort.abort()};
 };
+export const markdownContent: ContentFactory = (url) => {
+  const element = container(); element.classList.add('component-markdown'); element.tabIndex = 0;
+  const abort = new AbortController();
+  element.textContent = '正在读取 Markdown…';
+  const ready = report(element, bytes(url, abort.signal, 1024 * 1024).then(async buffer => {
+    const {renderMarkdown} = await import('./markdown');
+    abort.signal.throwIfAborted();
+    const article = renderMarkdown(new TextDecoder('utf-8', {fatal: true}).decode(buffer));
+    element.replaceChildren(article);
+    await Promise.all([...article.querySelectorAll('img')].map(async image => {
+      try { await image.decode(); }
+      catch { image.replaceWith(document.createTextNode(image.alt || '图片无法解码')); }
+    }));
+  }).catch(error => {
+    if (!(error instanceof OversizedResourceError)) throw error;
+    const message = document.createElement('p'); message.textContent = 'Markdown 文件超过 1 MiB，无法在预览中展开。';
+    const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = '打开原始文件';
+    element.replaceChildren(message, link);
+  }));
+  return {element, ready, dispose: () => abort.abort()};
+};
 export const jsonContent: ContentFactory = (url) => {
   const element = container(); element.classList.add('component-json');
   const abort = new AbortController();

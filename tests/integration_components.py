@@ -61,6 +61,17 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         (tmp/'capture.json').write_text((tmp/'trace.json').read_text())
         (tmp/'page.html').write_text('<h1>Report</h1><script>document.title="isolated"</script>')
         mesh = ROOT/'tests/fixtures/tetra.ply'
+        markdown = ROOT/'tests/fixtures/review.md'
+        md_token, md_scene = share(markdown)
+        assert md_scene['entities'][0]['component'] == 'markdown' and not md_scene['meshes']
+        assert api('/'+md_scene['attachments'][0]['url'])[1] == markdown.read_bytes()
+        status, png, _ = api(f'/i/{md_token}.png')
+        assert status == 200, png[:200]
+        assert Image.open(io.BytesIO(png)).format == 'PNG'
+        _, raw_markdown = share(markdown, '--component', 'text')
+        assert raw_markdown['entities'][0]['component'] == 'text'
+        _, explicit_markdown = share(tmp/'run.log', '--component', 'markdown')
+        assert explicit_markdown['entities'][0]['component'] == 'markdown'
         token, scene = share(mesh, tmp/'run.log', tmp/'trace.json', tmp/'page.html')
         assert [c['component'] for c in scene['entities']] == ['mesh','text','example:panel','html']
         assert [c['source'] for c in scene['entities']] == [{'kind':'mesh','index':0}]+[{'kind':'attachment','index':i} for i in range(3)]

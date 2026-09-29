@@ -1816,3 +1816,61 @@ test('double-click keeps the mesh pivot through rotation, pan and share reopenin
     } finally {await page.close();}
   }
 });
+
+test('Markdown renders safely in themed spatial, expanded and export views', async () => {
+  const source = await readFile(new URL('../../tests/fixtures/review.md', import.meta.url), 'utf8');
+  const unsafe = '\n\n<script>window.markdownInjected=true</script>\n<style>body{display:none}</style>\n<img src=x onerror="window.markdownInjected=true">\n\n[unsafe](javascript:alert(1))\n\n<a href="/api/v1/health">relative</a>\n\n<input type="text" autofocus><iframe src="about:blank"></iframe>\n\n';
+  const longCode = '\n```text\n' + 'long_line_'.repeat(120) + '\n```\n';
+  for (const width of [1280, 375, 320]) {
+    const page = await browser.newPage({viewport: {width, height: 800}});
+    const embeddedImage = await page.evaluate(() => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 2; return canvas.toDataURL(); });
+    const data = {...structuredClone(scene), meshes: [], label_groups: [],
+      attachments: [{id: 'notes', label: '检查说明', byte_size: source.length, url: '/markdown-fixture'}],
+      entities: [{id: 'notes', component: 'markdown', source: {kind: 'attachment', index: 0}, label: '检查说明',
+        group: null, position: [0,0,0], size: [110,70], visible: true, opacity: 1}],
+      state: {...scene.state, selected: null, strokes: [], camera: null}};
+    await page.route('**/api/v1/scenes/**', r => r.request().method() === 'GET' ? r.fulfill({json: data}) : r.continue());
+    await page.route('**/markdown-fixture', r => r.fulfill({contentType: 'text/plain', body: source + unsafe + longCode + `\n![embedded](${embeddedImage})\n\n![损坏图片](data:image/png;base64,AAAA)\n`}));
+    try {
+      await page.goto(`${origin}/s/fixture`);
+      const article = page.locator('.component-markdown article');
+      await article.locator('h1').waitFor();
+      await page.waitForFunction(() => document.querySelector('.component-markdown article')?.textContent.includes('损坏图片'));
+      assert.equal(await article.locator('h1').textContent(), '场景检查记录');
+      assert.equal(await article.locator('table tbody tr').count(), 2);
+      assert.equal(await article.locator('img').count(), 1);
+      assert.ok(await article.locator('img').evaluate(e => e.complete && e.naturalWidth === 2));
+      assert.equal(await article.locator('input:disabled').count(), 2);
+      assert.equal(await article.locator('input:checked').count(), 1);
+      assert.equal(await article.locator('script, style, iframe, [onerror], input[type=text]').count(), 0);
+      assert.equal(await page.evaluate(() => window.markdownInjected), undefined);
+      assert.equal(await article.getByText('unsafe', {exact: true}).getAttribute('href'), null);
+      assert.equal(await article.getByText('relative', {exact: true}).getAttribute('href'), null);
+      assert.equal(await article.getByRole('link', {name: 'Blind 项目'}).getAttribute('rel'), 'noopener noreferrer');
+      await page.locator('.component-enter').dblclick();
+      await page.locator('.component-dialog[open]').waitFor();
+      assert.ok(await article.locator('h2').first().evaluate(e => parseFloat(getComputedStyle(e).fontSize) > 18), 'document headings retain their hierarchy in the dialog');
+      for (const theme of ['light', 'dark']) {
+        await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
+        assert.ok(await page.locator('.component-markdown').evaluate(e => e.scrollWidth <= e.clientWidth + 1), 'document must not overflow horizontally');
+        assert.ok(await article.locator('pre').last().evaluate(e => e.scrollWidth > e.clientWidth), 'long code scrolls inside its block');
+        if (process.env.BLIND_MARKDOWN_SCREENSHOTS) {
+          await mkdir(process.env.BLIND_MARKDOWN_SCREENSHOTS, {recursive: true});
+          await page.screenshot({path: `${process.env.BLIND_MARKDOWN_SCREENSHOTS}/markdown-${width}-${theme}.png`});
+        }
+      }
+      await page.getByRole('button', {name: '返回场景'}).click();
+      assert.equal((await captureShare(page)).entities[0].id, 'notes');
+      await page.goto(`${origin}/s/fixture?render=1`);
+      await page.waitForFunction(() => document.documentElement.dataset.renderStatus === 'ready');
+      assert.equal(await article.locator('h1').textContent(), '场景检查记录');
+      await page.route('**/markdown-fixture', r => r.fulfill({contentType: 'text/plain', body: 'x'.repeat(1024 * 1024 + 1)}));
+      await page.reload();
+      await page.waitForFunction(() => document.documentElement.dataset.renderStatus === 'ready');
+      assert.equal(await page.locator('.component-markdown').getByRole('link', {name: '打开原始文件'}).count(), 1);
+      await page.route('**/markdown-fixture', r => r.fulfill({status: 404, body: 'missing'}));
+      await page.reload();
+      await page.waitForFunction(() => document.documentElement.dataset.renderStatus === 'error');
+    } finally { await page.close(); }
+  }
+});

@@ -8,6 +8,7 @@ pub enum ComponentKind {
     Mesh,
     Points,
     Text,
+    Markdown,
     Json,
     Html,
     Image,
@@ -20,6 +21,7 @@ impl TryFrom<String> for ComponentKind {
             "mesh" => Self::Mesh,
             "points" => Self::Points,
             "text" => Self::Text,
+            "markdown" => Self::Markdown,
             "json" => Self::Json,
             "html" => Self::Html,
             "image" => Self::Image,
@@ -41,6 +43,7 @@ impl From<ComponentKind> for String {
             ComponentKind::Mesh => "mesh".into(),
             ComponentKind::Points => "points".into(),
             ComponentKind::Text => "text".into(),
+            ComponentKind::Markdown => "markdown".into(),
             ComponentKind::Json => "json".into(),
             ComponentKind::Html => "html".into(),
             ComponentKind::Image => "image".into(),
@@ -60,12 +63,13 @@ impl ComponentKind {
         Ok(match name.rsplit('.').next().unwrap_or("") {
             "ply" | "stl" | "obj" => Self::Mesh,
             "pts" => Self::Points,
-            "txt" | "log" | "jsonl" | "csv" | "md" => Self::Text,
+            "txt" | "log" | "jsonl" | "csv" => Self::Text,
+            "md" | "markdown" => Self::Markdown,
             "json" => Self::Json,
             "html" | "htm" => Self::Html,
             "png" | "jpg" | "jpeg" | "webp" | "gif" => Self::Image,
             _ => bail!(
-                "Cannot choose a component for {name}; use --component INDEX=mesh|points|text|json|html|image|PLUGIN:NAME"
+                "Cannot choose a component for {name}; use --component INDEX=mesh|points|text|markdown|json|html|image|PLUGIN:NAME"
             ),
         })
     }
@@ -186,6 +190,8 @@ mod tests {
             ("UPPER.PLY", ComponentKind::Mesh),
             ("margin.pts", ComponentKind::Points),
             ("run.log", ComponentKind::Text),
+            ("README.MD", ComponentKind::Markdown),
+            ("notes.markdown", ComponentKind::Markdown),
             ("execution.json", ComponentKind::Json),
             ("a.trace.json", ComponentKind::Json),
             ("tracing.json", ComponentKind::Json),
@@ -195,6 +201,9 @@ mod tests {
             assert_eq!(ComponentKind::infer(path).unwrap(), kind);
         }
         assert!(ComponentKind::infer("file.bin").is_err());
+        let kind = ComponentKind::try_from("markdown".to_owned()).unwrap();
+        assert!(!kind.geometry());
+        assert_eq!(serde_json::to_string(&kind).unwrap(), "\"markdown\"");
     }
     #[test]
     fn reject_invalid_layout() {

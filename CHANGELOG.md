@@ -3,6 +3,15 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-09-29
+
+### Added
+
+- Share Markdown documents alongside geometry, with headings, lists, tables,
+  code blocks, task lists, theme-aware reading and PNG export.
+- Automatically render `.md` and `.markdown` files; use `--component text`
+  to keep viewing their original syntax.
+
 ## [1.0.1] - 2026-09-25
 
 ### Changed

@@ -4,7 +4,7 @@ import { CSS3DObject, CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer
 import type { PublicScene, Vec3 } from './api';
 import { MeshViewer } from './viewer';
 import { ComponentRegistry, componentGroups, entityUpdate, effectiveVisibility, sceneEntities, type ComponentCapabilities, type ComponentRuntime, type Presentation, type SceneEntity } from './scene-components';
-import { textContent, jsonContent, pluginContent, htmlContent, imageContent, type ContentFactory } from './component-content';
+import { textContent, markdownContent, jsonContent, pluginContent, htmlContent, imageContent, type ContentFactory } from './component-content';
 import {installIcons} from './icons';
 import {compactLabel} from './compact-label';
 import './components.css';
@@ -32,7 +32,7 @@ export function builtInComponents(): ComponentRegistry<Context> {
       };
     },
   });
-  for (const [type, content] of Object.entries({text: textContent, json: jsonContent, html: htmlContent, image: imageContent})) {
+  for (const [type, content] of Object.entries({text: textContent, markdown: markdownContent, json: jsonContent, html: htmlContent, image: imageContent})) {
     registry.register({type, capabilities: {presentations: ['spatial', 'focus'], movable: false, resizable: false, input: contentInput},
       create: (spec, context) => new SurfaceRuntime(spec, context, content)});
   }

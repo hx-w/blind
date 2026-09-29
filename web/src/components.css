@@ -15,6 +15,33 @@
 .component-content img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .component-enter { position: absolute; inset: 0; width: 100%; border: 0; background: transparent; cursor: pointer; touch-action: none; }
 .component-enter:active { transform: none; }
+.component-markdown { padding: 20px 24px; color: var(--text); font-size: 15px; line-height: 1.8; overflow-wrap: anywhere; }
+.component-markdown article { max-width: 76ch; margin-inline: auto; }
+.component-markdown article > :first-child { margin-top: 0; }
+.component-markdown article > :last-child { margin-bottom: 0; }
+.component-markdown h1, .component-markdown h2, .component-markdown h3, .component-markdown h4, .component-markdown h5, .component-markdown h6 { margin: 1.4em 0 .5em; line-height: 1.35; font-weight: 600; }
+.component-markdown h1 { font-size: 1.8em; }.component-markdown h2 { font-size: 1.4em; }.component-markdown h3 { font-size: 1.15em; }
+.component-markdown h4, .component-markdown h5, .component-markdown h6 { font-size: 1em; }
+.component-markdown p, .component-markdown ul, .component-markdown ol, .component-markdown blockquote, .component-markdown pre, .component-markdown .markdown-table { margin: 0 0 1em; }
+.component-markdown ul, .component-markdown ol { padding-left: 1.6em; }
+.component-markdown li > ul, .component-markdown li > ol { margin-bottom: 0; }
+.component-markdown blockquote { padding: 10px 16px; background: var(--surface-1); color: var(--text-secondary); border-left: 1px solid var(--line); }
+.component-markdown blockquote > :last-child { margin-bottom: 0; }
+.component-markdown code { padding: 2px 5px; border-radius: var(--radius-xs); background: var(--surface-2); font: .9em/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.component-markdown pre { width: 100%; min-width: 0; padding: 12px 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-1); color: var(--text); }
+.component-markdown pre code { padding: 0; background: transparent; font-size: inherit; }
+.component-markdown a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+.component-markdown a:active { opacity: .7; }
+.component-markdown .markdown-table { max-width: 100%; overflow-x: auto; }
+.component-markdown table { border-collapse: collapse; min-width: 100%; font-size: .93em; }
+.component-markdown th, .component-markdown td { padding: 8px 12px; border: 1px solid var(--line); text-align: left; }
+.component-markdown [align="center"] { text-align: center; }.component-markdown [align="right"] { text-align: right; }
+.component-markdown th { background: var(--surface-1); font-weight: 600; }
+.component-markdown img { width: auto; height: auto; max-width: 100%; }
+.component-markdown input[type="checkbox"] { margin-right: .5em; accent-color: var(--accent); }
+.component-markdown hr { margin: 1.5em 0; border: 0; border-top: 1px solid var(--line); }
+.component-markdown:focus-visible, .component-markdown :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+@media (max-width: 480px) { .component-markdown { padding: 16px; } }
 .component-json { padding: 16px 18px; color: var(--text-secondary); font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .json-status { margin: 0; }
 .component-json a { color: var(--accent); text-underline-offset: 3px; }
@@ -100,7 +127,7 @@
 .component-dialog::backdrop { background: oklch(0.08 0.006 255 / .7); }
 .component-dialog[open] { display: flex; flex-direction: column; }
 .component-dialog > header { display: flex; align-items: center; gap: 6px; min-height: 52px; padding: 4px 10px 4px 18px; }
-.component-dialog h2 { flex: 1; min-width: 0; margin: 0; font-size: 14px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.component-dialog > header h2 { flex: 1; min-width: 0; margin: 0; font-size: 14px; font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .component-expanded-content { flex: 1; min-height: 0; }
 .scene-surface.expanded { border: 0; border-radius: 0; opacity: 1 !important; }
 .scene-surface.expanded .component-handle, .scene-surface.expanded .component-enter { display: none; }

@@ -23,7 +23,8 @@ Explicit component selection always wins over filename inference.
 | --- | --- |
 | `.ply`, `.stl`, `.obj` | `mesh` |
 | `.pts` | `points` (existing ordered-point/curve rendering) |
-| `.log`, `.txt`, `.md`, `.csv`, `.jsonl` | `text` |
+| `.log`, `.txt`, `.csv`, `.jsonl` | `text` |
+| `.md`, `.markdown` | `markdown` |
 | ordinary `.json` | `json` |
 | `trace.json`, `tracing.json`, `*.trace.json` with Cyclops installed | `cyclops:trace` |
 | `.html`, `.htm` | `html` |
@@ -33,6 +34,29 @@ Matching is case-insensitive and uses the source filename, including OSS keys.
 Unknown extensions require an explicit component. JSON is not guessed from its
 contents: `execution.json` uses the collapsible JSON viewer; use `--component cyclops:trace` for a trace with
 another filename. File contents must still be valid for the chosen renderer.
+
+## Markdown
+
+```sh
+blind share review.md
+blind share jaw.ply review.md
+blind share notes.txt --component markdown
+blind share review.md --component text  # inspect the original syntax
+```
+
+The `markdown` component renders headings, emphasis, lists, read-only task lists,
+quotes, fenced code, links and GitHub-style tables. It follows the Viewer theme
+and supports the same grouping, double-click expansion, sharing and PNG export
+as other surfaces. Code blocks and wide tables scroll within the document.
+See [the example document](../tests/fixtures/review.md).
+
+Markdown must be UTF-8. Preview is limited to 1 MiB; larger documents show a
+link to the original attachment. HTML is sanitized to document elements; scripts,
+styles, frames and interactive forms are removed. HTTP(S) and mailto links open
+separately. Relative links and fragment navigation are not resolved. Only embedded
+base64 PNG/JPEG/GIF/WebP images render; remote images, sibling file assets and
+images that fail to decode are shown as alt text, keeping previews and isolated exports self-contained. Mermaid,
+math typesetting and code syntax highlighting are not included.
 
 ## Groups and layout
 
@@ -237,7 +261,7 @@ produce named warnings without discarding readable geometry.
 ## Image export and content boundaries
 
 PNG export uses the formal Viewer for scenes using the component contract,
-including their position, opacity, labels and plugin content. It awaits text loads,
+including their position, opacity, labels and plugin content. It awaits text/Markdown loads,
 image decode, HTML load, fonts and each visible plugin's `ready` message. Failed
 or timed-out components fail export explicitly. Hidden components are not awaited.
 Geometry scenes without stored entities use the native renderer; component groups use the Viewer
@@ -262,7 +286,7 @@ relative asset bundles are not expanded. CSS 3D surfaces share the camera with W
 but not its depth buffer, so they are not mesh-occluded geometry. Frame labels have
 no external leader lines.
 
-Blind has six built-ins: `mesh`, `points`, `text`, `json`, `html`, `image`. Order/task naming,
+Blind has seven built-ins: `mesh`, `points`, `text`, `markdown`, `json`, `html`, `image`. Order/task naming,
 trace recognition and Perfetto integration belong to Cyclops. Cyclops provides an
 exportable Chrome Trace JSON preview and optional Perfetto analysis in the expanded
 component; no second scene-level timeline is introduced.
