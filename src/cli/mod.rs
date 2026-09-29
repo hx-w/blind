@@ -1,4 +1,5 @@
 //! Command parsing, terminal interaction, and application orchestration.
+mod discovery;
 mod oss;
 mod plugin;
 mod registration;
@@ -42,15 +43,18 @@ enum ClientCommand {
         #[arg(long)]
         name: Option<String>,
     },
-    /// Share files as scene components through the registered Blind server.
+    /// Share files or directories as scene components through the registered Blind server.
     #[command(
-        long_about = "Share files with automatic display selection. PLY/STL/OBJ → mesh, PTS → points, logs/text → text, Markdown → markdown, ordinary JSON → json, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
-        after_help = "EXAMPLES:\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n  blind share --config collection.json --format json\n  generate_collection | blind share --config - --format json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n  {\"kind\":\"collection\",\"schema_version\":1,\"title\":\"Case review\",\"active_scene_id\":\"design\",\"scenes\":[{\"id\":\"design\",\"title\":\"Design\",\"resources\":[{\"path\":\"crown.ply\"}]},{\"id\":\"scan\",\"title\":\"Scan\",\"resources\":[{\"path\":\"scan.ply\"}]}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config, or cwd for --config -, or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, markdown, json, html, image or plugin:name. Collection children accept resources/groups or one plugin uri. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
+        long_about = "Share files or local directories with automatic display selection. Directories include supported files in the current level; add --recursive for subdirectories. Hidden entries and symbolic links inside directories are skipped. Each directory is sorted by path; duplicate paths are removed before assigning label/component indices. At most 256 resources form one scene. PLY/STL/OBJ → mesh, PTS → points, logs/text → text, Markdown → markdown, ordinary JSON → json, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
+        after_help = "EXAMPLES:\n  blind share ./\n  blind share ./results --recursive --format json\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n  blind share --config collection.json --format json\n  generate_collection | blind share --config - --format json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n  {\"kind\":\"collection\",\"schema_version\":1,\"title\":\"Case review\",\"active_scene_id\":\"design\",\"scenes\":[{\"id\":\"design\",\"title\":\"Design\",\"resources\":[{\"path\":\"crown.ply\"}]},{\"id\":\"scan\",\"title\":\"Scan\",\"resources\":[{\"path\":\"scan.ply\"}]}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config, or cwd for --config -, or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, markdown, json, html, image or plugin:name. Collection children accept resources/groups or one plugin uri. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
     )]
     Share {
-        /// File paths or oss://ALIAS/BUCKET/KEY addresses, in display order.
+        /// Files, local directories, or oss://ALIAS/BUCKET/KEY addresses, in display order.
         #[arg(required_unless_present = "config", conflicts_with = "config")]
         meshes: Vec<PathBuf>,
+        /// Include subdirectories; directory scans skip hidden entries and symbolic links.
+        #[arg(long, conflicts_with = "config")]
+        recursive: bool,
         /// JSON scene or collection manifest; use - for stdin (paths relative to cwd).
         #[arg(
             long,
@@ -116,6 +120,7 @@ pub async fn run() -> Result<()> {
         } => registration::join(stdin, local, client_only, address, port, name).await?,
         ClientCommand::Share {
             meshes,
+            recursive,
             config,
             title,
             labels,
@@ -131,6 +136,7 @@ pub async fn run() -> Result<()> {
                 labels,
                 components,
                 ShareOptions {
+                    recursive,
                     host,
                     ttl_days: ttl,
                     format,

@@ -14,6 +14,7 @@ use std::{
 };
 
 pub(super) struct ShareOptions {
+    pub(super) recursive: bool,
     pub(super) host: Option<String>,
     pub(super) ttl_days: u32,
     pub(super) format: OutputFormat,
@@ -360,6 +361,7 @@ pub(super) async fn share(
     options: ShareOptions,
 ) -> Result<()> {
     let ShareOptions {
+        recursive,
         host,
         ttl_days,
         format,
@@ -368,6 +370,7 @@ pub(super) async fn share(
     let plan = match config {
         Some(path) => read_share_config(&path)?,
         None => {
+            let meshes = super::discovery::expand_inputs(meshes, recursive).await?;
             let labels = parse_labels(&labels, meshes.len())?;
             let display = parse_components(&components, meshes.len())?;
             SharePlan::Scene(Box::new(ShareInput {

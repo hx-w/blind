@@ -2,7 +2,7 @@
 
 [Documentation](../README.md#documentation)
 
-Share one file, a group of files, or several independent scenes. The CLI is also
+Share one file, a directory, a group of files, or several independent scenes. The CLI is also
 the Agent interface; `blind share --help` describes its complete input contract.
 
 ```sh
@@ -13,6 +13,36 @@ blind share --config scene.json --format json
 
 Files are displayed by extension. See [scene components](components.md) for
 Markdown, text, JSON, HTML, images, geometry and renderer overrides.
+
+## Directories
+
+```sh
+blind share ./
+blind share ./results --format json
+blind share ./results --recursive --title 'Run review'
+blind share ./geometry ./reports extra.log
+```
+
+Each directory expands to its supported files and produces **one scene link**
+for the combined inputs. By default only the directory's current level is scanned;
+`--recursive` includes subdirectories. Discovery uses the built-in component
+extensions and renderer extensions installed on the connected server (or the
+local server before initial registration), case-insensitively. Unsupported files,
+hidden entries (names starting with `.`), and symbolic links inside directories
+are skipped. An explicitly supplied directory may itself be a symbolic link.
+
+Arguments retain their order. Each directory's files are sorted by path, with
+duplicate canonical paths removed across the expanded inputs (first occurrence
+wins). `--label` and `--component` indices refer to this final order. Explicit
+files are retained even with unknown extensions, allowing component overrides.
+Empty results, unreadable directories, missing inputs, or more than 256 resources
+fail before creating a link; oversized scans are never silently truncated.
+
+The resource list is captured when the command runs: new files require another
+`share`. Existing source validation still applies to changed or deleted files.
+Directory discovery does not apply to `--config` resources or OSS/plugin URIs;
+`--recursive` cannot be combined with `--config`. It does not apply `.gitignore`
+rules, so choose the directory whose supported files you intend to share.
 
 ## Titles and scene information
 

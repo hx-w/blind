@@ -23,8 +23,8 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     origin = f'http://127.0.0.1:{port}'
-    def cli(*args, ok=True):
-        result = subprocess.run([str(BIN), *map(str,args)], env=env, text=True, capture_output=True, timeout=90)
+    def cli(*args, ok=True, cwd=None, environment=None):
+        result = subprocess.run([str(BIN), *map(str,args)], env=environment or env, cwd=cwd, text=True, capture_output=True, timeout=90)
         assert (result.returncode == 0) == ok, result.stderr
         return result.stdout
     def api(path, body=None):
@@ -34,8 +34,8 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
                 return response.status, response.read(), response.headers
         except urllib.error.HTTPError as error:
             return error.code, error.read(), error.headers
-    def share(*args):
-        result = json.loads(cli('share', *args, '--format', 'json'))
+    def share(*args, **kwargs):
+        result = json.loads(cli('share', *args, '--format', 'json', **kwargs))
         token = result['viewer_url'].rsplit('/',1)[1]
         status, payload, _ = api(f'/api/v1/scenes/{token}')
         assert status == 200, payload
@@ -51,7 +51,7 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         else: raise AssertionError('server not ready')
         # A component-only plugin exercises the public package and renderer contract.
         package = tmp/'example'; package.mkdir()
-        manifest = {'id':'example','name':'Example','version':'1.0.0','schemes':[], 'protocol_versions':[1],'entrypoint':[], 'files':['panel.html'], 'components':[{'name':'panel','entrypoint':'panel.html','api_version':1,'extensions':['trace.json'],'frame_origins':['https://example.org']}], 'config_schema':{'type':'object','properties':{},'required':[],'additionalProperties':False}}
+        manifest = {'id':'example','name':'Example','version':'1.0.0','schemes':[], 'protocol_versions':[1],'entrypoint':[], 'files':['panel.html'], 'components':[{'name':'panel','entrypoint':'panel.html','api_version':1,'extensions':['trace.json','traceblob'],'frame_origins':['https://example.org']}], 'config_schema':{'type':'object','properties':{},'required':[],'additionalProperties':False}}
         (package/'blind-plugin.json').write_text(json.dumps(manifest))
         html = """<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:#e000e0}</style><script>window.addEventListener('message',e=>{if(e.source===parent&&e.data?.type==='blind:init'){document.body.textContent=new TextDecoder().decode(e.data.buffer);e.ports[0].postMessage({version:1,type:'ready'});}});</script>"""
         (package/'panel.html').write_text(html)
@@ -62,6 +62,42 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         (tmp/'page.html').write_text('<h1>Report</h1><script>document.title="isolated"</script>')
         mesh = ROOT/'tests/fixtures/tetra.ply'
         markdown = ROOT/'tests/fixtures/review.md'
+        # Directory discovery runs on the source machine and yields one normal scene.
+        directory = tmp/'directory'; directory.mkdir()
+        (directory/'nested').mkdir(); (directory/'.hidden').mkdir()
+        (directory/'a.ply').write_bytes(mesh.read_bytes())
+        (directory/'b.md').write_bytes(markdown.read_bytes())
+        (directory/'c.TRACEBLOB').write_text('plugin-only extension')
+        (directory/'nested'/'d.log').write_text('nested log')
+        (directory/'skip.bin').write_text('explicit override only')
+        (directory/'.secret.json').write_text('{}')
+        (directory/'.hidden'/'private.txt').write_text('hidden')
+        (directory/'linked.log').symlink_to(tmp/'run.log')
+        (directory/'cycle').symlink_to(directory, target_is_directory=True)
+        directory_token, direct = share('./', cwd=directory)
+        assert [c['component'] for c in direct['entities']] == ['mesh','markdown','example:panel']
+        assert api(f'/s/{directory_token}')[0] == 200
+        assert api('/'+direct['attachments'][1]['url'])[1] == b'plugin-only extension'
+        _, recursive = share(directory, directory/'b.md', '--recursive', '--label', '4=Nested', '--component', '2=text')
+        assert [c['component'] for c in recursive['entities']] == ['mesh','text','example:panel','text']
+        assert recursive['entities'][3]['label'] == 'Nested'
+        # The client has no local plugin installation; extensions come from its server.
+        remote_env = {**env, 'BLIND_CONFIG_DIR': str(tmp/'client-without-plugins')}
+        _, remote_directory = share(directory, environment=remote_env)
+        assert [c['component'] for c in remote_directory['entities']] == ['mesh','markdown','example:panel']
+        assert not (tmp/'client-without-plugins').exists()
+        _, explicit_unknown = share(directory/'skip.bin', directory, '--component', '1=text')
+        assert len(explicit_unknown['entities']) == 4 and explicit_unknown['entities'][0]['component'] == 'text'
+        (directory/'z.txt').write_text('added later')
+        assert len(json.loads(api(f'/api/v1/scenes/{directory_token}')[1])['entities']) == 3
+        _, refreshed = share(directory)
+        assert len(refreshed['entities']) == 4
+        empty = tmp/'empty'; empty.mkdir()
+        assert cli('share', empty, '--format', 'json', ok=False) == ''
+        assert cli('share', directory, tmp/'missing', '--format', 'json', ok=False) == ''
+        for i in range(257): (empty/f'{i}.txt').write_text('too many')
+        assert cli('share', empty, '--format', 'json', ok=False) == ''
+        cli('share', '--config', tmp/'scene.json', '--recursive', ok=False)
         md_token, md_scene = share(markdown)
         assert md_scene['entities'][0]['component'] == 'markdown' and not md_scene['meshes']
         assert api('/'+md_scene['attachments'][0]['url'])[1] == markdown.read_bytes()
