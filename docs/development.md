@@ -37,6 +37,11 @@ macOS Intel and Linux x86_64 archives with `SHA256SUMS`.
 See [the changelog](../CHANGELOG.md) for released changes and
 [security reporting](../SECURITY.md) for vulnerability reports.
 
+## Code organization
+
+See [repository architecture](architecture.md) for subsystem ownership, dependency
+direction, and where to place new code.
+
 ## Rendering internals
 
 Interactive WebGL and offscreen WebGPU use the same matte material definition,

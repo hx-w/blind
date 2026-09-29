@@ -1,27 +1,11 @@
-pub mod archive;
+//! Blind's command interface and implementation modules.
+pub mod cli;
 pub mod client;
-pub mod component;
-pub mod config;
-pub mod lod;
-pub mod mesh;
-pub mod network;
-pub mod oss;
+pub mod geometry;
 pub mod plugin;
-pub mod plugin_update;
-pub mod registry;
+pub mod protocol;
 pub mod render;
+pub mod runtime;
 pub mod scene;
 pub mod server;
-pub mod server_cli;
-pub mod service;
-pub mod source;
-pub mod token;
-pub mod update;
-
-mod render_labels;
-
-mod collection_image;
-
-mod render_occlusion;
-
-mod render_viewer;
+pub mod storage;

@@ -1,4 +1,4 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    blind::client::run().await
+    blind::cli::run().await
 }

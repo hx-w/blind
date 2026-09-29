@@ -72,7 +72,7 @@ explains permanent links, reshares and source changes.
 | Read from S3-compatible storage or signed download domains | [Object storage](docs/oss.md) |
 | Extend Blind with server-side resolvers and renderers | [Plugins](docs/plugins.md) |
 | Integrate with HTTP or understand saved scene state | [API](docs/api.md) · [Sharing contract](docs/sharing.md) |
-| Build, test or contribute | [Development](docs/development.md) |
+| Build, test or contribute | [Development](docs/development.md) · [Architecture](docs/architecture.md) |
 
 [Releases](https://github.com/hx-w/blind/releases) · [Changelog](CHANGELOG.md) ·
 [Security](SECURITY.md) · [MIT license](LICENSE)

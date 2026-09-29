@@ -1,4 +1,31 @@
-use super::*;
+use super::{
+    NO_STORE, WebAssets,
+    access::{open_scene, owner_matches, source_result},
+    dto::{PublicMesh, PublicScene, ReshareRequest, ShareResponse},
+    error::AppError,
+    links::{links_for, request_origin, select_share_origin, share_hosts},
+    no_store,
+    state::{AppState, LOD_MEMORY_EXPANSION, LOD_MEMORY_MIB, MIB, RESPONSE_MEMORY_MIB},
+};
+use crate::{
+    geometry::{
+        lod::{self, LodAsset},
+        mesh,
+    },
+    scene::{MeshFormat, MeshQuality, SceneDescriptor, SceneUpdate},
+};
+use crate::{runtime::config::control_address, storage::registry::is_short_secret};
+use axum::{
+    Json,
+    body::Body,
+    extract::{ConnectInfo, Path as AxumPath, Query, State},
+    http::{HeaderMap, HeaderValue, Response, StatusCode, header},
+    response::IntoResponse,
+};
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use std::time::Duration;
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 pub(super) async fn get_scene(
     Query(query): Query<HashMap<String, String>>,
@@ -398,7 +425,7 @@ pub(super) async fn render_image(
                 let mut images = Vec::with_capacity(scene_count);
                 for (index, (id, scene)) in opened.scene.scene_entries().enumerate() {
                     let id = id.expect("collection scenes have IDs");
-                    let size = crate::collection_image::scene_viewport_size(
+                    let size = crate::render::collection::scene_viewport_size(
                         scene_count,
                         collection.layout,
                         index,
@@ -412,7 +439,7 @@ pub(super) async fn render_image(
                 let layout = collection.layout;
                 let strokes = collection.strokes.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::collection_image::compose(&images, &active, layout, &strokes)
+                    crate::render::collection::compose(&images, &active, layout, &strokes)
                 })
                 .await
                 .map_err(|error| AppError::internal(&error.to_string()))?
@@ -465,7 +492,9 @@ async fn render_single_image(
                 .entities
                 .iter()
                 .filter_map(|c| match c.source {
-                    crate::component::ComponentSource::Attachment(i) => scene.attachments.get(i),
+                    crate::scene::component::ComponentSource::Attachment(i) => {
+                        scene.attachments.get(i)
+                    }
                     _ => None,
                 })
                 .map(|a| {
@@ -478,7 +507,7 @@ async fn render_single_image(
         )
         .try_fold(0_u64, |total, size| total.checked_add(size))
         .ok_or_else(|| AppError::unprocessable("source size overflow"))?;
-    if source_bytes > crate::source::MAX_SOURCE_BYTES {
+    if source_bytes > crate::storage::sources::MAX_SOURCE_BYTES {
         return Err(AppError::unprocessable("image sources exceed 512 MiB"));
     }
     if !scene.entities.is_empty() || scene.state.section.is_some() {
@@ -491,7 +520,7 @@ async fn render_single_image(
                 .map(|id| format!("&scene={id}"))
                 .unwrap_or_default()
         );
-        let bytes = crate::render_viewer::render(&url,render_scene.state.frame.width,render_scene.state.frame.height).await.map_err(|error| {
+        let bytes = crate::render::browser::render(&url,render_scene.state.frame.width,render_scene.state.frame.height).await.map_err(|error| {
             tracing::warn!(%error,"full scene image render failed");
             AppError::unprocessable("Full scene export failed; check component availability and the Server Chromium installation")
         })?;
@@ -662,7 +691,6 @@ pub(super) async fn asset(
 #[cfg(test)]
 mod response_budget_tests {
     use super::*;
-
     #[test]
     fn response_releases_memory_only_when_body_is_dropped() {
         let memory = Arc::new(tokio::sync::Semaphore::new(1));

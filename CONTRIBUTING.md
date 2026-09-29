@@ -22,3 +22,5 @@ generated assets in pull requests.
 Keep changes small, add tests for behavior contracts, and update the README or
 sharing contract when user-visible behavior changes. Never commit a PAT,
 private Mesh, generated scene URL, or local configuration.
+
+See [repository architecture](docs/architecture.md) for module ownership and dependency rules.

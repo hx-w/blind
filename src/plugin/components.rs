@@ -1,5 +1,6 @@
 //! Renderer registration and immutable scene bindings, independent of resolver execution.
 use super::{Manifest, installed, list, read_json, root, valid_id, validate_manifest};
+use crate::scene::component::{RendererBinding, RendererCapabilities};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs};
@@ -20,23 +21,12 @@ pub struct RendererDefinition {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RendererBinding {
-    #[serde(default)]
-    pub frame_origins: Vec<String>,
-    pub plugin: String,
-    pub revision: String,
-    #[serde(default)]
-    pub capabilities: RendererCapabilities,
-    pub name: String,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ComponentResource {
     pub id: String,
     pub uri: String,
     pub label: String,
     #[serde(flatten)]
-    pub display: crate::component::DisplayOptions,
+    pub display: crate::scene::component::DisplayOptions,
 }
 pub(super) fn validate_renderers(m: &Manifest) -> Result<()> {
     let mut names = HashSet::new();
@@ -87,8 +77,10 @@ pub(super) fn validate_renderers(m: &Manifest) -> Result<()> {
     Ok(())
 }
 /// Resolve once at scene creation; current receipts never influence existing scenes.
-pub fn bind_component(kind: &crate::component::ComponentKind) -> Result<Option<RendererBinding>> {
-    let crate::component::ComponentKind::Plugin(kind) = kind else {
+pub fn bind_component(
+    kind: &crate::scene::component::ComponentKind,
+) -> Result<Option<RendererBinding>> {
+    let crate::scene::component::ComponentKind::Plugin(kind) = kind else {
         return Ok(None);
     };
     let (id, name) = kind.split_once(':').context("invalid component name")?;
@@ -112,7 +104,7 @@ pub fn bind_component(kind: &crate::component::ComponentKind) -> Result<Option<R
             .into_owned(),
     }))
 }
-pub fn infer_component(path: &str) -> Result<crate::component::ComponentKind> {
+pub fn infer_component(path: &str) -> Result<crate::scene::component::ComponentKind> {
     let filename = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
     let dir = root()?;
     let mut candidates = Vec::new();
@@ -136,9 +128,9 @@ pub fn infer_component(path: &str) -> Result<crate::component::ComponentKind> {
             candidates.iter().filter(|(n, _)| n == length).count() == 1,
             "ambiguous component; select with --component"
         );
-        return crate::component::ComponentKind::try_from(kind.clone());
+        return crate::scene::component::ComponentKind::try_from(kind.clone());
     }
-    crate::component::ComponentKind::infer(path)
+    crate::scene::component::ComponentKind::infer(path)
 }
 pub fn renderer_document(binding: &RendererBinding) -> Result<(Vec<u8>, Vec<String>)> {
     ensure!(
@@ -173,23 +165,6 @@ pub fn renderer_document(binding: &RendererBinding) -> Result<(Vec<u8>, Vec<Stri
     Ok((fs::read(path)?, definition.frame_origins.clone()))
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct RendererCapabilities {
-    pub presentations: Vec<String>,
-    pub movable: bool,
-    pub resizable: bool,
-}
-impl Default for RendererCapabilities {
-    fn default() -> Self {
-        Self {
-            presentations: vec!["spatial".into(), "focus".into()],
-            movable: true,
-            resizable: false,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -205,9 +180,9 @@ mod tests {
             .is_err()
         );
         for bad in ["trace", "../foo:bar", "a:b:c", "a:", ":b"] {
-            assert!(crate::component::ComponentKind::try_from(bad.to_owned()).is_err());
+            assert!(crate::scene::component::ComponentKind::try_from(bad.to_owned()).is_err());
         }
-        let mut update: crate::component::EntityUpdate = serde_json::from_value(
+        let mut update: crate::scene::component::EntityUpdate = serde_json::from_value(
             json!({"id":"a","visible":true,"opacity":1,"state":{"selection":3}}),
         )
         .unwrap();
