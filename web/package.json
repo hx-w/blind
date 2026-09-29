@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --experimental-strip-types --test src/*.test.mjs",
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build --base=./",
     "test:browser": "node --test tests/viewer-interactions.mjs",
     "test:collection": "node --test tests/collection-interactions.mjs"
   },

@@ -6,6 +6,7 @@ mod dto;
 mod error;
 mod lease;
 mod links;
+mod preview;
 mod registration;
 mod scenes;
 mod sharing;

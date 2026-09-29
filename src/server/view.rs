@@ -5,6 +5,7 @@ use super::{
     error::AppError,
     links::{links_for, request_origin, select_share_origin, share_hosts},
     no_store,
+    preview::{self, Metadata},
     state::{AppState, LOD_MEMORY_EXPANSION, LOD_MEMORY_MIB, MIB, RESPONSE_MEMORY_MIB},
 };
 use crate::{
@@ -586,33 +587,20 @@ async fn render_single_image(
     Ok(bytes)
 }
 
-fn serve_index(base_path: Option<String>) -> Result<Response<Body>, AppError> {
-    let asset =
-        WebAssets::get("index.html").ok_or_else(|| AppError::not_found("Viewer not built"))?;
-    // Anchor every relative URL (API fetches, bundled assets) to the configured
-    // base path so the viewer works under both mounts. With no base path this
-    // resolves to "/" which preserves the original absolute-path behavior.
-    let href = format!("{}/", base_path.as_deref().unwrap_or_default());
-    let html = String::from_utf8_lossy(&asset.data).replacen(
-        "<head>",
-        &format!("<head>\n    <base href=\"{href}\">"),
-        1,
-    );
-    Ok(Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-        .header(header::CACHE_CONTROL, NO_STORE)
-        .body(Body::from(html))?)
-}
-
-pub(super) async fn index(State(state): State<AppState>) -> Result<Response<Body>, AppError> {
-    serve_index(state.config.base_path())
+pub(super) async fn index(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, AppError> {
+    let origin = preview::origin(&headers, &state.config)?;
+    preview::page(state.config.base_path(), Metadata::home(&origin))
 }
 
 pub(super) async fn view_scene(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     AxumPath(token): AxumPath<String>,
+    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
 ) -> Result<Response<Body>, AppError> {
     let opened = open_scene(&state, &token, peer.ip())?;
     if opened.scene.collection.is_none() {
@@ -622,7 +610,17 @@ pub(super) async fn view_scene(
             state.registry.sources.validate_source(&opened.scene),
         )?;
     }
-    let mut response = serve_index(state.config.base_path())?;
+    let scene_id = query.get("scene").map(String::as_str);
+    let scene = if scene_id.is_some() {
+        selected_scene(&opened.scene, scene_id)?
+    } else {
+        &opened.scene
+    };
+    let origin = preview::origin(&headers, &state.config)?;
+    let mut response = preview::page(
+        state.config.base_path(),
+        Metadata::scene(scene, &token, &origin, scene_id),
+    )?;
     let mut origins: Vec<_> = opened
         .scene
         .scene_entries()

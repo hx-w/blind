@@ -78,6 +78,7 @@ Its child modules stay private to the HTTP adapter:
 | `sharing.rs` | Owner/client share and collection request orchestration |
 | `scenes/` | Assemble scenes from source paths or resolver manifests |
 | `assets.rs` | Serve attachments and pinned plugin renderers |
+| `preview.rs` | Viewer HTML and server-rendered link preview metadata |
 | `view.rs` | Scene/mesh/LOD viewing, resharing, images, embedded viewer |
 | `access.rs` | PAT/client capability checks, scene access, source invalidation |
 | `dto.rs` | HTTP-only request and response shapes |

@@ -15,6 +15,29 @@ http://host/i/<6-char-code>.png
 
 The viewer URL restores an interactive scene. The image URL performs a fresh offscreen render and returns `image/png`. Both derive from the same scene snapshot.
 
+## Link previews
+
+Viewer HTML includes a scene title, bounded plain-text description, and Open Graph
+and Twitter Card metadata before JavaScript runs. The preview image uses the
+existing PNG URL; serving the HTML does not render an image or fetch resource
+contents. Collections advertise the combined image, while `?scene=ID` selects
+the child's title and image. Invalid or expired links retain their HTTP error
+status and do not advertise a successful scene preview.
+
+Preview URLs prefer the server's configured public origin (`blind init --host`)
+and include its base path. Viewer builds use relative asset URLs so browser
+exports remain inside that mount. Without a configured origin, they follow the existing
+Host/forwarded-host and forwarded-proto deployment contract; reverse proxies must
+set these headers from trusted routing configuration. The caller's `Origin`
+header, owner credentials, and viewer-only query options are not copied into
+metadata. Descriptions include only the public title and resource counts, not
+source paths or attribution. Titles are HTML-escaped, whitespace-normalized and
+bounded without splitting Unicode characters.
+
+Updating metadata takes effect when the updated server binary is deployed.
+Messaging clients may cache existing cards; their refresh behavior and image
+fetch timing are outside Blind's control.
+
 ## Descriptor
 
 The encrypted descriptor contains:

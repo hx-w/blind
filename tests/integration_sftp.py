@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -98,8 +99,8 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         assert len(output['viewer_url'].rsplit('/', 1)[1]) == 6
         import re
         status, html = api('/')
-        assets = re.findall(rb'(?:src|href)="(/assets/[^"]+)"', html)
-        assert assets and all(api(a.decode())[0] == 200 for a in assets), 'viewer assets must be served at the root'
+        assets = re.findall(rb'(?:src|href)="([^"]*assets/[^"]+)"', html)
+        assert assets and all(api(urllib.parse.urljoin('/', a.decode()))[0] == 200 for a in assets), 'viewer assets must be served at the root'
         token = output['viewer_url'].rsplit('/', 1)[1]
         status, scene = api('/api/v1/scenes/'+token)
         assert status == 200 and scene['source']['user'] == pwd.getpwuid(os.getuid()).pw_name
