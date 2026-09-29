@@ -1,594 +1,78 @@
+![Blind: a terminal robot shares a wireframe duck for someone to inspect on a phone](docs/assets/banner.png)
+
 # Blind
 
+**From your terminal to a shared 3D view.**
+
 [![Release](https://img.shields.io/github/v/release/hx-w/blind)](https://github.com/hx-w/blind/releases/latest)
-[![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4b5563)](https://github.com/hx-w/blind#install)
+[![macOS and Linux](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-4b5563)](#quick-start)
 [![License: MIT](https://img.shields.io/github/license/hx-w/blind)](LICENSE)
 
-Instant mobile 3D review across your team's machines.
+Blind turns meshes, notes and diagnostics into a link you can open on a phone
+or desktop. An agent can create the scene from the CLI; a person can rotate,
+inspect, annotate and share what they see.
 
-`blind` is one executable with separate Client and Server responsibilities.
-On A, `blind serve` runs the viewer, source registry, LOD generation and PNG
-renderer. On B/C, `blind join` and `blind share` are short-lived Client commands;
-they do not start a background service. Supported files are PLY meshes and
-point clouds, STL, OBJ, and Denta PTS.
+- Rotate the model, inspect a section, or mark a detail directly on its surface.
+- Put Markdown, JSON, images and logs beside the geometry for context.
+- Share the view and its PNG. Original files stay on their source machine or object store.
 
-Original files stay on their owning host or object store. The server reads remote files through
-**read-only SFTP**, or reads directly when Client and Server share the same OS
-user and filesystem. It never persists original geometry or rendered images;
-only encrypted scene descriptors, registration metadata, and dedicated SSH keys
-are stored. Derived LODs use a bounded memory cache.
+## Quick start
 
-### OSS sources
-
-Blind reads private meshes from S3-compatible APIs or signed download domains.
-On the **Server machine**, configure one alias per endpoint/credential pair:
-
-```sh
-blind oss set prod     # prompts: endpoint, region, Access Key, Secret Key
-blind oss list        # aliases and connection metadata only; no credentials
-blind oss remove prod
-```
-
-The default `--signing s3-v4` uses an HTTPS S3 API endpoint and its region.
-For a private CDN using HMAC-SHA1 URL signatures:
-
-```sh
-blind oss set assets --signing hmac-sha1-url --bucket my-bucket
-# prompts: HTTPS download origin, Access Key, Secret Key (no region)
-```
-
-This mode signs `https://DOMAIN/KEY?e=DEADLINE`, then appends a `token`
-containing the Access Key and URL-safe Base64 HMAC-SHA1 signature. The domain
-is bound to the configured bucket; other buckets are rejected. Signed URLs
-are generated on the Server and never sent to the Client or viewer.
-`set` also replaces an existing alias; terminal credential input is hidden.
-Automation can pipe four lines on stdin for S3, or three for URL signing. Credentials are
-stored only in the Server's `oss.json`, next to `config.json`, with mode 0600.
-The next read picks up changes without a restart.
-
-On a remote Client, `blind oss list` queries its connected Server and shows
-the configured signing mode and bucket/region. Every active registered Client
-can share these OSS aliases; discovery never returns Access Keys or Secret Keys. `set` and `remove`
-always edit the local Server configuration, not the remote Server.
-
-```sh
-blind share oss://prod/my-bucket/orders/123/crown.ply --format json
-blind share oss://prod/my-bucket/crown.ply oss://archive/other-bucket/jaw.stl
-```
-
-Addresses are `oss://ALIAS/BUCKET/KEY`; percent-encode reserved characters in
-object keys. Each mesh selects its own alias. Local files can be mixed with OSS
-addresses, and `--config` accepts these addresses in `resources[].path`.
-Labels, groups, Raw/LOD, PNG and sharing work as for filesystem sources.
-
-Any active registered Client can create OSS shares using the connected Server's
-aliases. The Server reads the objects; the Client does not need storage keys or
-a live SFTP connection for an OSS-only scene. The owner PAT API also supports
-OSS scenes. Viewers only need the resulting Blind URL.
-
-Blind performs signed, read-only GET requests, hashes the original bytes, and
-does not save meshes to disk. Changes/deletion or alias removal invalidate
-shares; temporary authentication/network failures return 503 and remain
-recoverable. Reads are limited to 512 MiB per object and 120 seconds, and do
-not follow redirects. HTTPS is required except for loopback test endpoints.
-
-## Why Blind
-
-When an Agent produces a Mesh and you only have a phone, screenshots and 2D
-renders hide the details you need to inspect. Blind keeps the original 3D
-interaction available: rotate, pan, zoom, fit, switch views, compare multiple
-Meshes, hide individual objects, and adjust presentation without returning to
-the workstation.
-
-The source file remains the lifecycle owner. Delete or change any Mesh in a
-scene and every view or image link for that scene immediately returns
-`410 Gone`.
-
-## Install
-
-Install the same executable on A and B/C:
+Install the latest release on macOS (Apple Silicon or Intel) or Linux x86_64:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | sh
 ```
 
-`blind update` updates that executable and restarts its managed macOS
-LaunchAgent or Linux systemd user service when one is installed.
-`BLIND_VERSION` and `BLIND_INSTALL_DIR` select a version and installation
-directory. The installer never invokes sudo.
-
-Prebuilt releases support macOS 14+ on Apple Silicon and Intel, plus native
-x86_64 Linux servers. Docker remains optional; see the
-[Client/Server guide](docs/client-server.md).
-
-## Quick start
-
-### Central server A
-
-```sh
-blind init --host https://blind.example.com
-blind serve
-# In another terminal, issue one permanent reusable invitation for the team.
-blind invite --host https://blind.example.com
-# Revoke every issued invitation when rotating a shared invitation.
-blind invite --revoke-all
-```
-
-Point your HTTPS reverse proxy at the server. Keep its configured public origin
-on A; generated URLs never use the source machine's SFTP address.
-
-### Remote Client B/C
-
-Enable the OS OpenSSH/SFTP service once. On macOS: **System Settings → General →
-Sharing → Remote Login**, allowing the current user. Then:
-
-```sh
-# Paste the invitation through stdin; do not put it in shell history.
-blind join --stdin --address workstation.local --name carol
-# Finish stdin with Ctrl-D. The address must be reachable from A.
-blind share crown.ply preparation.stl --label '1=Crown' --format json
-blind status
-```
-
-The Client installs a dedicated, forced read-only SFTP public key in this user's
-`authorized_keys`; it never uploads a personal private key. Registration tests
-both host identity and read-only access. There is no Client daemon. Each OS user
-on B registers separately and uses an independent identity and key.
-
-### Client and Server on the same host
+Start the server:
 
 ```sh
 blind serve
-# In another terminal, under the same OS user:
+```
+
+In another terminal on the same machine, as the same user, register locally
+and share a small sample mesh:
+
+```sh
 blind join --local
-blind share crown.ply --format json
+curl -fsSLo demo.ply https://raw.githubusercontent.com/hx-w/blind/main/tests/fixtures/tetra.ply
+blind share demo.ply --format json
 ```
 
-SFTP is unnecessary in this case. The first `blind share` can register locally
-automatically if no Client registration exists. Different OS users, or a host
-Client accessing a containerized Server, use the remote SFTP flow.
+Open `viewer_url` in your browser, or on a phone that can reach this machine.
+Use `image_url` for a PNG of the same view. Keep `owner_url` private.
+Replace `demo.ply` with your own PLY, STL, OBJ or PTS file.
 
-See [registration, recovery and deployment](docs/client-server.md) for details.
+Already using a team server? Follow [Client registration](docs/client-server.md#registration)
+instead. To host one, see [team server setup](docs/client-server.md#start-a-team-server).
 
-Open `owner_url` on your phone for your own review. Give other people
-`viewer_url` or `image_url`.
-
-Use `--title` for a short label or a detailed, multiline scene message:
+## Bring the context
 
 ```sh
-blind share crown.ply preparation.stl --title 'Crown comparison
-
-Top: reference crowns. Bottom: generated results.
-Review the cusps, grooves, and marginal ridges from the same view.' --format json
+blind share model.ply notes.md metrics.json --format json
+blind share --config collection.json --format json
 ```
 
-Scene information includes the source hostname, OS user, and registration name by default.
-Open the scene list and choose its **ⓘ 信息** tab. Messages preserve line breaks,
-wrap long words and scroll without truncation. The same tab shows the selected
-entity and Mesh Raw/LOD controls.
-
-Attach labels with repeated `--label INDEX[,INDEX...]=TEXT` options. Indices
-start at 1 and follow the input file order. One index labels one Mesh; multiple
-indices label a group:
-
-```sh
-blind share crown.ply donor-a.ply donor-b.ply \
-  --label '1=生成牙冠' --label '2,3=参考牙' --format json
-```
-
-For a large or persistent resource list, put the scene definition in JSON and
-run `blind share --config scene.json`. Relative resource paths are resolved
-from the config file's directory; group members are 1-based resource indices:
-
-```json
-{
-  "title": "Case review",
-  "resources": [
-    { "path": "meshes/crown.ply", "label": "生成牙冠" },
-    { "path": "meshes/donor-a.ply" },
-    { "path": "meshes/donor-b.ply" }
-  ],
-  "groups": [
-    { "label": "参考牙", "members": [2, 3] }
-  ]
-}
-```
-
-`--config` is mutually exclusive with positional Meshes, `--title`, and
-`--label`; `--host` and `--format` still apply. Unknown JSON
-fields, empty resources, bad labels, duplicate group members, and out-of-range
-indices fail before any scene is registered. See `blind share --help` for the
-complete contract.
-
-To share several independent scenes under one link, use a collection config:
-
-```json
-{
-  "kind": "collection",
-  "schema_version": 1,
-  "title": "Case review",
-  "active_scene_id": "design",
-  "scenes": [
-    { "id": "design", "title": "Design", "resources": [{ "path": "crown.ply" }] },
-    { "id": "scan", "title": "Scan", "resources": [{ "path": "scan.ply" }] }
-  ]
-}
-```
-
-Run `blind share --config collection.json --format json` to receive one
-collection URL, a composite image URL, and scene-specific view and image URLs. An agent can pipe JSON
-directly into `blind share --config - --format json`; relative paths then use
-the current directory. Each child has its own camera, selection, and styles.
-The viewer splits when every pane fits, otherwise it shows scene tabs. Its
-single toolbar acts on the focused scene. Collections use short links. See
-[the sharing contract](docs/sharing.md) for the full schema and reshare API.
-
-In the interactive viewer, select a Mesh in the scene list and use the small
-rename button after its name to edit its label.
-Labels use a small leader and an attachment dot, follow the Mesh in 3D, and keep
-a readable screen size as the camera moves. Placement prefers space outside
-Mesh bounds and avoids other labels and controls where space permits.
-During camera motion, each label retains its placement
-relative to its projected anchor so it does not jump between sides. Hidden
-Meshes hide their labels. Clear the text to remove a label; share the current
-view to save edits in a new link. Existing links keep their original labels.
-Group labels draw a restrained corner frame around visible members and can be
-selected to fit the whole group. Per-Mesh labels can coexist with group labels.
-Each label accepts up to 120 characters. View and image links include visible
-Mesh and group labels, along with screen and surface annotations.
-
-To keep Blind running after login:
-
-```sh
-blind service install
-blind service status
-```
-
-Install the service as the logged-in user. Do not use `sudo`: Blind installs a
-per-user LaunchAgent on macOS or a systemd user service on Linux and rejects
-root rather than target the wrong user session.
-
-Remove the background service with `blind service uninstall`.
-
-## Agent interface
-
-The CLI is the canonical Agent interface. `blind --help` describes the full
-workflow and every command has focused help.
-
-```sh
-blind serve
-blind share /absolute/crown.ply /absolute/preparation.stl --format json
-```
-
-The JSON result contains:
-
-```json
-{
-  "viewer_url": "http://host:7400/s/aB3_xZ",
-  "image_url": "http://host:7400/i/aB3_xZ.png",
-  "owner_url": "http://host:7400/s/aB3_xZ#owner=q7_Kp2",
-  "hosts": [],
-  "resources": [
-    {
-      "path": "/absolute/crown.ply",
-      "revision": "sha256:..."
-    }
-  ]
-}
-```
-
-- `owner_url` enables the Complete information share option and must stay
-  private.
-- `viewer_url` is the read-only interactive scene capability.
-- `image_url` renders a fresh PNG on each request.
-- `hosts` lists detected origins and marks the primary candidate.
-- `resources` gives the canonical source paths and revisions to the Agent.
-- `source` identifies the owning host, OS user, and registration name.
-
-A Skill is useful for teaching an Agent when to invoke Blind. An MCP adapter
-can wrap the CLI for clients that require tool discovery, but it should call
-this contract instead of reimplementing scene or lifecycle logic.
-
-## Viewer interaction
-
-- One finger or primary drag uses a full arcball rotation without polar limits.
-- Two fingers pinch to zoom and move together to pan.
-- Fit frames all visible Meshes.
-- The scene list places rename, opacity and visibility controls on each entity row.
-  Mesh and PTS rows show their color before the name; click it to choose a
-  preset below the row. Long names show their beginning and end; 信息 reveals
-  the full name in a scrollable area. Mesh quality sits in the
-  scene list's 信息 tab.
-- Each Mesh loads as LOD by default. 信息 can switch it to Raw without
-  changing the camera and reports Raw size, LOD size, saved bytes, and the
-  saving percentage.
-- Shared view snapshots preserve the selected Raw or LOD quality for every
-  Mesh. Links created before this setting open as LOD.
-- The first cold load shows completed Mesh count while the server generates
-  LODs. At most four Meshes are requested concurrently, and a single large Mesh
-  remains indeterminate until meshoptimizer returns. Individual failures are
-  reported without discarding Meshes that already loaded successfully.
-- Vertex-only or zero-face PLY files render as circular GPU point sprites with
-  sphere-like lighting. They are not expanded into sphere triangle Meshes.
-- PTS rings render as smooth, continuous curves through the original ordered samples, without point markers.
-- The 观察 dock controls surface mode, projection, axes, and the gray background
-  theme.
-- Annotation → Screen brush enters a touch-locked screen-markup mode with four high-contrast
-  colors, undo, and clear. Strokes can cross Meshes and empty canvas space.
-- Screen markup belongs to the captured view. Any later rotate, pan, zoom,
-  Fit, canonical-view, or projection action hides it immediately.
-- On phones, the scene list opens from the scene icon and keeps the 3D viewport
-  stable while switching between elements and information.
-
-The global toolbar never assigns one Mesh name to a multi-Mesh scene and does
-not duplicate visibility with a Solo mode.
-
-LOD generation uses meshoptimizer for PLY, STL, and OBJ triangle geometry.
-PLY point clouds are deterministically sampled across the full source order;
-PTS previews preserve ordered source samples when the curve budget permits,
-and otherwise resample the smooth curve by arc length before building its tube.
-Raw retains the full curve detail. Generated binary PLY bytes are cached in memory
-up to 256 MiB and disappear when the server exits; neither LODs nor Raw source
-copies are written to disk. Raw is fetched only after a client explicitly
-selects it, except for a bounded compatibility fallback: at most 32 MiB for one
-Mesh and 64 MiB for the whole scene. The fixed bandwidth-oriented profile
-targets 150,000 primitives per scene, clamps each resource to 1 through 50,000
-triangles or points, and uses 0.002 relative simplification error for triangle
-Meshes. There is no explicit Mesh-count ceiling; request, encrypted-descriptor,
-and per-file limits remain practical bounds. The profile is intentionally not
-exposed as a setting.
-
-## Surface annotations
-
-Open **标注** in the bottom dock to start with **画笔**. Choose **点** or **线** for
-surface marks. Points follow the
-Mesh; lines accept clicks or a continuous drag. Sparse handles guide a smooth
-curve sampled onto the visible surface. Release a drag to finish one line; the
-next drag creates another. For click-to-connect, use **完成线** or **闭合**.
-New points and completed lines keep their name field available until another
-mark or tool is chosen. **选择** lets you rename, recolor, move handles or delete.
-Canvas labels show annotation names directly; click a label to edit its mark.
-When the viewport has room, an annotation list opens alongside the scene for
-selection and visibility controls. Compact viewports keep the canvas clear of
-this list. Closing the list preserves marks, labels and the current selection.
-Labels follow camera movement in the same render frame.
-Undo and redo include each complete gesture; interrupted touches are cancelled.
-
-Drawing owns the pointer. **选择** finishes the current line and restores camera
-gestures on ordinary canvas drags; dragging a selected mark edits its handles.
-Colors remain visible in the toolbar. The visible surface under the pointer
-chooses the target automatically, independent of the selected Mesh. Every line
-belongs to one Mesh. Gaps, hidden surfaces and other Meshes cannot receive samples.
-Surface tools require triangle geometry; point clouds and PTS remain viewable.
-The target loads Raw on demand; annotated Meshes stay Raw to keep geometry stable.
-
-Sharing captures frozen 3D samples, editing handles, names, colors and visibility.
-Reopening never refits the path. View and PNG links include the marks; camera
-movement keeps them attached and hidden Meshes hide their marks. Editing produces
-a new share without changing the original. PNG exports include points, paths and name labels, with Chinese and
-Latin text rendered using the bundled font. Original Mesh files are never modified.
-The **画笔** tool retains view-dependent screen markup. All annotation tools
-share one dock, color palette, selection list, and undo/redo history. Moving the
-camera clears screen strokes, including their undo copies.
-
-## Doctor and link maintenance
-
-`blind doctor` repairs safe local invariants and audits every SQLite-backed
-short link without stopping a running server. It restores private config and
-registry permissions, verifies the schema, index, WAL, and SQLite integrity,
-checks that the configured internal scene key matches the registry, then reports
-this distribution:
-
-- valid: the payload decrypts, has not expired, and every source revision still
-  matches;
-- expired: the configured lifetime has ended;
-- source gone: a source was deleted, moved, replaced, changed, or was revoked;
-- unavailable: the source host is offline, authentication fails, or access is temporarily denied; these links are retained by `--clean-invalid`;
-- tombstoned: Blind previously detected an invalid source;
-- corrupt: required fields or the encrypted payload cannot be read.
-
-When the server is running, `blind doctor` also reports the in-memory LOD cache:
-entry count, resident bytes versus the 256 MiB limit, Raw-to-LOD payload savings,
-and source-to-LOD triangle and point counts. With no server running it reports
-the cache as inactive because derived LODs never persist to disk.
-
-Invalid or all SQLite-backed short links can be deleted while Blind continues
-serving other requests:
-
-```sh
-blind doctor --clean-invalid
-blind doctor --clear-all
-```
-
-These actions affect `/s/` short links.
-
-## Sharing
-
-Set a link's lifetime in whole days with `--ttl` (default: `7`). Use `0` for
-a permanent link:
-
-```sh
-blind share model.ply --ttl 30
-blind share model.ply --ttl 0
-blind share --config scene.json --ttl 0 --format json
-```
-
-Permanent links have no time expiry. They remain subject to source validation:
-deleted, changed or revoked sources invalidate the link, while temporary network
-or authentication failures preserve it. Automatic expiry and capacity cleanup
-never evict a valid permanent scene. Explicit `doctor --clear-all` still removes
-all short links, including permanent ones. Permanent scenes count toward the
-active-scene limit; reaching that limit rejects new links instead of evicting old ones.
-
-Browser reshares inherit the lifetime setting and preserve annotations. A changed
-snapshot starts its own lifetime; sharing an identical active snapshot reuses its
-link without extending its expiry.
-Non-default lifetimes require a server that confirms TTL support.
-
-The share action captures the current camera, presentation state, and visible
-screen markup, then
-offers three outputs:
-
-1. **View link** restores the interactive scene at the captured view.
-2. **Image link** returns an immediate `image/png` render of that state.
-3. **Complete information** contains all source paths plus both links. It is
-   available only from `owner_url`.
-
-The scene descriptor is compressed, encrypted, and authenticated with
-XChaCha20-Poly1305, then stored in a local bounded registry. The default link
-has an absolute seven-day lifetime unless `--ttl` overrides it. Blind reuses the code for an identical
-active scene, permits at most 10,000 active scenes, and caps retained rows at
-12,000 so SQLite cannot grow without bound. It contains no PAT and no Mesh
-bytes. Blind validates each source on creation; later Raw and cold-LOD requests
-hash only the requested source, while cached LOD requests check its path, size,
-and modification time. Restarting the server keeps links valid. The internal
-scene key encrypts link payloads; it is not a login credential and has no routine
-user-facing maintenance command. The PAT remains the credential for control
-API operations.
-
-Interactive WebGL and offscreen WebGPU use the same matte material definition,
-color-space rules, camera state, deterministic overlap bias, and light model.
-The target-specific GLSL and WGSL adapters are isolated from scene handling so
-future material definitions can be added without coupling them to the viewer.
-The browser draws screen markup in a dedicated 2D layer. The image renderer
-composites the same normalized strokes after the 3D pass, so a view link and
-its image link show the same captured marks.
-
-For PTS, Blind accepts Denta's `BEGIN`/`END`, numbered marker variants, and
-bare finite `x y z` rows. The ordered points form a closed ring;
-`SELECTION_SEED` metadata is retained in the source but is not rendered. Blind
-derives a mobile-visible tube width from the ring bounds and limits
-one PTS resource to 4,096 points.
-
-See [the sharing contract](docs/sharing.md) for the exact capability and
-lifecycle semantics.
-
-## Host discovery and access
-
-Blind listens on `0.0.0.0:7400` by default and detects addresses from active
-network interfaces. Several private, local, or global origins may be returned.
-The first is used unless you choose one explicitly:
-
-```sh
-blind hosts
-blind init --host https://mesh.example.test
-blind share model.ply --host http://10.0.0.8:7400
-```
-
-Browser-generated shares initially keep the origin used to open the current
-page. The Share sheet lists every detected Host and can regenerate the view,
-image, and Complete information links with another selected origin.
-
-For CLI automation, `--host` always wins. Without it, Blind uses a configured
-origin from `blind init --host` when present; otherwise it prefers private IPv4
-addresses in `100.64.0.0/10`, LAN IPv4, private IPv6, other IPv4, then other
-IPv6. Interface name and address break ties, and loopback is last. `blind hosts`
-shows the current order and marks the default with `*`.
-
-For remote mobile access, provide a trusted private network or HTTPS reverse proxy.
-Plain HTTP may prevent browser clipboard APIs, in which case Blind uses a
-visible, preselected text field for manual copying. Blind only reports an
-automatic copy after the browser confirms the clipboard write.
-
-## Authentication and security
-
-The Server control API requires its private PAT. Remote Clients use their own registration credentials for scene creation and cannot choose another user's source.
-Initialize and print it locally:
-
-```sh
-blind init --show-pat
-```
-
-Send it only as `Authorization: Bearer blind_pat_...`. Viewer URLs are bearer
-capabilities. Anyone with a public URL can read that exact scene and create a
-new public snapshot while the sources match. Public scene responses expose
-file names but not absolute paths. Keep `owner_url` private because it can copy
-source paths.
-
-Blind is intended for trusted private networks. Do not expose it directly to
-the public internet. See [SECURITY.md](SECURITY.md) for reporting and deployment
-guidance.
-
-## Build from source
-
-Requirements are Rust 1.85 or newer, Node.js 24, and npm.
-
-```sh
-npm ci --prefix web
-npm run build --prefix web
-cargo build --locked --release
-```
-
-The installed binary embeds the generated `web/dist` and does not require
-Node.js. The directory is intentionally excluded from version control. Before
-a pull request, run:
-
-```sh
-npm test --prefix web
-npm run test:browser --prefix web
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
-```
-
-Pull requests and main-branch pushes run CI checks. A stable tag must pass the
-same verification before the Release workflow builds the viewer and native
-binaries, packages the three archives, generates SHA-256 checksums, and publishes
-the GitHub Release. Run local checks before tagging too. The first build, a
-toolchain change, or cache eviction can still require a cold compilation.
-
-## API
-
-| Route | Access | Purpose |
-| --- | --- | --- |
-| `GET /api/v1/health` | Public | Version and renderer readiness |
-| `GET /api/v1/control/health` | PAT | Verify this configured Blind instance |
-| `POST /api/v1/control/stop` | PAT | Gracefully stop the server |
-| `GET /api/v1/control/doctor` | PAT | Audit and repair the live short-link registry |
-| `POST /api/v1/control/doctor/clean-invalid` | PAT | Remove invalid short links from the live registry |
-| `POST /api/v1/control/doctor/clear-all` | PAT | Remove every short link from the live registry |
-| `GET /api/v1/hosts` | PAT | Detected Host candidates |
-| `POST /api/v1/scenes` | PAT | Create a scene from local paths or OSS addresses |
-| `GET /api/v1/client/oss` | Client credential | Discover OSS aliases and sharing authority, without credentials |
-| `GET /api/v1/scenes/:token` | Scene capability | Read validated public state |
-| `GET /api/v1/scenes/:token/meshes/:index` | Scene capability | Stream a validated Mesh |
-| `GET /api/v1/scenes/:token/meshes/:index/lod` | Scene capability | Generate or stream an in-memory review LOD |
-| `POST /api/v1/scenes/:token/share` | Scene capability | Capture camera and style state |
-| `GET /s/:code` | Short scene capability | Open the default viewer link |
-| `GET /i/:token.png` | Scene capability | Render a fresh PNG |
-
-## License
-
-[MIT](LICENSE)
-
-## Server plugins
-
-Server-side resolvers extend `blind share SCHEME://INPUT` without installing
-plugins on Clients. See [plugin installation, configuration and protocol](docs/plugins.md).
-`blind status` now reports both the local Server and the current Client connection.
-
-### Scene components
-
-Share Mesh and PTS geometry, text, Markdown, JSON, HTML and images in one grouped scene.
-Each placed instance is an entity with a label and visibility. Installed plugins
-add component types; Cyclops provides order resolution and trace analysis:
-
-```sh
-blind share jaw.ply review.md run.log tracing.json
-blind share capture.json --component cyclops:trace
-```
-
-See [component selection, layout and interaction](docs/components.md) for the common
-component contract, `--config` examples and display boundaries.
-
-The main dock opens an observation toolbar with 着色、光照、投影、场景、剖面.
-Clicking 剖面 starts a line gesture on the selected triangle Mesh. All visible
-triangle Meshes join the same plane and plot by default, each in its own color;
-the section window's count opens the Mesh picker to isolate a subset.
-The resulting section is shown as a translucent plane; the
-position slider scans parallel planes and the plot supports zoom, drag to pan,
-fit, and a two-line ruler with contour snapping and optional opposite-surface
-distance. Its window can be resized by dragging the upper-left
-handle. The initial view fits every selected contour; the intersection always uses the
-whole selected Mesh. View and image links preserve the section and ruler without changing
-source geometry.
+Documents open alongside the model. Collections keep several independent scenes
+under one link. See [components](docs/components.md) and
+[collection configuration](docs/cli.md#collections) for examples.
+
+Links last seven days by default and depend on their original sources remaining
+available and unchanged. [Sharing and link lifetime](docs/cli.md#links-and-lifetimes)
+explains permanent links, reshares and source changes.
+
+## Documentation
+
+| I want to… | Guide |
+| --- | --- |
+| Share files, label groups, script an agent or create collections | [CLI guide](docs/cli.md) |
+| Inspect, annotate, compare sections or use the viewer on a phone | [Viewer guide](docs/viewer.md) |
+| Display Markdown, JSON, images, HTML or custom content | [Scene components](docs/components.md) |
+| Set up a team server, connect machines, update or troubleshoot | [Client and Server](docs/client-server.md) |
+| Read from S3-compatible storage or signed download domains | [Object storage](docs/oss.md) |
+| Extend Blind with server-side resolvers and renderers | [Plugins](docs/plugins.md) |
+| Integrate with HTTP or understand saved scene state | [API](docs/api.md) · [Sharing contract](docs/sharing.md) |
+| Build, test or contribute | [Development](docs/development.md) |
+
+[Releases](https://github.com/hx-w/blind/releases) · [Changelog](CHANGELOG.md) ·
+[Security](SECURITY.md) · [MIT license](LICENSE)

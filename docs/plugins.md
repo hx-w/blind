@@ -1,5 +1,7 @@
 # Server share resolver plugins
 
+[Documentation](../README.md#documentation)
+
 Plugins turn one `SCHEME://INPUT` into a standard scene manifest. Install and
 configure them on the Server; Clients only need Blind. For example, after a
 Server administrator installs a resolver named `example`, Clients can run:

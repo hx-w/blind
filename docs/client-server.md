@@ -1,5 +1,44 @@
 # Client and Server operation
 
+[Documentation](../README.md#documentation)
+
+One executable serves both roles: `blind serve` runs the Server, while
+`blind join` and `blind share` are short-lived Client commands with no daemon.
+
+## Install and update
+
+Install the same executable on the Server and every source machine:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hx-w/blind/main/install.sh | sh
+```
+
+`blind update` updates that executable and restarts its managed macOS
+LaunchAgent or Linux systemd user service when one is installed.
+`BLIND_VERSION` and `BLIND_INSTALL_DIR` select a version and installation
+directory. The installer never invokes sudo.
+
+Prebuilt releases support macOS 14+ on Apple Silicon and Intel, plus native
+x86_64 Linux servers. For an optional Docker deployment, see [Linux Server](#linux-server).
+
+## Start a team server
+
+```sh
+blind init --host https://blind.example.com
+blind serve
+# In another terminal, issue one permanent reusable invitation for the team.
+blind invite --host https://blind.example.com
+```
+
+Point your HTTPS reverse proxy at the server. Keep its configured public origin
+on the Server; generated URLs never use the source machine's SFTP address.
+
+Then follow [Registration](#registration) on each source machine. On macOS,
+enable **System Settings → General → Sharing → Remote Login** for the current
+user. The source address must be reachable from the Server.
+
+The local-only Quick Start is in the [README](../README.md#quick-start).
+
 ## Responsibilities
 
 | Component | Responsibility | Persistent state |
@@ -16,6 +55,8 @@ Mesh. Cached LODs check its canonical path, byte size, and modification time,
 so serving one Mesh never triggers a hash sweep over a multi-gigabyte scene.
 LOD generation admits at most two builds and shares a 512 MiB weighted working
 memory budget; the browser issues at most four Mesh requests concurrently.
+
+For setup and examples, see [object storage sources](oss.md).
 
 For OSS resources, the Server stores named storage credentials in private `oss.json`.
 `blind oss list` on a remote Client discovers the connected Server's aliases;
@@ -68,6 +109,8 @@ team. Registration credentials, invitations and owner URLs must stay private.
 Use `blind join --local` when the Client and Server run as the same OS user,
 share the same configuration directory and filesystem, and can use loopback.
 The local endpoint requires the Server owner's PAT. No SFTP key is installed.
+The first `blind share` can register locally automatically when no Client
+registration exists.
 
 Use SFTP registration for different OS users on the same machine, or for a
 Client on the host accessing a containerized Server. A container's filesystem
@@ -100,6 +143,98 @@ and user identity are separate from the host's.
 Client state defaults to the user's Blind configuration directory. Override
 it with `BLIND_CLIENT_DIR`. Server state uses `BLIND_CONFIG_DIR`. Client files
 and Server SSH keys use mode 0600; credential directories use mode 0700.
+
+## Background service
+
+To keep Blind running after login:
+
+```sh
+blind service install
+blind service status
+```
+
+Install the service as the logged-in user. Do not use `sudo`: Blind installs a
+per-user LaunchAgent on macOS or a systemd user service on Linux and rejects
+root rather than target the wrong user session.
+
+Remove the background service with `blind service uninstall`.
+
+## Host discovery and access
+
+Blind listens on `0.0.0.0:7400` by default and detects addresses from active
+network interfaces. Several private, local, or global origins may be returned.
+The first is used unless you choose one explicitly:
+
+```sh
+blind hosts
+blind init --host https://mesh.example.test
+blind share model.ply --host http://10.0.0.8:7400
+```
+
+Browser-generated shares initially keep the origin used to open the current
+page. The Share sheet lists every detected Host and can regenerate the view,
+image, and Complete information links with another selected origin.
+
+For CLI automation, `--host` always wins. Without it, Blind uses a configured
+origin from `blind init --host` when present; otherwise it prefers private IPv4
+addresses in `100.64.0.0/10`, LAN IPv4, private IPv6, other IPv4, then other
+IPv6. Interface name and address break ties, and loopback is last. `blind hosts`
+shows the current order and marks the default with `*`.
+
+For remote mobile access, provide a trusted private network or HTTPS reverse proxy.
+Plain HTTP may prevent browser clipboard APIs, in which case Blind uses a
+visible, preselected text field for manual copying. Blind only reports an
+automatic copy after the browser confirms the clipboard write.
+
+## Authentication and security
+
+The Server control API requires its private PAT. Remote Clients use their own registration credentials for scene creation and cannot choose another user's source.
+Initialize and print it locally:
+
+```sh
+blind init --show-pat
+```
+
+Send it only as `Authorization: Bearer blind_pat_...`. Viewer URLs are bearer
+capabilities. Anyone with a public URL can read that exact scene and create a
+new public snapshot while the sources match. Public scene responses expose
+file names but not absolute paths. Keep `owner_url` private because it can copy
+source paths.
+
+Blind is intended for trusted private networks. Do not expose it directly to
+the public internet. See [SECURITY.md](../SECURITY.md) for reporting and deployment
+guidance.
+
+## Doctor and link maintenance
+
+`blind doctor` repairs safe local invariants and audits every SQLite-backed
+short link without stopping a running server. It restores private config and
+registry permissions, verifies the schema, index, WAL, and SQLite integrity,
+checks that the configured internal scene key matches the registry, then reports
+this distribution:
+
+- valid: the payload decrypts, has not expired, and every source revision still
+  matches;
+- expired: the configured lifetime has ended;
+- source gone: a source was deleted, moved, replaced, changed, or was revoked;
+- unavailable: the source host is offline, authentication fails, or access is temporarily denied; these links are retained by `--clean-invalid`;
+- tombstoned: Blind previously detected an invalid source;
+- corrupt: required fields or the encrypted payload cannot be read.
+
+When the server is running, `blind doctor` also reports the in-memory LOD cache:
+entry count, resident bytes versus the 256 MiB limit, Raw-to-LOD payload savings,
+and source-to-LOD triangle and point counts. With no server running it reports
+the cache as inactive because derived LODs never persist to disk.
+
+Invalid or all SQLite-backed short links can be deleted while Blind continues
+serving other requests:
+
+```sh
+blind doctor --clean-invalid
+blind doctor --clear-all
+```
+
+These actions affect `/s/` short links.
 
 ## Linux Server
 

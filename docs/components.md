@@ -1,5 +1,7 @@
 # Scene components
 
+[Documentation](../README.md#documentation)
+
 Within each scene, Blind shares files as entities. A component is a renderer
 type; an entity is one placed instance of that type bound to a source. Flat
 groups organize entities. There is no separate timeline or nested scene. All geometry in a group
@@ -93,59 +95,10 @@ its path for an additional instance. A scene may consist entirely of surfaces.
 
 ## Interaction
 
-- Drag empty space to orbit; existing zoom/pan and Fit controls still work.
-- The scene list selects entities. Each row has an opacity slider and a visibility
-  button; hiding retains the slider value, and dragging it above zero shows the
-  entity again. It opens by default
-  only at widths of at least 1100px and heights of at least 600px. It can be
-  opened manually on smaller screens. Its 信息 tab holds source details and warnings.
-- Mesh and PTS rows show the current color before the name. Clicking the color
-  opens preset choices below that row; a choice updates only that geometry entity.
-- Every row has a rename action next to the name. Long names show their
-  beginning and end in the row and in 3D; 信息 reveals a scrollable full name.
-  The inline editor accepts the complete label. Mesh Raw/LOD quality sits in the
-  scene list's 信息 tab. Visibility and opacity live in the scene list.
-  Zero opacity is hidden; showing a
-  zero-opacity entity restores full opacity.
-- Surface sizes come from the share configuration. Dragging a surface title navigates
-  the scene; the viewer has no drag resize control.
-- Entity positions are fixed during review. The source configuration sets placement.
-- Surface content does not consume scene gestures. Click once to select, double click
-  or press Enter to expand and interact. Escape / **返回场景** returns to the same layout.
-  Spatial opacity does not reduce expanded readability. Perfetto and HTML own keyboard input
-  inside their frames; the surrounding return button remains available.
-- Share preserves positions, surface sizes, visibility, opacity, camera and
-  existing annotations. A public reshare creates a new link, following existing
-  Blind ownership behavior.
-- On macOS, Cmd+C copies an image link for the current view, and Cmd+Shift+C
-  copies its view link. On other desktop systems use Ctrl. Text selection and editable fields keep
-  their normal copy behavior.
-- 观察 opens a second dock ordered by 着色、光照、投影、场景、剖面.
-  Each category expands its controls inside the dock; 剖面 starts drawing. 场景 contains axes and background switches. Raking-light angles and
-  strength appear below the tools only when relevant. 返回 restores the main dock. The chosen mode and light settings
-  are saved in view and image links. Shading remains independent of lighting:
-  a wireframe stays a wireframe under all three lighting modes.
-- 剖面 starts from the selected visible triangle Mesh. Clicking the tool directly
-  starts a line gesture, which defines a camera-relative plane. All visible
-  triangle Meshes join that plane by default; the count in the section window
-  opens a picker to isolate a subset. A checked Mesh without an intersection
-  is marked there. The position
-  slider scans parallel planes. Closed contours become translucent matte planes.
-  The plot can zoom, drag to pan, fit all contours, and place up to two rulers.
-  Ruler points snap to nearby contours; a point on a contour also shows its
-  distance to an opposite contour when a valid crossing exists. Only the Meshes
-  selected for this section contribute, so a second Mesh can show an inter-Mesh gap.
-  While measuring, right or middle drag pans; on touch screens, two fingers pan
-  and pinch to zoom. The wheel zooms around the pointer, and Escape leaves the
-  ruler and clears its lines. Drag the upper-left handle to resize the panel.
-  Pan, size, and measurements are saved in shares. Distances use source mesh
-  coordinates; Blind does not assume a physical unit.
-  Line length provides a fallback plot window, not the intersection extent.
-  The section plane and each selected target's entity and source revision survive sharing.
-  The section window can combine multiple visible Meshes in one plot, with each
-  Mesh shown in its own color and automatically fitted when added. The view tilts
-  slightly after drawing to reveal the matte section plane. PTS and point clouds
-  stay visible but do not expose a triangle section.
+The [Viewer guide](viewer.md) covers scene navigation, labels, visibility,
+opacity, surface expansion, annotations, observation tools and sections.
+Each component uses the same scene list and sharing controls; its renderer owns
+input only when expanded.
 
 ## Renderer contract
 

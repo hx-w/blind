@@ -1,5 +1,7 @@
 # Sharing contract
 
+[Documentation](../README.md#documentation)
+
 Blind sharing uses encrypted, immutable links. Links expire after seven days by
 default; `--ttl` can set another lifetime or `0` for no time expiry. Every Mesh
 remains owned by its source path on the host.
