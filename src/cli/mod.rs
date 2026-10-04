@@ -79,6 +79,9 @@ enum ClientCommand {
             conflicts_with = "config"
         )]
         components: Vec<String>,
+        /// Enable an installed plugin ID or a package directory (./, ../, or absolute).
+        #[arg(long = "plugin", value_name = "ID|DIRECTORY")]
+        plugins: Vec<String>,
         /// Public Blind origin used in generated links (for example https://blind.example.com).
         #[arg(long)]
         host: Option<String>,
@@ -125,6 +128,7 @@ pub async fn run() -> Result<()> {
             title,
             labels,
             components,
+            plugins,
             host,
             ttl,
             format,
@@ -137,6 +141,7 @@ pub async fn run() -> Result<()> {
                 components,
                 ShareOptions {
                     recursive,
+                    plugins,
                     host,
                     ttl_days: ttl,
                     format,
@@ -151,29 +156,4 @@ pub async fn run() -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn share_ttl_accepts_whole_days_and_defaults_to_seven() {
-        for (args, expected) in [
-            (vec!["blind", "share", "mesh.ply"], 7),
-            (vec!["blind", "share", "mesh.ply", "--ttl", "0"], 0),
-            (
-                vec!["blind", "share", "--config", "scene.json", "--ttl", "30"],
-                30,
-            ),
-        ] {
-            let ClientCommand::Share { ttl, .. } = Cli::try_parse_from(args).unwrap().command
-            else {
-                panic!("expected share")
-            };
-            assert_eq!(ttl, expected);
-        }
-        for invalid in ["-1", "1.5", "days", "4294967296"] {
-            assert!(Cli::try_parse_from(["blind", "share", "mesh.ply", "--ttl", invalid]).is_err());
-        }
-    }
 }

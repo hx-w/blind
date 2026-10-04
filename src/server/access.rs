@@ -3,6 +3,7 @@ use super::{
     state::{AppState, MissWindow},
 };
 use crate::{
+    protocol::registration::Source,
     runtime::config::Config,
     scene::SceneDescriptor,
     storage::{
@@ -54,6 +55,20 @@ impl FromRequestParts<AppState> for PatAuth {
     ) -> Result<Self, Self::Rejection> {
         require_pat(&parts.headers, &state.config)?;
         Ok(PatAuth)
+    }
+}
+
+/// Authenticate registered-client requests before consuming their JSON bodies.
+pub(super) struct ClientAuth(pub(super) Source);
+
+impl FromRequestParts<AppState> for ClientAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        super::registration::client_auth(state, &parts.headers, false).map(Self)
     }
 }
 

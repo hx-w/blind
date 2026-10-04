@@ -58,11 +58,16 @@ The encrypted descriptor contains:
 - Scene entities with a renderer type, source reference, editable label,
   visibility, opacity, position, and component-specific state. Older stored
   descriptors using `components` remain readable.
+- For plugin entities, an immutable binding with plugin ID, component name,
+  browser snapshot revision, capabilities and allowed frame origins.
 - Screen strokes as a color, capture aspect ratio, and bounded normalized
   points. A scene permits 64 strokes, 512 points per stroke, and 4,096 points
   in total.
 
 The registry payload never contains a PAT or Mesh bytes. XChaCha20-Poly1305 encrypts and authenticates the compressed descriptor before SQLite receives it.
+Browser HTML lives separately in the registry's content-addressed snapshot table.
+Scenes reference it by revision; native plugin programs and private settings
+are not stored in either public scene metadata or browser snapshots.
 
 ## Public and owner capabilities
 
@@ -193,7 +198,7 @@ the old link stays unchanged.
 
 ## Lifecycle
 
-1. The registered Client submits file paths. The Server canonicalizes and hashes the source through read-only SFTP, or the local filesystem for a same-user local registration.
+1. The registered Client submits paths or a locally resolved manifest, plus any selected browser snapshots. The Server canonicalizes and hashes sources through read-only SFTP, a same-user local registration, or its configured OSS storage.
 2. The daemon encrypts the compact descriptor and registers a random six-character public code plus an independent owner secret. It stores no Mesh copy.
 3. Viewer metadata and reshare requests verify that the registered source is
    still active. A Raw or cold-LOD request reads and hashes only its target
@@ -206,6 +211,13 @@ the old link stays unchanged.
 8. `blind doctor` audits the registry, `--clean-invalid` removes invalid short
    links, and `--clear-all` removes every short link without stopping the
    server.
+
+Plugin bindings survive reshares without consulting a current local installation.
+Scene and snapshot references are registered atomically. Expired, tombstoned or
+removed scenes release their references; snapshots are deleted after their last
+reference disappears. Different Clients share identical versioned browser
+content, while different versions remain independent. Temporary failures retain
+references. Maintenance also collects snapshots for collection children.
 
 The interactive viewer reports unavailable Meshes and retains successfully
 loaded ones, so one failed source does not throw away a large review scene.

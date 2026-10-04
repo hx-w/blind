@@ -12,10 +12,11 @@ use axum::http::{HeaderMap, header};
 pub fn links_for(
     registry: &Registry,
     scene: &SceneDescriptor,
+    renderers: &[crate::plugin::RendererBundle],
     origin: &str,
     include_owner: bool,
 ) -> anyhow::Result<ShareLinks> {
-    let registration = registry.register(scene)?;
+    let registration = registry.register(scene, renderers)?;
     Ok(compose_links(
         origin,
         &registration.code,

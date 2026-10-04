@@ -124,8 +124,11 @@ pub(in crate::server) async fn get_renderer(
         .find(|c| c.id == id)
         .and_then(|c| c.renderer.as_ref())
         .ok_or_else(|| AppError::not_found("Renderer not found"))?;
-    let (bytes, origins) = crate::plugin::renderer_document(binding)
+    let (bytes, origins) = state
+        .registry
+        .renderer_document(&token, binding)
         .map_err(|_| AppError::unavailable("Pinned renderer unavailable"))?;
+    let response_permit = reserve_response(&state, bytes.len() as u64)?;
     let policy = format!(
         "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; frame-src {}; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
         if origins.is_empty() {
@@ -138,5 +141,5 @@ pub(in crate::server) async fn get_renderer(
         .header(header::CACHE_CONTROL, NO_STORE)
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header("content-security-policy", policy)
-        .body(Body::from(bytes))?)
+        .body(budgeted_body(bytes, response_permit))?)
 }

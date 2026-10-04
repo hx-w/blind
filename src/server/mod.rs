@@ -62,6 +62,20 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         }
     };
     let (shutdown_tx, shutdown_rx) = tokio::sync::mpsc::channel(1);
+    let gc_registry = Arc::downgrade(&registry);
+    let renderer_gc = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            let Some(registry) = gc_registry.upgrade() else {
+                break;
+            };
+            match tokio::task::spawn_blocking(move || registry.prune()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "renderer snapshot cleanup failed"),
+                Err(error) => tracing::warn!(%error, "renderer snapshot cleanup task failed"),
+            }
+        }
+    });
     let state = AppState {
         config: Arc::new(config.clone()),
         registry,
@@ -93,7 +107,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/v1/hosts", get(hosts))
         .route(
             "/api/v1/scenes",
-            post(create_scene).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            post(create_scene).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route("/api/v1/clients/join", post(join_client))
         .route("/api/v1/client", get(client_info))
@@ -107,7 +121,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/v1/client/revoke", post(revoke_client))
         .route(
             "/api/v1/client/scenes",
-            post(client_scene).layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+            post(client_scene).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
         .route("/api/v1/control/sources/local", post(local_client))
         .route("/api/v1/scenes/{token}", get(get_scene))
@@ -157,12 +171,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     tracing::info!(%address, "Blind is ready");
-    axum::serve(
+    let served = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown(shutdown_rx))
-    .await?;
+    .await;
+    renderer_gc.abort();
+    served?;
     Ok(())
 }
 

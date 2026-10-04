@@ -22,7 +22,7 @@ struct Asset {
     name: String,
 }
 
-fn version(input: &str) -> Result<[u64; 3]> {
+pub(super) fn version(input: &str) -> Result<[u64; 3]> {
     let input = input.strip_prefix('v').unwrap_or(input);
     let parts = input.split('.').collect::<Vec<_>>();
     ensure!(
@@ -210,8 +210,10 @@ fn extract(
             .context("Invalid plugin archive path")?
             .into_owned();
         ensure!(
-            safe_path(&path) && paths.insert(path.clone()),
-            "Unsafe or duplicate plugin archive path"
+            safe_path(&path)
+                && paths.insert(path.clone())
+                && !path.components().any(|part| part.as_os_str() == ".env"),
+            "Unsafe, private or duplicate plugin archive path"
         );
         ensure!(paths.len() <= 4096, "Too many plugin package entries");
         let kind = entry.header().entry_type();
@@ -244,35 +246,25 @@ fn extract(
         );
         files.insert(path);
     }
-    let manifest_path = destination.join("blind-plugin.json");
+    let manifest = super::read_manifest(destination)?;
     ensure!(
-        fs::metadata(&manifest_path)?.len() <= 4 * 1024 * 1024,
-        "Plugin manifest exceeds 4 MiB"
-    );
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&fs::read(manifest_path)?).context("Invalid plugin manifest")?;
-    ensure!(
-        manifest["id"] == id,
+        manifest.id == id,
         "Release package plugin ID differs from requested plugin"
     );
     ensure!(
-        manifest["update"]["repository"] == repo,
+        manifest
+            .update
+            .as_ref()
+            .is_some_and(|source| source.repository == repo),
         "Release package update repository differs from requested repository"
     );
     ensure!(
-        version(
-            manifest["version"]
-                .as_str()
-                .context("Plugin manifest version missing")?
-        )? == expected_version,
+        version(&manifest.version)? == expected_version,
         "Release package version differs from its release tag"
     );
-    let declared = manifest["files"]
-        .as_array()
-        .context("Plugin manifest files missing")?;
-    let mut expected = HashSet::from([std::path::PathBuf::from("blind-plugin.json")]);
-    for file in declared {
-        let path = Path::new(file.as_str().context("Invalid declared plugin file")?);
+    let mut expected = HashSet::from([std::path::PathBuf::from("blind-plugin.toml")]);
+    for file in &manifest.files {
+        let path = Path::new(file);
         ensure!(
             safe_path(path) && expected.insert(path.to_owned()),
             "Invalid or duplicate declared plugin file"
@@ -386,8 +378,16 @@ mod tests {
         }
         tar.into_inner().unwrap().finish().unwrap()
     }
-    const MANIFEST: &[u8] =
-        br#"{"id":"demo","version":"1.2.0","files":["demo"],"update":{"repository":"team/demo"}}"#;
+    const MANIFEST: &[u8] = br#"id = "demo"
+name = "Demo"
+version = "1.2.0"
+authors = [{name = "Demo Team"}]
+schemes = ["demo"]
+entrypoint = ["./demo"]
+files = ["demo"]
+[update]
+repository = "team/demo"
+"#;
     #[test]
     fn stable_versions_and_repository_paths() {
         assert!(version("v1.10.0").unwrap() > version("1.9.9").unwrap());
@@ -406,7 +406,7 @@ mod tests {
     }
     #[test]
     fn archive_identity_and_inventory_are_verified() {
-        let bytes = archive(&[("blind-plugin.json", MANIFEST), ("demo", b"binary")]);
+        let bytes = archive(&[("blind-plugin.toml", MANIFEST), ("demo", b"binary")]);
         let temp = tempfile::tempdir().unwrap();
         extract(&bytes, temp.path(), "demo", [1, 2, 0]).unwrap();
         assert!(
@@ -423,16 +423,22 @@ mod tests {
             assert!(extract(&bytes, tempfile::tempdir().unwrap().path(), id, v).is_err());
         }
         for files in [
-            vec![("blind-plugin.json", MANIFEST)],
+            vec![("blind-plugin.toml", MANIFEST)],
             vec![
-                ("blind-plugin.json", MANIFEST),
+                ("blind-plugin.toml", MANIFEST),
                 ("demo", b"x"),
                 ("extra", b"x"),
             ],
             vec![
-                ("blind-plugin.json", MANIFEST),
+                ("blind-plugin.toml", MANIFEST),
                 ("demo", b"x"),
                 ("demo", b"y"),
+            ],
+            vec![("blind-plugin.json", MANIFEST), ("demo", b"x")],
+            vec![
+                ("blind-plugin.toml", MANIFEST),
+                ("demo", b"x"),
+                (".env", b"TOKEN=private"),
             ],
         ] {
             assert!(

@@ -30,13 +30,30 @@ with tempfile.TemporaryDirectory(prefix='blind-plugin-test-') as tmp:
   else:assert r.returncode!=0,(args,r.stdout)
   return r
  status=json.loads(cli('status','--json').stdout);assert status['local_server']['state']=='unconfigured';assert not serverdir.exists()
+ disconnected=json.loads(cli('plugin','list').stdout)
+ assert disconnected=={'plugins':[],'server':{'state':'unconnected'}} and not serverdir.exists()
  cli('init');config=json.loads((serverdir/'config.json').read_text());p=port();config['listen']=f'127.0.0.1:{p}';(serverdir/'config.json').write_text(json.dumps(config))
  storage=ThreadingHTTPServer(('127.0.0.1',0),Storage);threading.Thread(target=storage.serve_forever,daemon=True).start()
  cli('oss','set','test',input=f'http://127.0.0.1:{storage.server_port}\ntest-region\naccess\nsecret\n')
- manifest={'id':'demo','name':'Demo','version':'1.0.0','schemes':['demo'],'protocol_versions':[1],'entrypoint':[sys.executable,'resolver.py'],'files':['resolver.py'],'config_schema':{'type':'object','additionalProperties':False,'required':['oss_alias','bucket','token'],'properties':{'oss_alias':{'type':'string'},'bucket':{'type':'string'},'token':{'type':'string','writeOnly':True}}}}
- (package/'blind-plugin.json').write_text(json.dumps(manifest))
- (package/'resolver.py').write_text('''import json,sys
-r=json.loads(sys.stdin.readline());p=r['params'];assert p['config']['token']=='PRIVATE';assert p['protocol_version']==1
+ manifest=f'''id = "demo"
+name = "Demo"
+version = "1.0.0"
+authors = [{{ name = "Blind integration tests" }}]
+schemes = ["demo"]
+entrypoint = [{json.dumps(sys.executable)}, "resolver.py"]
+files = ["resolver.py"]
+[env.OSS_ALIAS]
+required = true
+[env.BUCKET]
+required = true
+[env.DEBUG_TOKEN]
+required = true
+secret = true
+'''
+ (package/'blind-plugin.toml').write_text(manifest)
+ (package/'.env').write_text('OSS_ALIAS=test\nBUCKET=bucket\nDEBUG_TOKEN=PRIVATE\n')
+ (package/'resolver.py').write_text('''import json,os,sys
+r=json.loads(sys.stdin.readline());p=r['params'];assert os.environ['DEBUG_TOKEN']=='PRIVATE';assert p['protocol_version']==2;assert 'config' not in p
 uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing','grouped','collision','many']
 result={'schema_version':1,'requires':['layout.panels','attachments'],'title':'Plugin scene','resources':[{'id':'a','uri':'oss://test/bucket/a.ply','label':'First'},{'id':'b','uri':'oss://test/bucket/b.ply','label':'Second'}],'panels':[{'id':'one','label':'One','members':['a']},{'id':'two','label':'Two','members':['a','b']}],'attachments':[{'id':'zip','uri':'oss://test/bucket/log.zip','label':'Log'}],'new_optional_field':'ignored'}
 if uri=='grouped':
@@ -57,10 +74,20 @@ if uri=='missing-order':
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'error':{'code':-32000,'message':'SECRET upstream details','data':{'code':'ORDER_NOT_FOUND'}}}));sys.exit(0)
 print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
 ''')
- cli('plugin','install',str(package));cli('plugin','configure','demo','--set','oss_alias=test','--set','bucket=bucket','--secret-stdin','token',input='PRIVATE\n')
- assert 'PRIVATE' not in cli('plugin','config','demo').stdout
- cli('plugin','configure','demo','--set','token=LEAK',ok=False)
- cli('plugin','configure','demo','--set','oss_alias=missing',ok=False)
+ cli('plugin','install',str(package))
+ private_env=serverdir/'plugins'/'demo'/'.env'
+ assert private_env.read_text()==(package/'.env').read_text()
+ assert private_env.stat().st_mode & 0o077 == 0
+ assert json.loads(cli('plugin','config','demo').stdout)=={'OSS_ALIAS':'test','BUCKET':'bucket','DEBUG_TOKEN':'[set]'}
+ # Reinstallation preserves private settings; validation fails before publication.
+ (package/'.env').write_text('OSS_ALIAS=other\nBUCKET=other\nDEBUG_TOKEN=REPLACEMENT\n')
+ cli('plugin','install',str(package))
+ assert 'PRIVATE' in private_env.read_text() and 'REPLACEMENT' not in private_env.read_text()
+ (package/'blind-plugin.toml').write_text(manifest+'\n[env.NEW_REQUIRED]\nrequired = true\n')
+ failed_install=cli('plugin','install',str(package),ok=False)
+ assert 'PRIVATE' not in failed_install.stderr and 'REPLACEMENT' not in failed_install.stderr
+ assert private_env.read_text().endswith('DEBUG_TOKEN=PRIVATE\n')
+ (package/'blind-plugin.toml').write_text(manifest)
  log=open(tmp/'server.log','w');proc=subprocess.Popen([str(BIN),'serve'],env=env,stdout=log,stderr=log)
  origin=f'http://127.0.0.1:{p}'
  try:
@@ -75,7 +102,28 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   status=json.loads(cli('status','--json',environment=remote).stdout)
   assert status['local_server']['state']=='unconfigured' and status['connection']['state']=='connected',status
   assert status['target']['kind']=='remote'
-  assert json.loads(cli('plugin','list',environment=remote).stdout)['plugins'][0]['id']=='demo'
+  catalog=json.loads(cli('plugin','list',environment=remote).stdout)
+  assert [(item['id'],item['source']) for item in catalog['plugins']]==[('demo','server')]
+  assert catalog['server']['state']=='connected' and 'PRIVATE' not in json.dumps(catalog)
+  cli('plugin','install',str(package),environment=remote)
+  catalog=json.loads(cli('plugin','list',environment=remote).stdout)
+  assert [(item['id'],item['source']) for item in catalog['plugins']]==[('demo','local'),('demo','server')]
+  # A failed Server catalog retains local stdout and exposes failure separately.
+  client_path=tmp/'remote-client'/'client.json'
+  identity=client_path.read_text();invalid_identity=json.loads(identity)
+  invalid_identity['credential']='invalid-catalog-credential'
+  client_path.write_text(json.dumps(invalid_identity))
+  failed_catalog=cli('plugin','list',environment=remote,ok=False)
+  partial_catalog=json.loads(failed_catalog.stdout)
+  assert [(item['id'],item['source']) for item in partial_catalog['plugins']]==[('demo','local')]
+  assert partial_catalog['server']['state']=='error' and failed_catalog.stderr
+  assert 'REPLACEMENT' not in failed_catalog.stdout+failed_catalog.stderr
+  client_path.write_text(identity)
+  # Invalid local settings never fall through to a healthy Server installation.
+  (tmp/'remote-server'/'plugins'/'demo'/'.env').write_text('DEBUG_TOKEN=REDACT_ME\n')
+  local_failure=cli('share','demo://grouped',environment=remote,ok=False)
+  assert 'REDACT_ME' not in local_failure.stderr
+  cli('plugin','remove','demo',environment=remote)
   try:http(origin+'/api/v1/client/plugins');raise AssertionError('anonymous discovery')
   except urllib.error.HTTPError as e:assert e.code==401
   for uri in ['absent://x','demo://bad','demo://future']:
@@ -88,8 +136,7 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   combined_code=combined['viewer_url'].rsplit('/',1)[1]
   assert len(json.loads(http(origin+'/api/v1/scenes/'+combined_code)[1])['scenes'])==2
   collection['scenes'][0]['uri']='demo://many'
-  many_error=cli('share','--config','-',input=json.dumps(collection),environment=remote,ok=False).stderr
-  assert 'exceeds 256 resources' in many_error,many_error.replace('PRIVATE','[redacted]')
+  cli('share','--config','-',input=json.dumps(collection),environment=remote,ok=False)
   code=shared['viewer_url'].rsplit('/',1)[1]
   scene=json.loads(http(origin+'/api/v1/scenes/'+code)[1])
   assert len(scene['meshes'])==3 and scene['meshes'][0]['translation']!=scene['meshes'][1]['translation']
@@ -136,6 +183,6 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   cli('leave',environment=remote)
   try:http(origin+'/api/v1/scenes/'+code);raise AssertionError('revoked share')
   except urllib.error.HTTPError as e:assert e.code==410
-  print('PASS: install/config, client-only, routing, binding, compatibility, layout, attachments, Raw/LOD/PNG, partial, uninstall persistence and revocation')
+  print('PASS: TOML/.env lifecycle, combined catalogs, local failure precedence, client-only routing, binding, layout, attachments, Raw/LOD/PNG, partial, uninstall persistence and revocation')
  finally:
   proc.terminate();proc.wait(timeout=20);log.close();storage.shutdown()

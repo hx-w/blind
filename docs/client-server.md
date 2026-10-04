@@ -43,9 +43,9 @@ The local-only Quick Start is in the [README](../README.md#quick-start).
 
 | Component | Responsibility | Persistent state |
 | --- | --- | --- |
-| Client (`blind join/share`) | Register the current OS user; submit file paths; print links | Server URL, source ID, Client credential, installed public key |
+| Client (`blind join/share`) | Register the OS user; run local resolvers; submit paths/manifests and selected browser snapshots; print links | Server URL, source ID, Client credential, public key, local plugin packages/private `.env` |
 | OS SSH/SFTP on B/C | Authenticate A and allow read-only file access | Dedicated public authorization in this user's `authorized_keys` |
-| Server (`blind serve`) | Source registry, encrypted scene registry, HTTP viewer, LOD, PNG | Scene descriptors, hashed Client credentials, source routes, dedicated private SSH keys |
+| Server (`blind serve`) | Source and scene registries, optional Server resolvers, HTTP viewer, LOD, PNG | Scene descriptors, shared browser snapshots/references, hashed Client credentials, source routes, dedicated private SSH keys |
 
 Original geometry is read on demand and never written to Server storage. LODs
 are bounded to 256 MiB in memory; PNGs are generated per request. Individual

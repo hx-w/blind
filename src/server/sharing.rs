@@ -1,11 +1,10 @@
 use super::{
-    access::PatAuth,
+    access::{ClientAuth, PatAuth},
     dto::{CreateCollectionRequest, CreateSceneRequest, ShareResponse},
     error::AppError,
     links::{links_for, request_origin},
     no_store,
-    registration::client_auth,
-    scenes::{scene_from_manifest, scene_from_sources},
+    scenes::{RendererSelection, prepare_renderers, scene_from_manifest, scene_from_sources},
     state::AppState,
 };
 use crate::{
@@ -18,95 +17,54 @@ use axum::{Json, extract::State, http::HeaderMap, response::IntoResponse};
 pub(super) async fn client_scene(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ClientAuth(source): ClientAuth,
     Json(request): Json<CreateSceneRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let source = client_auth(&state, &headers, false)?;
-    let _manifest_permit = if request.manifest.is_some()
-        || request.paths.iter().any(|p| crate::plugin::is_plugin(p))
-        || request.collection.as_ref().is_some_and(|c| {
-            c.scenes
-                .iter()
-                .any(|s| s.paths.iter().any(|p| crate::plugin::is_plugin(p)))
-        }) {
-        Some(
-            state
-                .plugin_slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| {
-                    AppError::too_many_requests("Two manifest shares already running; retry later")
-                })?,
-        )
-    } else {
-        None
-    };
+    let _manifest_permit = manifest_permit(&state, &request)?;
     if let Some(collection) = request.collection {
+        if request.manifest.is_some()
+            || !request.paths.is_empty()
+            || !request.display.is_empty()
+            || request.labels.as_ref().is_some_and(|ls| !ls.is_empty())
+            || !request.label_groups.is_empty()
+        {
+            return Err(AppError::bad_request(
+                "collection conflicts with standalone scene fields",
+            ));
+        }
         let response = create_collection_scene(
             &state,
             &headers,
             &source,
             collection,
+            request.renderers,
             request.origin,
             request.ttl_days,
         )
         .await?;
         return Ok((no_store(), Json(response)));
     }
-    let mut scene = if let Some(plan) = request.manifest {
-        if !request.paths.is_empty()
-            || request.labels.as_ref().is_some_and(|ls| !ls.is_empty())
-            || !request.label_groups.is_empty()
-        {
-            return Err(AppError::bad_request(
-                "manifest conflicts with paths/labels",
-            ));
-        }
-        if plan
-            .resources
-            .iter()
-            .any(|r| crate::plugin::is_plugin(&r.uri))
-        {
-            return Err(AppError::bad_request("nested plugin URIs are not allowed"));
-        }
-        for uri in plan.components.iter().map(|c| &c.uri) {
-            crate::storage::oss::Location::parse(uri)
-                .map_err(|_| AppError::bad_request("plugin components must be OSS references"))?;
-        }
-        for a in &plan.attachments {
-            crate::storage::oss::Location::parse(&a.uri)
-                .map_err(|_| AppError::bad_request("attachments must be OSS references"))?;
-        }
-        scene_from_manifest(&state, plan, Some(source.scene_source()), request.title).await?
-    } else if request.paths.iter().any(|p| crate::plugin::is_plugin(p)) {
-        if request.paths.len() != 1
-            || request
-                .labels
-                .as_ref()
-                .is_some_and(|ls| ls.iter().any(Option::is_some))
-            || !request.label_groups.is_empty()
-        {
-            return Err(AppError::bad_request(
-                "plugin shares require one URI without label overrides",
-            ));
-        }
-        let dir = config_path()?
-            .parent()
-            .context("missing config parent")?
-            .to_owned();
-        let plan = crate::plugin::resolve(&dir, &request.paths[0])
-            .await
-            .map_err(|e| AppError::bad_request(&e.to_string()))?;
-        scene_from_manifest(&state, plan, Some(source.scene_source()), request.title).await?
-    } else {
-        scene_from_sources(
-            &state,
-            &request.paths,
-            &request.display,
-            Some(source.scene_source()),
-            request.title,
-        )
-        .await?
-    };
+    if (request.manifest.is_some() || request.paths.iter().any(|p| crate::plugin::is_plugin(p)))
+        && (request.labels.as_ref().is_some_and(|ls| !ls.is_empty())
+            || !request.label_groups.is_empty())
+    {
+        return Err(AppError::bad_request(
+            "manifest/plugin shares do not accept label overrides",
+        ));
+    }
+    let (mut scene, renderers) = build_scene(
+        &state,
+        SceneInput {
+            paths: request.paths,
+            display: request.display,
+            manifest: request.manifest,
+            renderers: request.renderers,
+            title: request.title,
+        },
+        &RendererSelection::default(),
+        Some(source.scene_source()),
+    )
+    .await?;
     scene.ttl_days = Some(request.ttl_days);
     if let Some(labels) = request.labels.filter(|ls| ls.iter().any(Option::is_some)) {
         scene
@@ -118,6 +76,11 @@ pub(super) async fn client_scene(
             .set_label_groups(request.label_groups)
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
     }
+    state
+        .registry
+        .sources
+        .get(&source.id)
+        .map_err(|_| AppError::unauthorized("Client was revoked"))?;
     // Server configuration/request origin selects the public endpoint; source addresses never form URLs.
     let origin = match request.origin {
         Some(origin) => state.config.normalize_share_origin(&origin)?,
@@ -139,12 +102,12 @@ pub(super) async fn client_scene(
             }
         }
     };
-    let links = links_for(&state.registry, &scene, &origin, true)?;
     let hosts = discover(
         state.config.port()?,
         state.config.preferred_origin.as_deref(),
         state.config.base_path().as_deref(),
     )?;
+    let links = links_for(&state.registry, &scene, &renderers, &origin, true)?;
     let mut response = serde_json::to_value(ShareResponse {
         links,
         origin,
@@ -174,6 +137,7 @@ async fn create_collection_scene(
     headers: &HeaderMap,
     source: &Source,
     request: CreateCollectionRequest,
+    shared_renderers: Vec<crate::plugin::RendererBundle>,
     requested_origin: Option<String>,
     ttl_days: u32,
 ) -> Result<serde_json::Value, AppError> {
@@ -188,6 +152,11 @@ async fn create_collection_scene(
     let mut ids = std::collections::HashSet::new();
     let mut total = 0;
     let mut parts = Vec::with_capacity(request.scenes.len());
+    let (mut renderers, shared) = prepare_renderers(
+        shared_renderers,
+        std::iter::empty(),
+        &RendererSelection::default(),
+    )?;
     for part in request.scenes {
         if part.id.is_empty()
             || part.id.len() > 64
@@ -206,43 +175,32 @@ async fn create_collection_scene(
                 "collection scene title must contain 1 to 120 characters",
             ));
         }
-        let plugin = part.paths.iter().any(|p| crate::plugin::is_plugin(p));
-        let mut scene = if plugin {
-            if part.paths.len() != 1
-                || !part.display.is_empty()
-                || !part.labels.is_empty()
-                || !part.label_groups.is_empty()
-            {
-                return Err(AppError::bad_request(
-                    "a collection plugin scene requires one URI without overrides",
-                ));
-            }
-            let dir = config_path()?
-                .parent()
-                .context("missing config parent")?
-                .to_owned();
-            let plan = crate::plugin::resolve(&dir, &part.paths[0])
-                .await
-                .map_err(|e| AppError::bad_request(&e.to_string()))?;
-            total += plan.resources.len() + plan.components.len() + plan.attachments.len();
-            if total > 256 {
-                return Err(AppError::bad_request("collection exceeds 256 resources"));
-            }
-            scene_from_manifest(state, plan, Some(source.scene_source()), Some(part.title)).await?
-        } else {
-            total += part.paths.len();
-            if total > 256 {
-                return Err(AppError::bad_request("collection exceeds 256 resources"));
-            }
-            scene_from_sources(
-                state,
-                &part.paths,
-                &part.display,
-                Some(source.scene_source()),
-                Some(part.title),
-            )
-            .await?
-        };
+        if (part.manifest.is_some() || part.paths.iter().any(|p| crate::plugin::is_plugin(p)))
+            && (!part.labels.is_empty() || !part.label_groups.is_empty())
+        {
+            return Err(AppError::bad_request(
+                "manifest/plugin collection scenes do not accept label overrides",
+            ));
+        }
+        let (mut scene, child_renderers) = build_scene(
+            state,
+            SceneInput {
+                paths: part.paths,
+                display: part.display,
+                manifest: part.manifest,
+                renderers: part.renderers,
+                title: Some(part.title),
+            },
+            &shared,
+            Some(source.scene_source()),
+        )
+        .await?;
+        // Resolver expansion is only known after executing the plugin.
+        total += scene.meshes.len() + scene.attachments.len();
+        if total > 256 {
+            return Err(AppError::bad_request("collection exceeds 256 resources"));
+        }
+        renderers.extend(child_renderers);
         if !part.labels.is_empty() {
             scene
                 .set_labels(part.labels)
@@ -297,12 +255,12 @@ async fn create_collection_scene(
             }
         }
     };
-    let links = links_for(&state.registry, &scene, &origin, true)?;
     let hosts = discover(
         state.config.port()?,
         state.config.preferred_origin.as_deref(),
         state.config.base_path().as_deref(),
     )?;
+    let links = links_for(&state.registry, &scene, &renderers, &origin, true)?;
     let mut response = serde_json::to_value(ShareResponse {
         links,
         origin,
@@ -344,25 +302,20 @@ pub(super) async fn create_scene(
             "Use the registered Client share endpoint for collections",
         ));
     }
-    if request.manifest.is_some() {
-        return Err(AppError::bad_request(
-            "Use the registered Client share endpoint for manifests",
-        ));
-    }
-    let mut paths = Vec::with_capacity(request.paths.len());
-    for path in request.paths {
-        paths.push(if crate::storage::oss::is_oss(&path) {
-            path
-        } else {
-            tokio::fs::canonicalize(&path)
-                .await
-                .context("cannot resolve source file")?
-                .to_string_lossy()
-                .into_owned()
-        });
-    }
-    let mut scene =
-        scene_from_sources(&state, &paths, &request.display, None, request.title).await?;
+    let _manifest_permit = manifest_permit(&state, &request)?;
+    let (mut scene, renderers) = build_scene(
+        &state,
+        SceneInput {
+            paths: request.paths,
+            display: request.display,
+            manifest: request.manifest,
+            renderers: request.renderers,
+            title: request.title,
+        },
+        &RendererSelection::default(),
+        None,
+    )
+    .await?;
     scene.ttl_days = Some(request.ttl_days);
     if let Some(labels) = request.labels.filter(|ls| ls.iter().any(Option::is_some)) {
         scene
@@ -376,12 +329,12 @@ pub(super) async fn create_scene(
         Some(origin) => state.config.normalize_share_origin(&origin)?,
         None => request_origin(&headers, &state.config)?,
     };
-    let links = links_for(&state.registry, &scene, &origin, true)?;
     let hosts = discover(
         state.config.port()?,
         state.config.preferred_origin.as_deref(),
         state.config.base_path().as_deref(),
     )?;
+    let links = links_for(&state.registry, &scene, &renderers, &origin, true)?;
     Ok((
         no_store(),
         Json(ShareResponse {
@@ -390,4 +343,118 @@ pub(super) async fn create_scene(
             origin,
         }),
     ))
+}
+
+struct SceneInput {
+    paths: Vec<String>,
+    display: Vec<crate::scene::component::DisplayOptions>,
+    manifest: Option<crate::plugin::ShareManifest>,
+    renderers: Vec<crate::plugin::RendererBundle>,
+    title: Option<String>,
+}
+
+async fn build_scene(
+    state: &AppState,
+    input: SceneInput,
+    shared: &RendererSelection,
+    source: Option<crate::scene::SceneSource>,
+) -> Result<
+    (
+        crate::scene::SceneDescriptor,
+        Vec<crate::plugin::RendererBundle>,
+    ),
+    AppError,
+> {
+    let SceneInput {
+        paths,
+        display,
+        manifest,
+        mut renderers,
+        title,
+    } = input;
+    let plan = if let Some(plan) = manifest {
+        if !paths.is_empty() || !display.is_empty() {
+            return Err(AppError::bad_request(
+                "manifest conflicts with paths/display",
+            ));
+        }
+        Some(plan)
+    } else if paths.iter().any(|p| crate::plugin::is_plugin(p)) {
+        if paths.len() != 1 || !display.is_empty() {
+            return Err(AppError::bad_request(
+                "plugin shares require one URI without display overrides",
+            ));
+        }
+        let path = config_path()?;
+        let dir = path.parent().context("missing config parent")?;
+        let (plan, bundle) = crate::plugin::resolve(dir, &paths[0])
+            .await
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        if let Some(bundle) = bundle {
+            renderers.push(bundle);
+        }
+        Some(plan)
+    } else {
+        None
+    };
+    let options = plan
+        .as_ref()
+        .map(|p| {
+            p.components
+                .iter()
+                .map(|c| c.display.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| display.clone());
+    let (renderers, selection) = prepare_renderers(renderers, options.into_iter(), shared)?;
+    let scene = if let Some(plan) = plan {
+        scene_from_manifest(state, plan, &selection, source, title).await?
+    } else {
+        let mut normalized = Vec::with_capacity(paths.len());
+        for path in paths {
+            normalized.push(if source.is_some() || crate::storage::oss::is_oss(&path) {
+                path
+            } else {
+                tokio::fs::canonicalize(&path)
+                    .await
+                    .context("cannot resolve source file")?
+                    .to_string_lossy()
+                    .into_owned()
+            });
+        }
+        scene_from_sources(state, &normalized, &display, &selection, source, title).await?
+    };
+    Ok((scene, renderers))
+}
+
+fn manifest_permit(
+    state: &AppState,
+    request: &CreateSceneRequest,
+) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, AppError> {
+    if request.manifest.is_some()
+        || !request.renderers.is_empty()
+        || request
+            .paths
+            .iter()
+            .any(|path| crate::plugin::is_plugin(path))
+        || request.collection.as_ref().is_some_and(|collection| {
+            collection.scenes.iter().any(|part| {
+                part.manifest.is_some()
+                    || !part.renderers.is_empty()
+                    || part.paths.iter().any(|path| crate::plugin::is_plugin(path))
+            })
+        })
+    {
+        Ok(Some(
+            state
+                .plugin_slots
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| {
+                    AppError::too_many_requests("Two manifest shares already running; retry later")
+                })?,
+        ))
+    } else {
+        Ok(None)
+    }
 }

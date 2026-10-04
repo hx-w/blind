@@ -3,6 +3,47 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-10-04
+
+### Added
+
+- Run installed or directory plugins from the Client CLI using the same package
+  format as Server plugins; `--plugin ./directory` needs no installation.
+- Select URL-scoped components with repeatable `blind share --plugin ID` or
+  explicit `--component ID:NAME`; ordinary shares remain unaffected.
+- Share versioned browser-only snapshots across Clients through a content-addressed
+  Server registry, with immutable URL bindings, collection/reshare/PNG support,
+  atomic registration and last-reference garbage collection.
+
+### Changed
+
+- Replace JSON plugin manifests and interactive configuration with strict
+  `blind-plugin.toml`, author metadata and declared environment schemas.
+  Ready-configured directory installs import private `.env` with mode 0600;
+  updates preserve the existing file byte-for-byte. Release archives exclude it.
+- Use resolver protocol 2 with declared child-process environment values, not
+  `params.config`. Each call captures private execution and renderer snapshots;
+  native code remains trusted OS-user code, not a sandbox.
+- `blind plugin list` combines local and Server catalogs and reports connection
+  state. Server errors preserve local output and return nonzero; remove `--remote`.
+- Keep browser CAS content independent of native package revisions, without a
+  historical native fallback. Local resolver outputs must persist outside the
+  private execution snapshot. Partial manifests may include missing resources.
+- Existing 1.x plugins must be repackaged and reinstalled; saved native-pinned
+  renderer links require an explicit browser snapshot migration or a new share.
+- Bound scene bodies to 64 MiB and admit at most two concurrent manifest or
+  renderer-upload share calls.
+- Reject conflicting active suffix owners and different snapshots of one plugin
+  ID within a scene or collection, rather than resolving them by load order.
+
+### Fixed
+
+- Release browser snapshots immediately when their Client source is revoked,
+  including permanent links, while preserving reachable mixed-source children.
+- Keep native resolution and browser rendering on the same captured package when
+  an installation changes mid-share; reject transient execution-snapshot sources.
+- Reject symlink and hardlink aliases that would publish private `.env` bytes.
+
 ## [1.2.0] - 2026-09-29
 
 ### Added

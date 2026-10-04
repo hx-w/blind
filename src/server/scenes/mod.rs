@@ -4,7 +4,7 @@ use crate::{
     storage::sources::SourceError,
 };
 use anyhow::Context;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 mod manifest;
 pub(super) use manifest::scene_from_manifest;
 
@@ -12,6 +12,7 @@ pub(in crate::server) async fn scene_from_sources(
     state: &AppState,
     paths: &[String],
     display: &[crate::scene::component::DisplayOptions],
+    renderers: &RendererSelection,
     source: Option<crate::scene::SceneSource>,
     title: Option<String>,
 ) -> Result<SceneDescriptor, AppError> {
@@ -40,10 +41,21 @@ pub(in crate::server) async fn scene_from_sources(
         let kind = options
             .component
             .map(Ok)
-            .unwrap_or_else(|| {
-                crate::plugin::infer_component(options.member.as_deref().unwrap_or(path))
-            })
+            .unwrap_or_else(|| ComponentKind::infer(options.member.as_deref().unwrap_or(path)))
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        let renderer = if let ComponentKind::Plugin(name) = &kind {
+            Some(
+                renderers
+                    .bindings
+                    .get(name)
+                    .ok_or_else(|| {
+                        AppError::bad_request("required plugin renderer is unavailable")
+                    })?
+                    .clone(),
+            )
+        } else {
+            None
+        };
         if kind.geometry() && options.size.is_some() {
             return Err(AppError::bad_request(
                 "size applies to surface components; geometry retains source dimensions",
@@ -91,8 +103,7 @@ pub(in crate::server) async fn scene_from_sources(
             id: format!("resource-{}", i + 1),
             state: None,
             component: kind.clone(),
-            renderer: crate::plugin::bind_component(&kind)
-                .map_err(|e| AppError::bad_request(&e.to_string()))?,
+            renderer,
             source: source_ref,
             label: name.clone(),
             group: options.group,
@@ -163,4 +174,101 @@ pub(in crate::server) async fn scene_from_sources(
         label_groups: Vec::new(),
         state: Default::default(),
     })
+}
+
+/// Metadata-only selections let collection children share browser documents
+/// without copying or hashing their HTML for each resource.
+#[derive(Clone, Default)]
+pub(super) struct RendererSelection {
+    pub(super) bindings: BTreeMap<String, crate::scene::component::RendererBinding>,
+    revisions: BTreeMap<String, (String, usize)>,
+    bytes: usize,
+}
+
+impl RendererSelection {
+    fn from_bundles(bundles: &[crate::plugin::RendererBundle]) -> Result<Self, AppError> {
+        let bindings = crate::plugin::renderer_bindings(bundles)
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        let mut revisions = BTreeMap::new();
+        let mut bytes = 0;
+        for bundle in bundles {
+            if revisions.contains_key(&bundle.id) {
+                continue;
+            }
+            let revision = match bundle.components.first() {
+                Some(component) => bindings[&format!("{}:{}", bundle.id, component.name)]
+                    .revision
+                    .clone(),
+                None => bundle
+                    .revision()
+                    .map_err(|e| AppError::bad_request(&e.to_string()))?,
+            };
+            let size = bundle.documents.values().map(String::len).sum::<usize>();
+            revisions.insert(bundle.id.clone(), (revision, size));
+            bytes += size;
+        }
+        Ok(Self {
+            bindings,
+            revisions,
+            bytes,
+        })
+    }
+
+    fn merge(&mut self, other: Self) -> Result<(), AppError> {
+        for (id, (revision, bytes)) in other.revisions {
+            if let Some((previous, _)) = self.revisions.get(&id) {
+                if previous != &revision {
+                    return Err(AppError::bad_request(
+                        "conflicting renderer versions within one scene",
+                    ));
+                }
+            } else {
+                self.revisions.insert(id, (revision, bytes));
+                self.bytes += bytes;
+            }
+        }
+        if self.revisions.len() > 64 {
+            return Err(AppError::bad_request("too many renderer bundles"));
+        }
+        if self.bytes > 8 * 1024 * 1024 {
+            return Err(AppError::bad_request("renderer documents exceed 8 MiB"));
+        }
+        self.bindings.extend(other.bindings);
+        Ok(())
+    }
+}
+
+/// Uploaded packages are authoritative. Server installations are consulted only
+/// for explicitly named components, never while inferring ordinary file types.
+pub(super) fn prepare_renderers(
+    mut bundles: Vec<crate::plugin::RendererBundle>,
+    display: impl Iterator<Item = crate::scene::component::DisplayOptions>,
+    shared: &RendererSelection,
+) -> Result<(Vec<crate::plugin::RendererBundle>, RendererSelection), AppError> {
+    if bundles.len() > 256 {
+        return Err(AppError::bad_request("too many renderer bundles"));
+    }
+    let mut selection = shared.clone();
+    selection.merge(RendererSelection::from_bundles(&bundles)?)?;
+    for options in display {
+        options
+            .validate()
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        let Some(crate::scene::component::ComponentKind::Plugin(kind)) = options.component else {
+            continue;
+        };
+        let (id, _) = kind.split_once(':').context("invalid plugin component")?;
+        if selection.revisions.contains_key(id) {
+            continue;
+        }
+        let path = crate::runtime::config::config_path()?;
+        let dir = path.parent().context("missing config parent")?;
+        let bundle = crate::plugin::renderer_bundle(dir, id)
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        selection.merge(RendererSelection::from_bundles(std::slice::from_ref(
+            &bundle,
+        ))?)?;
+        bundles.push(bundle);
+    }
+    Ok((bundles, selection))
 }

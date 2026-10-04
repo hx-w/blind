@@ -326,7 +326,8 @@ impl Sources {
             .map(|r| Ok(serde_json::from_str(&r)?))
             .collect()
     }
-    pub fn revoke(&self, id: &str) -> Result<()> {
+    // Scene/CAS cleanup belongs to Registry::revoke_source, not its callers.
+    pub(super) fn revoke(&self, id: &str) -> Result<()> {
         self.db
             .lock()
             .unwrap()

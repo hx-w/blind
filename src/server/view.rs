@@ -394,10 +394,14 @@ pub(super) async fn reshare(
     let current_origin = request_origin(&headers, &state.config)?;
     let hosts = share_hosts(&state.config, &current_origin)?;
     let origin = select_share_origin(&state.config, origin_request, &current_origin, &hosts)?;
+    let renderers = state
+        .registry
+        .renderers_for_scene(&scene)
+        .map_err(|e| AppError::unavailable(&e.to_string()))?;
     Ok((
         no_store(),
         Json(ShareResponse {
-            links: links_for(&state.registry, &scene, &origin, owner)?,
+            links: links_for(&state.registry, &scene, &renderers, &origin, owner)?,
             origin,
             hosts,
         }),

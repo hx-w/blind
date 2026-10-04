@@ -29,8 +29,11 @@ the GitHub Release. Run local checks before tagging too. The first build, a
 toolchain change, or cache eviction can still require a cold compilation.
 
 The [CI workflow](../.github/workflows/ci.yml) also runs collection, component,
-plugin and OSS integration tests. Component and collection exports require
-Chrome/Chromium; see [component verification](components.md#verification).
+plugin, cross-Client browser-snapshot lifecycle and OSS integration tests.
+`python3 tests/integration_plugin_bundles.py` exercises real CLI Clients, snapshot
+deduplication, conflicts, immutable links, PNG export and last-reference cleanup.
+Component and collection exports require Chrome/Chromium; see
+[component verification](components.md#verification).
 The [release workflow](../.github/workflows/release.yml) publishes macOS ARM,
 macOS Intel and Linux x86_64 archives with `SHA256SUMS`.
 

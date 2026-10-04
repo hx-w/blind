@@ -56,3 +56,23 @@ Viewer metadata intentionally includes source host, OS user and display name.
 Absolute source paths still require the owner capability. Source bytes are
 processed in memory; reverse proxies must also disable response buffering to
 disk, as in `deploy/nginx.conf`.
+
+## Plugins
+
+Native resolvers are trusted installed programs, not a sandbox. They run as the
+OS user on the machine where they are installed: a Client CLI host or the Server.
+Only install code trusted with that user's privileges. Resolver settings and
+release-download credentials stay on that machine.
+
+A Client upload contains only renderer declarations and self-contained HTML,
+not executable resolver files or secrets. The Server authenticates uploads before
+JSON parsing and validates bounded content, paths, protocol versions and immutable
+bindings. Uploaded native code is never executed.
+
+Browser components run in separate opaque-origin `sandbox="allow-scripts"`
+iframes, without `allow-same-origin`, inside the selected URL's scene. Each receives
+only its own source bytes and a private MessagePort, not a PAT, source path or other
+component's port. CSP blocks network fetches, external scripts, forms and navigation.
+Declared HTTPS frame origins are pinned per snapshot and checked by the host's
+frame broker. Components can read the resource bytes supplied to them; install
+renderers trusted with those bytes. A sandbox is not a per-component CPU/memory quota.

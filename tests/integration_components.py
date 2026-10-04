@@ -51,8 +51,21 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         else: raise AssertionError('server not ready')
         # A component-only plugin exercises the public package and renderer contract.
         package = tmp/'example'; package.mkdir()
-        manifest = {'id':'example','name':'Example','version':'1.0.0','schemes':[], 'protocol_versions':[1],'entrypoint':[], 'files':['panel.html'], 'components':[{'name':'panel','entrypoint':'panel.html','api_version':1,'extensions':['trace.json','traceblob'],'frame_origins':['https://example.org']}], 'config_schema':{'type':'object','properties':{},'required':[],'additionalProperties':False}}
-        (package/'blind-plugin.json').write_text(json.dumps(manifest))
+        manifest = '''id = "example"
+name = "Example"
+version = "1.0.0"
+authors = [{ name = "Blind integration tests" }]
+schemes = []
+entrypoint = []
+files = ["panel.html"]
+[[components]]
+name = "panel"
+entrypoint = "panel.html"
+api_version = 1
+extensions = ["trace.json", "traceblob"]
+frame_origins = ["https://example.org"]
+'''
+        (package/'blind-plugin.toml').write_text(manifest)
         html = """<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:#e000e0}</style><script>window.addEventListener('message',e=>{if(e.source===parent&&e.data?.type==='blind:init'){document.body.textContent=new TextDecoder().decode(e.data.buffer);e.ports[0].postMessage({version:1,type:'ready'});}});</script>"""
         (package/'panel.html').write_text(html)
         cli('plugin','install',package)
@@ -74,23 +87,23 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         (directory/'.hidden'/'private.txt').write_text('hidden')
         (directory/'linked.log').symlink_to(tmp/'run.log')
         (directory/'cycle').symlink_to(directory, target_is_directory=True)
-        directory_token, direct = share('./', cwd=directory)
+        directory_token, direct = share('./', '--plugin', 'example', cwd=directory)
         assert [c['component'] for c in direct['entities']] == ['mesh','markdown','example:panel']
         assert api(f'/s/{directory_token}')[0] == 200
         assert api('/'+direct['attachments'][1]['url'])[1] == b'plugin-only extension'
-        _, recursive = share(directory, directory/'b.md', '--recursive', '--label', '4=Nested', '--component', '2=text')
+        _, recursive = share(directory, directory/'b.md', '--plugin', 'example', '--recursive', '--label', '4=Nested', '--component', '2=text')
         assert [c['component'] for c in recursive['entities']] == ['mesh','text','example:panel','text']
         assert recursive['entities'][3]['label'] == 'Nested'
-        # The client has no local plugin installation; extensions come from its server.
+        # Explicit activation can discover a renderer installed only on the Server.
         remote_env = {**env, 'BLIND_CONFIG_DIR': str(tmp/'client-without-plugins')}
-        _, remote_directory = share(directory, environment=remote_env)
+        _, remote_directory = share(directory, '--plugin', 'example', environment=remote_env)
         assert [c['component'] for c in remote_directory['entities']] == ['mesh','markdown','example:panel']
         assert not (tmp/'client-without-plugins').exists()
-        _, explicit_unknown = share(directory/'skip.bin', directory, '--component', '1=text')
+        _, explicit_unknown = share(directory/'skip.bin', directory, '--plugin', 'example', '--component', '1=text')
         assert len(explicit_unknown['entities']) == 4 and explicit_unknown['entities'][0]['component'] == 'text'
         (directory/'z.txt').write_text('added later')
         assert len(json.loads(api(f'/api/v1/scenes/{directory_token}')[1])['entities']) == 3
-        _, refreshed = share(directory)
+        _, refreshed = share(directory, '--plugin', 'example')
         assert len(refreshed['entities']) == 4
         empty = tmp/'empty'; empty.mkdir()
         assert cli('share', empty, '--format', 'json', ok=False) == ''
@@ -108,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         assert raw_markdown['entities'][0]['component'] == 'text'
         _, explicit_markdown = share(tmp/'run.log', '--component', 'markdown')
         assert explicit_markdown['entities'][0]['component'] == 'markdown'
-        token, scene = share(mesh, tmp/'run.log', tmp/'trace.json', tmp/'page.html')
+        token, scene = share(mesh, tmp/'run.log', tmp/'trace.json', tmp/'page.html', '--plugin', 'example')
         assert [c['component'] for c in scene['entities']] == ['mesh','text','example:panel','html']
         assert [c['source'] for c in scene['entities']] == [{'kind':'mesh','index':0}]+[{'kind':'attachment','index':i} for i in range(3)]
         assert all('path' not in json.dumps(c) for c in scene['entities'])
@@ -128,7 +141,7 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         _, explicit = share(tmp/'capture.json', '--component','example:panel')
         assert explicit['entities'][0]['component'] == 'example:panel'
         # Full PNG export must contain the sandboxed plugin, not only WebGL geometry.
-        plugin_token, plugin_scene = share(tmp/'trace.json')
+        plugin_token, plugin_scene = share(tmp/'trace.json', '--plugin', 'example')
         renderer_url = f"/api/v1/scenes/{plugin_token}/renderers/{plugin_scene['entities'][0]['id']}"
         status, pinned_html, headers = api(renderer_url)
         assert status == 200 and 'sandbox allow-scripts' in headers['Content-Security-Policy']
@@ -140,7 +153,8 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         colored = sum(1 for r,g,b in zip(*(iter(image.tobytes()),)*3) if r > 150 and b > 150 and g < 70)
         assert colored > image.width*image.height*.03, 'plugin missing from exported PNG'
         (package/'panel.html').write_text(html.replace('#e000e0','#00aaff'))
-        manifest['version'] = '1.0.1'; (package/'blind-plugin.json').write_text(json.dumps(manifest))
+        manifest = manifest.replace('version = "1.0.0"', 'version = "1.0.1"')
+        (package/'blind-plugin.toml').write_text(manifest)
         cli('plugin','install',package)
         assert api(renderer_url)[1] == pinned_html, 'upgrade changed an existing scene'
         cli('plugin','remove','example')

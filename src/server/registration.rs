@@ -80,7 +80,13 @@ pub(super) async fn client_plugins(
         .parent()
         .context("missing config parent")?
         .to_owned();
-    Ok((no_store(), Json(crate::plugin::list(&dir)?)))
+    let mut catalog = crate::plugin::list(&dir)?;
+    if let Some(plugins) = catalog["plugins"].as_array_mut() {
+        for plugin in plugins {
+            plugin["source"] = serde_json::json!("server");
+        }
+    }
+    Ok((no_store(), Json(catalog)))
 }
 
 pub(super) async fn client_info(
@@ -111,7 +117,7 @@ pub(super) async fn revoke_client(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let source = client_auth(&state, &headers, true)?;
-    state.registry.sources.revoke(&source.id)?;
+    state.registry.revoke_source(&source.id)?;
     Ok((no_store(), Json(serde_json::json!({"revoked":true}))))
 }
 #[derive(Deserialize)]

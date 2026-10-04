@@ -10,11 +10,66 @@ use std::collections::HashMap;
 pub(in crate::server) async fn scene_from_manifest(
     state: &AppState,
     plan: crate::plugin::ShareManifest,
+    renderers: &super::RendererSelection,
     source: Option<crate::scene::SceneSource>,
     title: Option<String>,
 ) -> Result<SceneDescriptor, AppError> {
     plan.validate()
         .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    // Validate every URI and required renderer before optional upstream failures
+    // can turn a manifest into a partial scene.
+    for uri in plan
+        .resources
+        .iter()
+        .chain(&plan.attachments)
+        .map(|r| &r.uri)
+        .chain(plan.components.iter().map(|c| &c.uri))
+    {
+        if crate::storage::oss::is_oss(uri) {
+            crate::storage::oss::Location::parse(uri)
+                .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        } else {
+            crate::storage::sources::validate_path(uri).map_err(|_| {
+                AppError::bad_request("manifest sources must be OSS or absolute filesystem paths")
+            })?;
+            if let Some(source) = &source {
+                let registered = state
+                    .registry
+                    .sources
+                    .get(&source.id)
+                    .map_err(|_| AppError::unauthorized("Client was revoked"))?;
+                if registered.client_only {
+                    return Err(AppError::bad_request(
+                        "Client has no filesystem source; register SFTP to share local files",
+                    ));
+                }
+            }
+        }
+    }
+    for component in &plan.components {
+        let kind = component
+            .display
+            .component
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| {
+                crate::scene::component::ComponentKind::infer(
+                    component
+                        .display
+                        .member
+                        .as_deref()
+                        .unwrap_or(&component.uri),
+                )
+            })
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        if let crate::scene::component::ComponentKind::Plugin(name) = &kind {
+            if !renderers.bindings.contains_key(name) {
+                return Err(AppError::bad_request(
+                    "required plugin renderer is unavailable",
+                ));
+            }
+        }
+    }
     let mut warnings = plan.warnings;
     let mut ready = HashMap::new();
     let mut cached = HashMap::new();
@@ -299,6 +354,7 @@ pub(in crate::server) async fn scene_from_manifest(
                 state,
                 &[resource.uri],
                 &[resource.display],
+                renderers,
                 source.clone(),
                 None,
             )

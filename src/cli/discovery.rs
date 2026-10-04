@@ -1,11 +1,14 @@
 //! Expand local directories before assigning resource indices or contacting share endpoints.
 use anyhow::{Context, Result, ensure};
-use serde_json::Value;
 use std::{collections::HashSet, fs, path::PathBuf};
 
 const MAX_RESOURCES: usize = 256;
 
-pub(super) async fn expand_inputs(inputs: Vec<PathBuf>, recursive: bool) -> Result<Vec<PathBuf>> {
+pub(super) fn expand_inputs(
+    inputs: Vec<PathBuf>,
+    recursive: bool,
+    extensions: &[String],
+) -> Result<Vec<PathBuf>> {
     let mut directories = Vec::with_capacity(inputs.len());
     for path in &inputs {
         let uri = path.to_string_lossy();
@@ -22,28 +25,9 @@ pub(super) async fn expand_inputs(inputs: Vec<PathBuf>, recursive: bool) -> Resu
     if !directories.contains(&true) {
         return Ok(inputs);
     }
-    let catalog = match crate::client::remote_plugins().await? {
-        Some(catalog) => catalog,
-        None => {
-            let config = crate::runtime::config::config_path()?;
-            crate::plugin::list(config.parent().context("config has no parent directory")?)?
-        }
-    };
-    let result = expand(inputs, directories, recursive, &extensions(&catalog))?;
+    let result = expand(inputs, directories, recursive, extensions)?;
     eprintln!("Sharing {} resources from expanded inputs.", result.len());
     Ok(result)
-}
-
-fn extensions(catalog: &Value) -> Vec<String> {
-    catalog["plugins"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .flat_map(|plugin| plugin["components"].as_array().into_iter().flatten())
-        .flat_map(|component| component["extensions"].as_array().into_iter().flatten())
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect()
 }
 
 fn supported(path: &std::path::Path, extensions: &[String]) -> bool {
@@ -137,9 +121,7 @@ mod tests {
         ] {
             fs::write(root.join(name), "data").unwrap();
         }
-        let catalog =
-            serde_json::json!({"plugins":[{"components":[{"extensions":["traceblob"]}]}]});
-        let exts = extensions(&catalog);
+        let exts = vec!["traceblob".to_owned()];
         let scan = |recursive| {
             expand(
                 vec![root.to_owned(), root.join("a.md"), root.join("nested")],
@@ -213,8 +195,8 @@ mod tests {
         assert_eq!(files, vec![temp.path().join("safe.txt")]);
     }
 
-    #[tokio::test]
-    async fn explicit_inputs_preserve_duplicates_uris_and_missing_path_errors() {
+    #[test]
+    fn explicit_inputs_preserve_duplicates_uris_and_missing_path_errors() {
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("data.bin");
         fs::write(&file, "x").unwrap();
@@ -224,10 +206,9 @@ mod tests {
             PathBuf::from("oss://store/bucket/key"),
             PathBuf::from("example://item"),
         ];
-        assert_eq!(expand_inputs(inputs.clone(), false).await.unwrap(), inputs);
+        assert_eq!(expand_inputs(inputs.clone(), false, &[]).unwrap(), inputs);
         assert!(
-            expand_inputs(vec![temp.path().join("missing")], true)
-                .await
+            expand_inputs(vec![temp.path().join("missing")], true, &[])
                 .unwrap_err()
                 .to_string()
                 .contains("cannot access")

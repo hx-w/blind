@@ -42,7 +42,8 @@ pub(super) async fn run(as_json: bool) -> Result<()> {
     let mut target = local_target
         .clone()
         .map(|server| json!({"kind":"local","server":server}));
-    let mut plugins = json!([]);
+    let plugins = crate::plugin::list(&crate::plugin::root()?)?["plugins"].clone();
+    let mut remote_catalog = json!({"state":"not_connected"});
     match load() {
         Ok(Some(c)) => {
             target =
@@ -69,7 +70,7 @@ pub(super) async fn run(as_json: bool) -> Result<()> {
             };
             connection = json!({"state":state,"server":c.server,"source_id":c.source.id,"name":c.source.name});
             if state == "connected" {
-                plugins = match tokio::time::timeout(
+                remote_catalog = match tokio::time::timeout(
                     std::time::Duration::from_secs(5),
                     api(&c.server, "/api/v1/client/plugins", &c.credential, None),
                 )
@@ -80,13 +81,10 @@ pub(super) async fn run(as_json: bool) -> Result<()> {
                 };
             }
         }
-        Ok(None) if local_target.is_some() => {
-            plugins = crate::plugin::list(path.parent().unwrap())?["plugins"].clone()
-        }
         Ok(None) => {}
         Err(_) => connection = json!({"state":"invalid_config"}),
     }
-    let report = json!({"schema_version":1,"local_server":local,"connection":connection,"target":target,"plugins":plugins});
+    let report = json!({"schema_version":1,"local_server":local,"connection":connection,"target":target,"plugins":plugins,"remote_catalog":remote_catalog});
     if as_json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -110,12 +108,28 @@ pub(super) async fn run(as_json: bool) -> Result<()> {
         if let Some(plugins) = report["plugins"].as_array() {
             for p in plugins {
                 println!(
-                    "Plugin: {} {} ({})",
+                    "Local plugin: {} {} ({})",
                     p["id"].as_str().unwrap_or("?"),
                     p["version"].as_str().unwrap_or(""),
                     p["state"].as_str().unwrap_or("unknown")
                 );
             }
+        }
+        if let Some(plugins) = report["remote_catalog"].as_array() {
+            for p in plugins {
+                println!(
+                    "Remote catalog: {} {}",
+                    p["id"].as_str().unwrap_or("?"),
+                    p["version"].as_str().unwrap_or("")
+                );
+            }
+        } else {
+            println!(
+                "Remote catalog: {}",
+                report["remote_catalog"]["state"]
+                    .as_str()
+                    .unwrap_or("unavailable")
+            );
         }
     }
     Ok(())

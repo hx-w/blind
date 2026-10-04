@@ -13,7 +13,7 @@ use clap::Subcommand;
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Manage Server-side share resolvers.
+    /// Manage plugins installed on this machine.
     Plugin {
         #[command(subcommand)]
         command: super::plugin::Command,
@@ -155,13 +155,20 @@ pub async fn run(command: Command) -> Result<()> {
             println!("{}", sources.invite(origin)?.encode()?);
         }
         Command::Sources { revoke } => {
-            let sources = crate::storage::sources::Sources::open(
-                config_path()?.parent().context("config parent missing")?,
-            )?;
             if let Some(id) = revoke {
-                sources.revoke(&id)?;
+                let (config, _) = Config::load_or_create()?;
+                let registry = Registry::open(&config)?;
+                registry.revoke_source(&id)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&registry.sources.list()?)?
+                );
+            } else {
+                let sources = crate::storage::sources::Sources::open(
+                    config_path()?.parent().context("config parent missing")?,
+                )?;
+                println!("{}", serde_json::to_string_pretty(&sources.list()?)?);
             }
-            println!("{}", serde_json::to_string_pretty(&sources.list()?)?);
         }
         Command::Init { host, show_pat } => init(host, show_pat)?,
         Command::Serve { listen } => {

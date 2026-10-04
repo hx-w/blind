@@ -15,6 +15,7 @@ use std::{
 
 pub(super) struct ShareOptions {
     pub(super) recursive: bool,
+    pub(super) plugins: Vec<String>,
     pub(super) host: Option<String>,
     pub(super) ttl_days: u32,
     pub(super) format: OutputFormat,
@@ -99,6 +100,263 @@ struct CollectionInput {
 struct CollectionSceneInput {
     id: String,
     input: ShareInput,
+}
+
+/// Suffix inference uses only explicitly enabled definitions. Explicit component
+/// choices collect local browser bundles without activating their other suffixes.
+struct ShareRenderers {
+    dir: PathBuf,
+    local_catalog: Value,
+    bundles: Vec<crate::plugin::RendererBundle>,
+    definitions: Vec<(String, crate::plugin::RendererDefinition)>,
+    directories: Vec<crate::plugin::PreparedPackage>,
+    revisions: std::collections::BTreeMap<String, String>,
+}
+
+impl ShareRenderers {
+    async fn new(selections: &[String]) -> Result<Self> {
+        let dir = crate::plugin::root()?;
+        let local_catalog = crate::plugin::list(&dir)?;
+        let mut selection = Self {
+            dir,
+            local_catalog,
+            bundles: Vec::new(),
+            definitions: Vec::new(),
+            directories: Vec::new(),
+            revisions: std::collections::BTreeMap::new(),
+        };
+        let mut remote_catalog = None;
+        let mut seen = std::collections::HashSet::new();
+        for requested in selections {
+            if !seen.insert(requested) {
+                continue;
+            }
+            let path = Path::new(requested);
+            if path.is_absolute() || requested.starts_with("./") || requested.starts_with("../") {
+                let package = crate::plugin::prepare_directory(path)?;
+                let id = package.manifest().id.clone();
+                selection.add_bundle(package.renderer_bundle().clone())?;
+                selection.add_definitions(&id, &package.manifest().components);
+                if let Some(previous) = selection.directories.iter().find(|p| p.manifest().id == id)
+                {
+                    anyhow::ensure!(
+                        previous.same_resolution(&package),
+                        "conflicting plugin resolution for {id}"
+                    );
+                } else {
+                    selection.directories.push(package);
+                }
+            } else if crate::plugin::installed_path(&selection.dir, requested)?.exists() {
+                let bundle = crate::plugin::renderer_bundle(&selection.dir, requested)?;
+                selection.add_definitions(requested, &bundle.components);
+                selection.add_bundle(bundle)?;
+            } else {
+                if remote_catalog.is_none() {
+                    remote_catalog = crate::client::remote_plugins().await?;
+                }
+                let plugin = remote_catalog.as_ref()
+                    .and_then(|v| v["plugins"].as_array())
+                    .and_then(|plugins| plugins.iter().find(|p| p["id"].as_str() == Some(requested.as_str())))
+                    .with_context(|| format!("plugin {requested} is not installed locally or available on the connected Server"))?;
+                let components: Vec<crate::plugin::RendererDefinition> =
+                    serde_json::from_value(plugin["components"].clone())?;
+                if !components.is_empty() {
+                    let revision = plugin["revision"]
+                        .as_str()
+                        .context("Server plugin has no browser revision")?;
+                    selection.record_revision(requested, revision)?;
+                }
+                selection.add_definitions(requested, &components);
+            }
+        }
+        Ok(selection)
+    }
+
+    fn add_definitions(&mut self, id: &str, definitions: &[crate::plugin::RendererDefinition]) {
+        if !self.definitions.iter().any(|(existing, _)| existing == id) {
+            self.definitions
+                .extend(definitions.iter().cloned().map(|c| (id.to_owned(), c)));
+        }
+    }
+
+    fn record_revision(&mut self, id: &str, revision: &str) -> Result<()> {
+        if let Some(previous) = self.revisions.get(id) {
+            anyhow::ensure!(previous == revision, "conflicting plugin content for {id}");
+        } else {
+            self.revisions.insert(id.to_owned(), revision.to_owned());
+        }
+        Ok(())
+    }
+
+    fn add_bundle(&mut self, bundle: crate::plugin::RendererBundle) -> Result<()> {
+        self.record_revision(&bundle.id, &bundle.revision()?)?;
+        if !bundle.components.is_empty() && !self.bundles.iter().any(|b| b.id == bundle.id) {
+            self.bundles.push(bundle);
+        }
+        Ok(())
+    }
+
+    fn collect_component(&mut self, kind: &crate::scene::component::ComponentKind) -> Result<()> {
+        if let crate::scene::component::ComponentKind::Plugin(component) = kind {
+            let (id, name) = component
+                .split_once(':')
+                .context("invalid plugin component")?;
+            if let Some(bundle) = self.bundles.iter().find(|bundle| bundle.id == id) {
+                anyhow::ensure!(
+                    bundle.components.iter().any(|c| c.name == name),
+                    "component {component} is not installed locally"
+                );
+                return Ok(());
+            }
+            if crate::plugin::installed_path(&self.dir, id)?.exists() {
+                let bundle = crate::plugin::renderer_bundle(&self.dir, id)?;
+                anyhow::ensure!(
+                    bundle.components.iter().any(|c| c.name == name),
+                    "component {component} is not installed locally"
+                );
+                self.add_bundle(bundle)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn infer(&self, path: &str) -> Result<crate::scene::component::ComponentKind> {
+        crate::plugin::infer_component_definitions(
+            path,
+            self.definitions
+                .iter()
+                .map(|(id, definition)| (id.as_str(), definition)),
+        )
+    }
+
+    fn extensions(&self) -> Vec<String> {
+        self.definitions
+            .iter()
+            .flat_map(|(_, c)| c.extensions.iter().cloned())
+            .collect()
+    }
+
+    async fn prepare(&mut self, mut input: ShareInput) -> Result<ShareInput> {
+        let plugin_input = input
+            .meshes
+            .iter()
+            .any(|p| crate::plugin::is_plugin(&p.to_string_lossy()));
+        if plugin_input {
+            anyhow::ensure!(
+                input.meshes.len() == 1
+                    && input.labels.meshes.iter().all(Option::is_none)
+                    && input.labels.groups.is_empty()
+                    && input.display.iter().all(|o| o.component.is_none()
+                        && o.member.is_none()
+                        && o.group.is_none()
+                        && o.position.is_none()
+                        && o.size.is_none()),
+                "a plugin share accepts one URI and no display or label overrides"
+            );
+            input.display.clear();
+            input.labels.meshes.clear();
+            let uri = input.meshes[0].to_string_lossy();
+            let scheme = crate::plugin::scheme(&uri).context("invalid plugin URI")?;
+            let installed = self.local_catalog["plugins"]
+                .as_array()
+                .is_some_and(|plugins| {
+                    plugins.iter().any(|p| {
+                        p["schemes"].as_array().is_some_and(|schemes| {
+                            schemes.iter().any(|s| s.as_str() == Some(scheme))
+                        })
+                    })
+                });
+            let mut directories = self
+                .directories
+                .iter()
+                .filter(|package| package.manifest().schemes.iter().any(|s| s == scheme));
+            if let Some(package) = directories.next() {
+                anyhow::ensure!(
+                    directories.next().is_none(),
+                    "multiple selected plugin directories handle {scheme}://"
+                );
+                input.manifest =
+                    Some(crate::plugin::resolve_prepared(&self.dir, package, &uri, true).await?);
+            } else if installed {
+                let (manifest, bundle) = crate::plugin::resolve_local(&self.dir, &uri).await?;
+                if let Some(bundle) = bundle {
+                    self.add_bundle(bundle)?;
+                }
+                input.manifest = Some(manifest);
+            }
+        }
+        if let Some(manifest) = &mut input.manifest {
+            normalize_manifest(manifest, &std::env::current_dir()?)?;
+            for component in &mut manifest.components {
+                if component.display.component.is_none() && !self.definitions.is_empty() {
+                    component.display.component = Some(
+                        self.infer(
+                            component
+                                .display
+                                .member
+                                .as_deref()
+                                .unwrap_or(&component.uri),
+                        )?,
+                    );
+                }
+                if let Some(kind) = &component.display.component {
+                    self.collect_component(kind)?;
+                }
+            }
+            input.meshes = manifest
+                .resources
+                .iter()
+                .map(|r| PathBuf::from(&r.uri))
+                .chain(manifest.components.iter().map(|r| PathBuf::from(&r.uri)))
+                .chain(manifest.attachments.iter().map(|r| PathBuf::from(&r.uri)))
+                .collect();
+        } else if !plugin_input {
+            input
+                .display
+                .resize_with(input.meshes.len(), Default::default);
+            for (path, options) in input.meshes.iter().zip(&mut input.display) {
+                let uri = path.to_string_lossy();
+                if crate::plugin::is_plugin(&uri) {
+                    continue;
+                }
+                if options.component.is_none() && !self.definitions.is_empty() {
+                    options.component =
+                        Some(self.infer(options.member.as_deref().unwrap_or(&uri))?);
+                }
+                if let Some(kind) = &options.component {
+                    self.collect_component(kind)?;
+                }
+            }
+        }
+        Ok(input)
+    }
+}
+
+fn normalize_manifest(manifest: &mut crate::plugin::ShareManifest, base: &Path) -> Result<()> {
+    for uri in manifest
+        .resources
+        .iter_mut()
+        .chain(&mut manifest.attachments)
+        .map(|r| &mut r.uri)
+        .chain(manifest.components.iter_mut().map(|c| &mut c.uri))
+    {
+        anyhow::ensure!(
+            !crate::plugin::is_plugin(uri),
+            "manifests cannot contain nested plugin or HTTP URIs"
+        );
+        if crate::storage::oss::is_oss(uri) {
+            crate::storage::oss::Location::parse(uri)?;
+        } else {
+            let path = Path::new(uri);
+            let absolute = if path.is_absolute() {
+                path.to_owned()
+            } else {
+                base.join(path)
+            };
+            *uri = absolute.to_string_lossy().into_owned();
+        }
+    }
+    manifest.validate()
 }
 
 fn read_share_config(path: &Path) -> Result<SharePlan> {
@@ -202,26 +460,7 @@ fn read_share_config(path: &Path) -> Result<SharePlan> {
     }
     if value.get("schema_version").is_some() {
         let mut manifest: crate::plugin::ShareManifest = serde_json::from_value(value)?;
-        manifest.validate()?;
-        for resource in &mut manifest.resources {
-            anyhow::ensure!(
-                !crate::plugin::is_plugin(&resource.uri),
-                "versioned manifests cannot contain plugin URIs"
-            );
-            if !crate::storage::oss::is_oss(&resource.uri) {
-                let path = Path::new(&resource.uri);
-                resource.uri = fs::canonicalize(if path.is_absolute() {
-                    path.to_owned()
-                } else {
-                    base.join(path)
-                })?
-                .to_string_lossy()
-                .into_owned();
-            }
-        }
-        for attachment in &manifest.attachments {
-            crate::storage::oss::Location::parse(&attachment.uri)?;
-        }
+        normalize_manifest(&mut manifest, &base)?;
         return Ok(SharePlan::Scene(Box::new(ShareInput {
             display: Vec::new(),
             meshes: manifest
@@ -362,15 +601,18 @@ pub(super) async fn share(
 ) -> Result<()> {
     let ShareOptions {
         recursive,
+        plugins,
         host,
         ttl_days,
         format,
     } = options;
     let config_mode = config.is_some();
+    let mut renderers = ShareRenderers::new(&plugins).await?;
     let plan = match config {
         Some(path) => read_share_config(&path)?,
         None => {
-            let meshes = super::discovery::expand_inputs(meshes, recursive).await?;
+            let meshes =
+                super::discovery::expand_inputs(meshes, recursive, &renderers.extensions())?;
             let labels = parse_labels(&labels, meshes.len())?;
             let display = parse_components(&components, meshes.len())?;
             SharePlan::Scene(Box::new(ShareInput {
@@ -391,53 +633,49 @@ pub(super) async fn share(
             let c = load()?.context("not registered")?;
             let mut scenes = Vec::new();
             for part in collection.scenes {
-                let paths = part
-                    .input
-                    .meshes
-                    .iter()
-                    .map(share_path)
-                    .collect::<Result<Vec<_>>>()?;
-                scenes.push(json!({"id":part.id,"title":part.input.title,"paths":paths,"display":part.input.display,"labels":part.input.labels.meshes,"label_groups":part.input.labels.groups}));
+                let input = renderers.prepare(part.input).await?;
+                let paths = if input.manifest.is_some() {
+                    Vec::new()
+                } else {
+                    input
+                        .meshes
+                        .iter()
+                        .map(share_path)
+                        .collect::<Result<Vec<_>>>()?
+                };
+                scenes.push(json!({"id":part.id,"title":input.title,"paths":paths,"manifest":input.manifest,"display":input.display,"labels":input.labels.meshes,"label_groups":input.labels.groups}));
             }
+            crate::plugin::validate_bundle_set(&renderers.bundles)?;
             let payload = api(&c.server, "/api/v1/client/scenes", &c.credential, Some(json!({
                 "collection":{"title":collection.title,"active_scene_id":collection.active_scene_id,"scenes":scenes},
+                "renderers":&renderers.bundles,
                 "origin":host,"ttl_days":ttl_days
             }))).await?;
             return print_share_payload(payload, format, ttl_days);
         }
     };
-    if input
-        .meshes
-        .iter()
-        .any(|p| crate::plugin::is_plugin(&p.to_string_lossy()))
-    {
-        anyhow::ensure!(
-            input.meshes.len() == 1
-                && input.labels.meshes.iter().all(Option::is_none)
-                && input.labels.groups.is_empty()
-                && input.display.iter().all(|o| o.component.is_none()
-                    && o.group.is_none()
-                    && o.position.is_none()
-                    && o.size.is_none()),
-            "a plugin share accepts one URI and no --label overrides"
-        );
-    }
+    let input = renderers.prepare(*input).await?;
+    crate::plugin::validate_bundle_set(&renderers.bundles)?;
     if load()?.is_none() {
         join(false, true, false, None, None, None).await?;
     }
     let c = load()?.context("not registered")?;
-    let paths = input
-        .meshes
-        .iter()
-        .map(share_path)
-        .collect::<Result<Vec<_>>>()?;
+    let paths = if input.manifest.is_some() {
+        Vec::new()
+    } else {
+        input
+            .meshes
+            .iter()
+            .map(share_path)
+            .collect::<Result<Vec<_>>>()?
+    };
     if config_mode {
         eprintln!(
             "Blind: registering {} resources from the config; the first share hashes every source once and a multi-gigabyte scene may take several minutes.",
             paths.len()
         );
     }
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"display":input.display,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"ttl_days":ttl_days}))).await?;
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"display":input.display,"renderers":&renderers.bundles,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"ttl_days":ttl_days}))).await?;
     print_share_payload(payload, format, ttl_days)
 }
 
@@ -566,6 +804,34 @@ pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn versioned_manifest_normalizes_every_local_source_and_rejects_nested_uris() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["mesh.ply", "capture.json", "notes.txt"] {
+            fs::write(directory.path().join(name), "data").unwrap();
+        }
+        let mut manifest: crate::plugin::ShareManifest = serde_json::from_value(json!({
+            "schema_version": 1,
+            "requires": ["components.v1", "attachments"],
+            "resources": [{"id":"mesh","uri":"mesh.ply"}],
+            "components": [{"id":"capture","uri":"capture.json","label":"Capture","component":"example:trace"}],
+            "attachments": [{"id":"notes","uri":"notes.txt"}]
+        })).unwrap();
+        normalize_manifest(&mut manifest, directory.path()).unwrap();
+        for uri in [
+            &manifest.resources[0].uri,
+            &manifest.components[0].uri,
+            &manifest.attachments[0].uri,
+        ] {
+            assert!(Path::new(uri).is_absolute());
+            assert!(Path::new(uri).exists());
+        }
+        manifest.components[0].uri = "https://example.com/private".into();
+        assert!(normalize_manifest(&mut manifest, directory.path()).is_err());
+        manifest.components[0].uri = "example://nested".into();
+        assert!(normalize_manifest(&mut manifest, directory.path()).is_err());
+    }
+
     #[test]
     fn labels_preserve_one_based_indices_and_reject_duplicates() {
         let labels = parse_labels(&["2= Preparation ".into()], 2).unwrap();

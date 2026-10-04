@@ -1,28 +1,39 @@
-//! Server-only, one-shot share resolvers. Public scenes contain ordinary sources.
+//! Unified installed plugins, browser snapshots and one-shot share resolvers.
+mod bundle;
+mod components;
+mod config;
+mod package;
 mod resolver;
 pub(crate) mod update;
-pub use resolver::resolve;
-mod components;
-use components::validate_renderers;
-pub use components::{
-    ComponentResource, RendererDefinition, bind_component, infer_component, renderer_document,
+pub(crate) use bundle::validate_binding_metadata;
+pub use bundle::{
+    RendererBundle, bind_renderer, infer_component_from, renderer_bindings, renderer_bundle,
+    validate_bundle_set,
 };
+pub use components::{ComponentResource, RendererDefinition, infer_component_definitions};
+pub(crate) use config::{environment, validate_binding};
+pub use package::{PreparedPackage, prepare_directory};
+pub(crate) use package::{install_package, lock_admin, read_manifest, validate_manifest};
+pub use resolver::{resolve, resolve_local, resolve_prepared};
 
+use crate::runtime::config::config_path;
 use crate::scene::Warning;
-use crate::{
-    runtime::config::config_path,
-    runtime::files::{private_dir, write_private},
-};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
+    io::Read,
     path::{Path, PathBuf},
 };
 
 const LIMIT: usize = 4 * 1024 * 1024;
+fn hash_field(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
 pub const FEATURES: &[&str] = &[
     "layout.panels",
     "layout.panel-groups",
@@ -32,23 +43,75 @@ pub const FEATURES: &[&str] = &[
 ];
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub id: String,
     pub name: String,
     pub version: String,
+    pub authors: Vec<Author>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub license: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homepage: Option<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
     #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub components: Vec<RendererDefinition>,
+    #[serde(default)]
     pub schemes: Vec<String>,
+    #[serde(default = "default_protocol_versions")]
     pub protocol_versions: Vec<u32>,
+    #[serde(default)]
     pub entrypoint: Vec<String>,
     pub files: Vec<String>,
-    pub config_schema: Value,
+    #[serde(default)]
+    pub env: BTreeMap<String, EnvVariable>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update: Option<UpdateSource>,
 }
+fn default_protocol_versions() -> Vec<u32> {
+    vec![2]
+}
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Author {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EnvType {
+    #[default]
+    String,
+    Integer,
+    Number,
+    Boolean,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvVariable {
+    #[serde(default, rename = "type")]
+    pub kind: EnvType,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    #[serde(default)]
+    pub secret: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, rename = "enum", skip_serializing_if = "Option::is_none")]
+    pub choices: Option<Vec<Value>>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UpdateSource {
     pub repository: String,
 }
@@ -119,181 +182,21 @@ pub(crate) fn installed_path(dir: &Path, id: &str) -> Result<PathBuf> {
     ensure!(valid_id(id), "invalid plugin ID");
     Ok(dir.join("plugins").join(id).join("current.json"))
 }
-pub(crate) fn settings_path(dir: &Path, id: &str) -> Result<PathBuf> {
+pub(crate) fn environment_path(dir: &Path, id: &str) -> Result<PathBuf> {
     ensure!(valid_id(id), "invalid plugin ID");
-    Ok(dir.join("plugin-config").join(format!("{id}.json")))
+    Ok(dir.join("plugins").join(id).join(".env"))
 }
 pub(crate) fn read_json(path: &Path) -> Result<Value> {
-    let bytes = fs::read(path)?;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take((LIMIT + 1) as u64)
+        .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= LIMIT, "configuration exceeds 4 MiB");
     Ok(serde_json::from_slice(&bytes)?)
 }
 pub(crate) fn installed(dir: &Path, id: &str) -> Result<Installed> {
     serde_json::from_value(read_json(&installed_path(dir, id)?)?)
         .context("invalid plugin installation")
-}
-pub(crate) fn settings(dir: &Path, m: &Manifest) -> Result<Value> {
-    let path = settings_path(dir, &m.id)?;
-    let mut v = if path.exists() {
-        read_json(&path)?
-    } else {
-        json!({})
-    };
-    ensure!(v.is_object(), "plugin config must be an object");
-    for (k, p) in properties(m)? {
-        if v.get(k).is_none()
-            && let Some(default) = p.get("default")
-        {
-            v[k] = default.clone();
-        }
-    }
-    Ok(v)
-}
-pub(crate) fn properties(m: &Manifest) -> Result<&serde_json::Map<String, Value>> {
-    m.config_schema["properties"]
-        .as_object()
-        .context("config_schema.properties must be an object")
-}
-pub(crate) fn validate_config(m: &Manifest, v: &Value) -> Result<()> {
-    let props = properties(m)?;
-    for (key, value) in v.as_object().context("config must be an object")? {
-        let p = props
-            .get(key)
-            .with_context(|| format!("unknown config field: {key}"))?;
-        let valid = match p["type"].as_str() {
-            Some("string") => value.is_string(),
-            Some("integer") => value.is_i64() || value.is_u64(),
-            Some("number") => value.is_number(),
-            Some("boolean") => value.is_boolean(),
-            _ => false,
-        };
-        ensure!(valid, "invalid type for config field: {key}");
-        if let Some(options) = p.get("enum").and_then(Value::as_array) {
-            ensure!(
-                options.contains(value),
-                "invalid choice for config field: {key}"
-            );
-        }
-    }
-    for required in m.config_schema["required"].as_array().into_iter().flatten() {
-        let key = required
-            .as_str()
-            .context("required fields must be strings")?;
-        ensure!(
-            v.get(key)
-                .is_some_and(|x| !x.is_null() && x.as_str() != Some("")),
-            "missing config field: {key}"
-        );
-    }
-    Ok(())
-}
-pub(crate) fn validate_binding(dir: &Path, v: &Value) -> Result<()> {
-    if let Some(alias) = v.get("oss_alias") {
-        let alias = alias.as_str().context("oss_alias must be a string")?;
-        let bucket = v["bucket"]
-            .as_str()
-            .context("bucket is required with oss_alias")?;
-        crate::storage::oss::Location::parse(&format!("oss://{alias}/{bucket}/check"))?;
-        let store = crate::storage::oss::list(dir)?
-            .into_iter()
-            .find(|s| s.alias == alias)
-            .context("configured OSS alias does not exist on this Server")?;
-        ensure!(
-            store.bucket.as_deref().is_none_or(|b| b == bucket),
-            "bucket differs from OSS alias binding"
-        );
-    }
-    Ok(())
-}
-fn validate_manifest(m: &Manifest) -> Result<()> {
-    ensure!(valid_id(&m.id), "invalid plugin ID");
-    if let Some(update) = &m.update {
-        crate::plugin::update::validate_repository(&update.repository)?;
-    }
-    ensure!(
-        !m.name.is_empty() && !m.version.is_empty(),
-        "name and version are required"
-    );
-    ensure!(
-        m.protocol_versions.contains(&1),
-        "plugin has no compatible protocol (Host supports 1)"
-    );
-    ensure!(
-        ((!m.schemes.is_empty() && !m.entrypoint.is_empty())
-            || (m.schemes.is_empty() && m.entrypoint.is_empty() && !m.components.is_empty())),
-        "plugin needs a resolver or components"
-    );
-    validate_renderers(m)?;
-    let mut seen = HashSet::new();
-    for s in &m.schemes {
-        ensure!(
-            scheme(&format!("{s}://x")) == Some(s.as_str())
-                && !["oss", "http", "https", "file"].contains(&s.as_str())
-                && seen.insert(s),
-            "invalid, reserved or repeated plugin scheme"
-        );
-    }
-    ensure!(
-        m.config_schema["type"] == "object" && m.config_schema["additionalProperties"] == false,
-        "config schema must be a closed object"
-    );
-    for key in m
-        .config_schema
-        .as_object()
-        .context("invalid schema")?
-        .keys()
-    {
-        ensure!(
-            [
-                "type",
-                "additionalProperties",
-                "properties",
-                "required",
-                "description",
-                "title",
-                "$schema"
-            ]
-            .contains(&key.as_str()),
-            "unsupported config schema keyword: {key}"
-        );
-    }
-    let props = properties(m)?;
-    for p in props.values() {
-        ensure!(
-            ["string", "integer", "number", "boolean"].contains(&p["type"].as_str().unwrap_or("")),
-            "config supports scalar properties only"
-        );
-        for key in p.as_object().context("invalid property schema")?.keys() {
-            ensure!(
-                [
-                    "type",
-                    "default",
-                    "description",
-                    "title",
-                    "writeOnly",
-                    "enum"
-                ]
-                .contains(&key.as_str()),
-                "unsupported config property keyword: {key}"
-            );
-        }
-        if p["writeOnly"] == true {
-            ensure!(
-                p["type"] == "string" && p.get("default").is_none(),
-                "secrets must be strings without defaults"
-            );
-        }
-    }
-    for k in m.config_schema["required"]
-        .as_array()
-        .context("required must be an array")?
-    {
-        ensure!(
-            k.as_str().is_some_and(|k| props.contains_key(k)),
-            "unknown required property"
-        );
-    }
-    Ok(())
 }
 
 pub fn list(dir: &Path) -> Result<Value> {
@@ -310,170 +213,24 @@ pub fn list(dir: &Path) -> Result<Value> {
         }
         match installed(dir, &id) {
             Ok(i) => {
-                let ready = settings(dir, &i.manifest)
-                    .and_then(|v| {
-                        validate_config(&i.manifest, &v)?;
-                        validate_binding(dir, &v)
-                    })
+                let ready = validate_manifest(&i.manifest)
+                    .and_then(|_| environment(dir, &i.manifest))
                     .is_ok();
-                result.push(json!({"id":id,"name":i.manifest.name,"version":i.manifest.version,"description":i.manifest.description,"schemes":i.manifest.schemes,"components":i.manifest.components,"state":if ready{"configured"}else{"unconfigured"}}));
+                let m = &i.manifest;
+                let revision = if m.components.is_empty() {
+                    None
+                } else {
+                    renderer_bundle(dir, &id)
+                        .and_then(|bundle| bundle.revision())
+                        .ok()
+                };
+                result.push(json!({"id":id,"name":m.name,"version":m.version,"description":m.description,"authors":m.authors,"license":m.license,"repository":m.repository,"homepage":m.homepage,"keywords":m.keywords,"schemes":m.schemes,"components":m.components,"revision":revision,"state":if ready{"configured"}else{"unconfigured"}}));
             }
             Err(_) => result.push(json!({"id":id,"state":"invalid"})),
         }
     }
     result.sort_by_key(|v| v["id"].as_str().unwrap_or("").to_owned());
     Ok(json!({"plugins":result}))
-}
-fn executable(command: &str, package: &Path) -> Result<PathBuf> {
-    let path = Path::new(command);
-    let resolved = if path.is_absolute() {
-        path.to_owned()
-    } else if command.contains('/') {
-        package.join(path)
-    } else {
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .map(|p| p.join(command))
-            .find(|p| p.is_file())
-            .with_context(|| {
-                format!("runtime {command} not found; install it on the Server first")
-            })?
-    };
-    let resolved = fs::canonicalize(resolved)?;
-    ensure!(
-        resolved.is_file(),
-        "plugin entrypoint must be a regular file"
-    );
-    #[cfg(unix)]
-    if !resolved.starts_with(package) {
-        use std::os::unix::fs::PermissionsExt;
-        ensure!(
-            fs::metadata(&resolved)?.permissions().mode() & 0o111 != 0,
-            "plugin runtime is not executable"
-        );
-    }
-    Ok(resolved)
-}
-pub(crate) fn install_package(dir: &Path, directory: &Path) -> Result<String> {
-    let package = fs::canonicalize(directory)?;
-    let m: Manifest = serde_json::from_value(read_json(&package.join("blind-plugin.json"))?)?;
-    validate_manifest(&m)?;
-    for p in list(dir)?["plugins"]
-        .as_array()
-        .context("invalid plugin list")?
-    {
-        if p["id"] != m.id {
-            for s in &m.schemes {
-                ensure!(
-                    !p["schemes"]
-                        .as_array()
-                        .is_some_and(|v| v.contains(&json!(s))),
-                    "scheme {s} is already registered"
-                );
-            }
-        }
-    }
-    let mut files = Vec::new();
-    let mut hash_input = serde_json::to_vec(&m)?;
-    for file in &m.files {
-        let relative = Path::new(file);
-        ensure!(
-            !relative.is_absolute()
-                && relative
-                    .components()
-                    .all(|p| matches!(p, std::path::Component::Normal(_))),
-            "package paths must be relative without traversal"
-        );
-        let canonical = fs::canonicalize(package.join(relative))?;
-        ensure!(
-            canonical.starts_with(&package) && canonical.is_file(),
-            "package file escapes package"
-        );
-        let bytes = fs::read(canonical)?;
-        ensure!(bytes.len() <= 64 * 1024 * 1024, "plugin file too large");
-        hash_input.extend_from_slice(file.as_bytes());
-        hash_input.extend_from_slice(&bytes);
-        files.push((file, bytes));
-    }
-    let runtime = match m.entrypoint.first() {
-        Some(entry) => executable(entry, &package)?,
-        None => PathBuf::new(),
-    };
-    let config = settings(dir, &m)?;
-    if settings_path(dir, &m.id)?.exists() {
-        validate_config(&m, &config)?;
-        validate_binding(dir, &config)?;
-    }
-    let hash = crate::scene::hash_bytes(&hash_input);
-    let destination = dir.join("plugins").join(&m.id).join("versions").join(hash);
-    if !destination.exists() {
-        let versions = destination.parent().unwrap();
-        private_dir(versions)?;
-        let staging = tempfile::tempdir_in(versions)?;
-        for (name, bytes) in &files {
-            let target = staging.path().join(name);
-            write_private(&target, bytes)?;
-        }
-        write_private(
-            &staging.path().join("blind-plugin.json"),
-            &serde_json::to_vec_pretty(&m)?,
-        )?;
-        fs::rename(staging.path(), &destination)?;
-    }
-    for (name, bytes) in &files {
-        ensure!(
-            fs::read(destination.join(name))? == *bytes,
-            "installed package integrity check failed"
-        );
-    }
-    let runtime = if runtime.starts_with(&package) {
-        let relative = runtime.strip_prefix(&package)?;
-        ensure!(
-            m.files.iter().any(|f| Path::new(f) == relative),
-            "packaged executable must appear in files"
-        );
-        let target = destination.join(relative);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&target, fs::Permissions::from_mode(0o700))?;
-        }
-        target
-    } else {
-        runtime
-    };
-    let id = m.id.clone();
-    let receipt = Installed {
-        directory: destination,
-        executable: runtime,
-        manifest: m,
-    };
-    private_dir(installed_path(dir, &id)?.parent().unwrap())?;
-    write_private(
-        &installed_path(dir, &id)?,
-        &serde_json::to_vec_pretty(&receipt)?,
-    )?;
-    Ok(id)
-}
-pub(crate) fn lock_admin(dir: &Path) -> Result<fs::File> {
-    private_dir(dir)?;
-    let path = dir.join("plugins.lock");
-    let mut options = fs::OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options.open(path)?;
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        ensure!(
-            unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0,
-            "another plugin administration command is running; retry after it finishes"
-        );
-    }
-    Ok(file)
 }
 impl ShareManifest {
     pub fn validate(&self) -> Result<()> {
@@ -585,15 +342,6 @@ impl ShareManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn entrypoint_and_administration_boundaries() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(executable(dir.path().to_str().unwrap(), dir.path()).is_err());
-        let lock = lock_admin(dir.path()).unwrap();
-        assert!(lock_admin(dir.path()).is_err());
-        drop(lock);
-        assert!(lock_admin(dir.path()).is_ok());
-    }
     #[test]
     fn panel_expansion_has_a_scene_wide_limit() {
         let resources: Vec<_> = (0..100)

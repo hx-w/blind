@@ -43,7 +43,7 @@ client -> protocol / runtime / storage
 protocol -> scene / geometry
 render -> scene / geometry
 plugin -> scene / storage / runtime
-storage -> scene / protocol / runtime
+storage -> scene / protocol / runtime / plugin (snapshot contracts)
 geometry -> scene
 ```
 
@@ -66,6 +66,14 @@ contact the Server.
   plugin execution, HTTP, or storage adapters in production code.
 - `runtime` contains host facilities. Shared private-file operations and OS
   identity do not belong to Client or source storage.
+- `plugin` owns one package format and installer for both Client and Server hosts.
+  `package.rs` handles installation/integrity, `config.rs` private dotenv parsing,
+  `resolver.rs` native subprocess execution, `components.rs` renderer declarations
+  and inference, `bundle.rs` browser-only snapshots/hashes, and `update.rs` releases.
+  The CLI activates components per share, not through an installation-global registry.
+- `storage/registry.rs` owns snapshot CAS records and scene references, including
+  atomic registration, persisted-link import and last-reference collection.
+  The Server reads these snapshots without executing uploaded native code.
 
 ## Server ownership
 

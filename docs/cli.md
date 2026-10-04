@@ -25,9 +25,11 @@ blind share ./geometry ./reports extra.log
 
 Each directory expands to its supported files and produces **one scene link**
 for the combined inputs. By default only the directory's current level is scanned;
-`--recursive` includes subdirectories. Discovery uses the built-in component
-extensions and renderer extensions installed on the connected server (or the
-local server before initial registration), case-insensitively. Unsupported files,
+`--recursive` includes subdirectories. Discovery uses built-in component
+extensions plus renderer extensions explicitly enabled with repeatable
+`--plugin ID` or `--plugin ./directory` (without installation), case-insensitively.
+Packages installed locally or on the connected
+Server are not activated merely by installation. Unsupported files,
 hidden entries (names starting with `.`), and symbolic links inside directories
 are skipped. An explicitly supplied directory may itself be a symbolic link.
 
@@ -40,6 +42,12 @@ fail before creating a link; oversized scans are never silently truncated.
 
 The resource list is captured when the command runs: new files require another
 `share`. Existing source validation still applies to changed or deleted files.
+
+Use `blind share ./reports --plugin example` to include that package's supported
+files. `--component INDEX=ID:NAME` selects a component for an explicit file without
+enabling its package's other suffixes. `plugin list` combines local installations
+and the connected Server catalog, with Server connection state. Server errors
+return a nonzero exit status while preserving local output.
 Directory discovery does not apply to `--config` resources or OSS/plugin URIs;
 `--recursive` cannot be combined with `--config`. It does not apply `.gitignore`
 rules, so choose the directory whose supported files you intend to share.

@@ -58,4 +58,5 @@ jobs:
           python3 tests/integration_collection.py
           python3 tests/integration_components.py
           python3 tests/integration_plugins.py
+          python3 tests/integration_plugin_bundles.py
           python3 tests/integration_oss.py

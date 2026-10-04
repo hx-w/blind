@@ -127,40 +127,58 @@ Mesh or PTS resource on the server.
 
 ## Plugin components (API 1)
 
-Install a renderer as part of a normal Blind plugin package. No Viewer core edit
-is required. Component types are namespaced (`example:table`); installing a new
-revision replaces the implementation for **new** shares. Existing scenes pin the
-package content hash. Removal unregisters new uses while retaining pinned packages.
-Only the server's installed packages execute, inside an opaque-origin sandbox.
+Use a renderer from a Blind plugin installed on a Client or Server, or directly
+from `--plugin ./directory` without installation.
+No Viewer core edit is required. Component types are namespaced (`example:table`).
+Each share pins a versioned browser-content hash in the Server registry; updates
+and local uninstall do not change existing URLs. Only that URL's selected
+components load, each inside an opaque-origin sandbox. Installation alone does
+not enable a renderer.
 
-Add to `blind-plugin.json`:
+Add to `blind-plugin.toml` (alongside required package metadata):
 
-```json
-{
-  "components": [{
-    "name": "table",
-    "api_version": 1,
-    "entrypoint": "components/table.html",
-    "extensions": ["table.json"],
-    "capabilities": {
-      "presentations": ["spatial", "focus"],
-      "movable": false,
-      "resizable": false
-    },
-    "frame_origins": []
-  }],
-  "files": ["components/table.html"]
-}
+```toml
+files = ["components/table.html"]
+
+[[components]]
+name = "table"
+api_version = 1
+entrypoint = "components/table.html"
+extensions = ["table.json"]
+frame_origins = []
+
+[components.capabilities]
+presentations = ["spatial", "focus"]
+movable = false
+resizable = false
 ```
 
 The entrypoint is self-contained HTML with inline scripts/styles. A renderer-only
 package may use empty `schemes` and `entrypoint` arrays. Other manifest fields and
-installation checks are unchanged. `blind plugin list` exposes registered components.
-Choose explicitly with `--component example:table` or use extension detection:
-longest matching suffix wins; equally specific matches fail with an explicit-choice
-message. Built-in geometry suffixes are reserved. Bare JSON uses the JSON viewer when no
-installed renderer matches. A plugin can provide an alternative display for a file
-by using its own namespaced type; it cannot silently replace core code in the parent.
+installation checks are unchanged. `blind plugin list` combines local and Server
+components and reports Server connection state; Server errors preserve local
+output but return a nonzero exit status.
+
+```sh
+blind share report.table.json --plugin example
+blind share report.json --component example:table
+```
+
+`--plugin ID` or `--plugin ./directory` enables suffix detection only for this share
+and may be repeated.
+Explicit `--component ID:NAME` selects that component without enabling its other
+suffixes. A local installation is preferred; explicitly selected Server
+components remain available. Longest matching suffix wins; equally specific
+matches fail and require `--component`. Built-in geometry suffixes are reserved.
+Bare JSON uses the built-in viewer unless an enabled renderer matches. Plugin
+code never replaces core code in the parent.
+
+The CLI sends only versioned declarations and self-contained HTML, not native
+executables or secrets. The Server deduplicates snapshots across Clients and
+serves them through each scene/entity capability. Component state and exact
+revisions survive reshares, collections and PNG export. Different snapshots of
+one plugin ID cannot coexist in a single scene or collection; separate URLs can
+pin different revisions. See [snapshot lifecycle and limits](plugins.md#sharing-and-snapshot-storage).
 
 The host sends `blind:init` through `postMessage` with `version:1`, source `buffer`
 (ArrayBuffer), `label`, `state`, `presentation`, `exporting`, and a private
@@ -254,6 +272,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked
 python3 tests/integration_components.py
+python3 tests/integration_plugin_bundles.py
 ```
 
 Build the Viewer before Rust: the binary embeds `web/dist`. No private test order,

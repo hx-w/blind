@@ -70,7 +70,7 @@ explains permanent links, reshares and source changes.
 | Display Markdown, JSON, images, HTML or custom content | [Scene components](docs/components.md) |
 | Set up a team server, connect machines, update or troubleshoot | [Client and Server](docs/client-server.md) |
 | Read from S3-compatible storage or signed download domains | [Object storage](docs/oss.md) |
-| Extend Blind with server-side resolvers and renderers | [Plugins](docs/plugins.md) |
+| Extend Blind with Client or Server resolvers and URL-scoped components | [Plugins](docs/plugins.md) |
 | Integrate with HTTP or understand saved scene state | [API](docs/api.md) · [Sharing contract](docs/sharing.md) |
 | Build, test or contribute | [Development](docs/development.md) · [Architecture](docs/architecture.md) |
 

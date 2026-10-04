@@ -36,6 +36,8 @@ pub(super) struct CreateSceneRequest {
     #[serde(default)]
     pub(super) manifest: Option<crate::plugin::ShareManifest>,
     #[serde(default)]
+    pub(super) renderers: Vec<crate::plugin::RendererBundle>,
+    #[serde(default)]
     pub(super) paths: Vec<String>,
     pub(super) title: Option<String>,
     pub(super) origin: Option<String>,
@@ -55,6 +57,11 @@ pub(super) struct CreateCollectionRequest {
 pub(super) struct CreateCollectionPart {
     pub(super) id: String,
     pub(super) title: String,
+    #[serde(default)]
+    pub(super) manifest: Option<crate::plugin::ShareManifest>,
+    #[serde(default)]
+    pub(super) renderers: Vec<crate::plugin::RendererBundle>,
+    #[serde(default)]
     pub(super) paths: Vec<String>,
     #[serde(default)]
     pub(super) display: Vec<crate::scene::component::DisplayOptions>,
