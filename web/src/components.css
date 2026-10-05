@@ -3,10 +3,10 @@
 .component-layer > div { pointer-events: none; }
 .scene-surface { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-xs); color: var(--text); pointer-events: auto; }
 .scene-surface.selected { border-color: var(--accent); }
-.component-handle { display: flex; align-items: center; gap: 6px; min-height: 44px; padding: 0 12px; border-bottom: 1px solid var(--line); cursor: grab; touch-action: none; }
+.component-handle { display: flex; flex: 0 0 42px; align-items: center; gap: 6px; height: 42px; min-height: 42px; padding: 0 0 0 12px; border-bottom: 1px solid var(--line); cursor: grab; touch-action: none; }
 .component-handle:active { cursor: grabbing; }
 .component-handle > span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 15px; font-weight: 500; }
-.component-handle button, .component-dialog header button { border: 0; padding: 9px 12px; background: transparent; color: var(--text-secondary); font-size: 13px; border-radius: var(--radius-xs); cursor: pointer; }
+.component-handle button, .component-dialog header button { min-width: 42px; min-height: 42px; border: 0; padding: 8px 12px; background: transparent; color: var(--text-secondary); font-size: 13px; border-radius: var(--radius-xs); cursor: pointer; touch-action: manipulation; }
 .component-handle button:hover, .component-dialog header button:hover { background: var(--surface-2); color: var(--text); }
 .component-body { position: relative; flex: 1; min-height: 0; overflow: hidden; }
 .component-content { width: 100%; height: 100%; overflow: auto; background: var(--canvas); }
@@ -28,11 +28,11 @@
 .component-markdown blockquote { padding: 10px 16px; background: var(--surface-1); color: var(--text-secondary); border-left: 1px solid var(--line); }
 .component-markdown blockquote > :last-child { margin-bottom: 0; }
 .component-markdown code { padding: 2px 5px; border-radius: var(--radius-xs); background: var(--surface-2); font: .9em/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
-.component-markdown pre { width: 100%; min-width: 0; padding: 12px 16px; overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-1); color: var(--text); }
+.component-markdown pre { width: max-content; min-width: 100%; padding: 12px 16px; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-1); color: var(--text); }
 .component-markdown pre code { padding: 0; background: transparent; font-size: inherit; }
 .component-markdown a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
 .component-markdown a:active { opacity: .7; }
-.component-markdown .markdown-table { max-width: 100%; overflow-x: auto; }
+.component-markdown .markdown-table { width: max-content; min-width: 100%; }
 .component-markdown table { border-collapse: collapse; min-width: 100%; font-size: .93em; }
 .component-markdown th, .component-markdown td { padding: 8px 12px; border: 1px solid var(--line); text-align: left; }
 .component-markdown [align="center"] { text-align: center; }.component-markdown [align="right"] { text-align: right; }
@@ -131,6 +131,47 @@
 .component-expanded-content { flex: 1; min-height: 0; }
 .scene-surface.expanded { border: 0; border-radius: 0; opacity: 1 !important; }
 .scene-surface.expanded .component-handle, .scene-surface.expanded .component-enter { display: none; }
+.native-dialog > header { display: none; }
+.component-dialog.fullscreen-dialog { width: 100vw; height: 100dvh; max-width: none; margin: 0; border: 0; border-radius: 0; }
+.scene-surface.native-surface.expanded .component-handle { display: flex; }
+.scene-surface:not(.native-surface) .component-handle button:last-child { display: none; }
+.scene-surface.native-surface .component-content { touch-action: none; overscroll-behavior: none; user-select: none; -webkit-user-select: none; }
+.scene-surface.native-surface.content-selecting .component-content { user-select: text; -webkit-user-select: text; cursor: text; }
+.native-surface .component-handle { flex-basis: calc(42px * var(--content-ui-scale, 1)); height: calc(42px * var(--content-ui-scale, 1)); min-height: calc(42px * var(--content-ui-scale, 1)); }
+.native-surface .component-handle > span { font-size: calc(15px * var(--content-ui-scale, 1)); }
+.native-surface .component-handle button { min-width: calc(42px * var(--content-ui-scale, 1)); min-height: calc(42px * var(--content-ui-scale, 1)); font-size: calc(13px * var(--content-ui-scale, 1)); }
+.native-surface .component-content pre { font-size: calc(13px * var(--content-ui-scale, 1)); }
+.native-surface .component-markdown { font-size: calc(15px * var(--content-ui-scale, 1)); }
+.native-surface .component-json { font-size: calc(14px * var(--content-ui-scale, 1)); }
+.native-surface .component-overflow { top: calc(42px * var(--content-ui-scale, 1)); width: min(calc(280px * var(--content-ui-scale, 1)), 100%); max-height: calc(100% - 42px * var(--content-ui-scale, 1)); }
+.native-surface .component-overflow :is(button, input, select) { min-height: calc(42px * var(--content-ui-scale, 1)); min-width: calc(42px * var(--content-ui-scale, 1)); font-size: calc(13px * var(--content-ui-scale, 1)); }
+.native-surface :is(.content-mark-status, .content-layer-select) { font-size: calc(12px * var(--content-ui-scale, 1)); }
+.native-surface .content-tool-row > input[type="color"] { width: calc(42px * var(--content-ui-scale, 1)); }
+.native-surface .json-node > summary, .native-surface .json-more { min-height: calc(42px * var(--content-ui-scale, 1)); }
+.native-surface .component-body { cursor: grab; }
+.native-surface .component-body:active { cursor: grabbing; }
+.native-surface .component-body :is(a, button, input, summary, select) { cursor: pointer; }
+.component-overflow { position: absolute; z-index: 5; top: 42px; right: 0; display: flex; flex-direction: column; gap: 2px; width: min(320px, 100%); max-height: calc(100% - 42px); overflow: auto; padding: 6px; border: 1px solid var(--line); border-radius: var(--radius-xs); background: var(--surface-1); color: var(--text); overscroll-behavior: contain; touch-action: pan-y; cursor: default; }
+.component-overflow[hidden], .content-annotation-tools[hidden] { display: none; }
+.component-overflow button, .component-overflow input, .component-overflow select { min-height: 42px; min-width: 42px; border: 1px solid var(--line); border-radius: var(--radius-xs); padding: 8px 10px; background: var(--surface-2); color: var(--text); font: inherit; font-size: 13px; }
+.component-overflow button { text-align: left; cursor: pointer; touch-action: manipulation; }
+.component-overflow button[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.component-overflow button:disabled { opacity: .45; cursor: default; }
+.component-overflow :focus-visible, .component-handle button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.component-overflow button:active, .component-handle button:active { transform: scale(.96); }
+.content-tool-row { display: flex; gap: 4px; }
+.content-tool-row > button { flex: 1; text-align: center; }
+.content-tool-row > input[type="text"] { flex: 1; min-width: 0; width: 100%; }
+.content-tool-row > input[type="color"] { flex: none; width: 42px; padding: 4px; }
+.content-layer-select { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.content-layer-select select { flex: 1; min-width: 0; }
+.content-annotation-tools { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+.content-mark-status { margin: 0; padding: 4px; font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
+.content-mark-list { display: flex; flex-direction: column; gap: 4px; }
+.content-mark-list button { overflow-wrap: anywhere; }
+.content-marks { position: absolute; z-index: 2; pointer-events: none; overflow: hidden; color: var(--accent); }
+.content-marks text { font: calc(12px * var(--content-ui-scale, 1))/1.4 ui-sans-serif, system-ui, sans-serif; paint-order: stroke; }
+.export-mode .component-overflow { display: none !important; }
 @media (max-width: 1099px), (max-height: 599px) {
   .component-dialog { width: 100vw; height: 100dvh; max-width: none; margin: 0; border: 0; border-radius: 0; }
   .component-dialog > header { padding-top: max(4px, env(safe-area-inset-top)); }

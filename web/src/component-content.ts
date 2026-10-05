@@ -1,9 +1,16 @@
 import { apiError } from './api.ts';
 import type { Presentation, SceneEntity } from './scene-components';
+import type { NativeContent } from './content-surface';
+import { contentState, contentStateChanged, DOMReading, ImageReading, sourceIdentity, acceptsContentState } from './content-reading';
+import type { ReadingTarget } from './content-reading';
+import type {ContentAnchor} from './content-surface';
+import { renderMarkdown, markdownReady } from './markdown';
+import { graphTargets } from './graph';
 
 export interface SurfaceContent {
   element: HTMLElement;
   ready: Promise<void>;
+  native?: NativeContent;
   present?(mode: Presentation): void;
   dispose(): void;
 }
@@ -38,77 +45,107 @@ async function bytes(url: string, signal: AbortSignal, maxBytes = 64 * 1024 * 10
   for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.byteLength; }
   return buffer.buffer;
 }
-function report(element: HTMLElement, ready: Promise<void>): Promise<void> {
+function report(element: HTMLElement, ready: Promise<void>, preserveArticle = false): Promise<void> {
   void ready.catch(error => {
     if (error instanceof DOMException && error.name === 'AbortError') return;
-    element.textContent = error instanceof Error ? error.message : '资源暂时不可用'; element.classList.add('component-error');
+    const message = error instanceof Error ? error.message : '资源暂时不可用';
+    if (preserveArticle && element.querySelector('article')) {
+      const status = document.createElement('p'); status.className = 'component-error'; status.textContent = message; element.append(status);
+    } else { element.textContent = message; element.classList.add('component-error'); }
   });
   return ready;
 }
-export const textContent: ContentFactory = (url) => {
+export const textContent: ContentFactory = (url, _label, spec) => {
   const element = container(); const abort = new AbortController();
-  const pre = document.createElement('pre'); pre.tabIndex = 0; pre.textContent = '正在读取文本…'; element.append(pre);
-  const ready = report(pre, bytes(url, abort.signal).then(buffer => { pre.textContent = new TextDecoder().decode(buffer); }));
-  return {element, ready, dispose: () => abort.abort()};
+  const pre = document.createElement('pre'); pre.textContent = '正在读取文本…'; element.append(pre);
+  const native = new DOMReading(element, spec);
+  const ready = report(pre, bytes(url, abort.signal).then(async buffer => {
+    const source = await sourceIdentity(buffer);
+    abort.signal.throwIfAborted();
+    const node = document.createTextNode(new TextDecoder().decode(buffer)); pre.replaceChildren(node);
+    await document.fonts.ready;
+    abort.signal.throwIfAborted();
+    native.installText(source, pre, node);
+  }));
+  return {element, native, ready, dispose: () => { abort.abort(); native.dispose(); }};
 };
-export const markdownContent: ContentFactory = (url) => {
+export const markdownContent: ContentFactory = (url, _label, spec) => {
   const element = container(); element.classList.add('component-markdown'); element.tabIndex = 0;
   const abort = new AbortController();
   element.textContent = '正在读取 Markdown…';
+  const native = new DOMReading(element, spec);
   const ready = report(element, bytes(url, abort.signal, 1024 * 1024).then(async buffer => {
-    const {renderMarkdown} = await import('./markdown');
+    const source = await sourceIdentity(buffer);
     abort.signal.throwIfAborted();
-    const article = renderMarkdown(new TextDecoder('utf-8', {fatal: true}).decode(buffer));
+    const article = renderMarkdown(new TextDecoder('utf-8', {fatal: true}).decode(buffer), abort.signal);
     element.replaceChildren(article);
-    await Promise.all([...article.querySelectorAll('img')].map(async image => {
+    await Promise.all([markdownReady(article), ...[...article.querySelectorAll('img')].map(async image => {
       try { await image.decode(); }
       catch { image.replaceWith(document.createTextNode(image.alt || '图片无法解码')); }
-    }));
+    })]);
+    await document.fonts.ready;
+    abort.signal.throwIfAborted();
+    const blocks = [...article.querySelectorAll<HTMLElement>('p,h1,h2,h3,h4,h5,h6,pre,li,td,th,summary,figure.markdown-diagram')];
+    const targets: ReadingTarget[] = blocks.map((block, index) => ({id: `block:${index}`, element: block}));
+    for (const target of targets) {
+      const svg = target.element.matches('figure.markdown-diagram') ? target.element.querySelector('svg') : null;
+      if (svg) target.visual = {svg, targets: graphTargets(svg, svg.querySelector('g.graph') ? 'dot' : 'mermaid').targets};
+    }
+    for (const [index, image] of [...article.querySelectorAll('img')].entries()) targets.push({id: `image:${index}`, element: image, visual: {image}});
+    native.install(source, targets);
   }).catch(error => {
     if (!(error instanceof OversizedResourceError)) throw error;
     const message = document.createElement('p'); message.textContent = 'Markdown 文件超过 1 MiB，无法在预览中展开。';
     const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = '打开原始文件';
     element.replaceChildren(message, link);
-  }));
-  return {element, ready, dispose: () => abort.abort()};
+  }), true);
+  return {element, native, ready, dispose: () => { abort.abort(); native.dispose(); }};
 };
-export const jsonContent: ContentFactory = (url) => {
+export const jsonContent: ContentFactory = (url, _label, spec) => {
   const element = container(); element.classList.add('component-json');
   const abort = new AbortController();
   const status = document.createElement('p'); status.className = 'json-status'; status.textContent = '正在读取 JSON…'; element.append(status);
-  const ready = report(element, bytes(url, abort.signal, 4 * 1024 * 1024).then(buffer => {
+  const native = new DOMReading(element, spec);
+  const ready = report(element, bytes(url, abort.signal, 4 * 1024 * 1024).then(async buffer => {
     let value: unknown;
     try { value = JSON.parse(new TextDecoder('utf-8', {fatal: true}).decode(buffer)); }
     catch { throw new Error('JSON 格式无效或不是 UTF-8'); }
+    const source = await sourceIdentity(buffer);
+    abort.signal.throwIfAborted();
+    const state = contentState(spec);
+    const matching = state.reading?.source === source;
+    let expanded = new Set<string>(matching && Array.isArray(state.expanded) ? state.expanded.filter(path => typeof path === 'string') : ['']);
     const tree = document.createElement('div'); tree.className = 'json-tree'; tree.setAttribute('role', 'tree');
-    let remaining = 5000;
+    const targets: ReadingTarget[] = [];
+    const branches = new Map<string, {details: HTMLDetailsElement; ensure(key: string, reveal: boolean): void}>();
+    let installed = false, remaining = 5000;
     const pageSize = 100;
-    const add = (parent: HTMLElement, key: string | null, item: unknown, depth: number): void => {
+    const register = (target: ReadingTarget): void => { if (installed) native.add(target); else targets.push(target); };
+    const add = (parent: HTMLElement, key: string | null, item: unknown, depth: number, path: string): void => {
       if (remaining-- <= 0 || depth > 32) {
         const cut = document.createElement('span'); cut.className = 'json-muted'; cut.textContent = '… 其余内容已折叠'; parent.append(cut); return;
       }
-      const keyNode = () => {
-        const name = document.createElement('span'); name.className = 'json-key'; name.textContent = key === null ? '' : `${key}: `; return name;
-      };
+      const name = document.createElement('span'); name.className = 'json-key'; name.textContent = key === null ? '' : `${key}: `;
       if (item !== null && typeof item === 'object') {
         const array = Array.isArray(item);
         const keys = array ? undefined : Object.keys(item);
         const entries = array ? item.length : keys!.length;
-        const details = document.createElement('details'); details.className = 'json-node'; details.open = depth === 0;
-        const summary = document.createElement('summary'); summary.append(keyNode());
+        const details = document.createElement('details'); details.className = 'json-node'; details.open = expanded.has(path);
+        const summary = document.createElement('summary'); summary.append(name);
         const shape = document.createElement('span'); shape.className = 'json-shape';
         shape.textContent = `${array ? '[' : '{'} ${entries > 5000 ? '5000+' : entries} ${array ? '项' : '键'} ${array ? ']' : '}'}`; summary.append(shape);
         details.append(summary);
+        register({id: `json:${path}`, element: summary});
         const children = document.createElement('div'); children.className = 'json-children';
         let next = 0;
         let more: HTMLButtonElement | undefined;
-        const fill = () => {
+        const fill = (): void => {
           more?.remove(); more = undefined;
           const end = Math.min(next + pageSize, entries);
           while (next < end && remaining > 0) {
             const childKey = array ? String(next) : keys![next];
             const child = array ? (item as unknown[])[next] : (item as Record<string, unknown>)[childKey];
-            add(children, childKey, child, depth + 1);
+            add(children, childKey, child, depth + 1, `${path}/${childKey.replace(/~/g, '~0').replace(/\//g, '~1')}`);
             next++;
           }
           if (next < entries && remaining > 0) {
@@ -118,33 +155,91 @@ export const jsonContent: ContentFactory = (url) => {
             const cut = document.createElement('span'); cut.className = 'json-muted'; cut.textContent = '… 其余内容已折叠'; children.append(cut);
           }
         };
-        details.addEventListener('toggle', () => { if (details.open && next === 0) fill(); });
+        branches.set(path, {details, ensure(childKey, reveal) {
+          if (reveal) details.open = true;
+          const index = array ? Number(childKey) : keys!.indexOf(childKey);
+          while (next <= index && next < entries && remaining > 0) fill();
+          if (next === 0) fill();
+        }});
+        details.addEventListener('toggle', () => {
+          const wasOpen = expanded.has(path);
+          // Initial disclosure notifications and rollback notifications are not
+          // user mutations; in particular, do not erase a visible rejection.
+          if (details.open === wasOpen) return;
+          const nextExpanded = new Set(expanded);
+          if (details.open) nextExpanded.add(path); else nextExpanded.delete(path);
+          const nextState = {...state, expanded:[...nextExpanded]};
+          if (!acceptsContentState(nextState, element)) { details.open = wasOpen; return; }
+          if (details.open && next === 0) fill();
+          if (installed) {
+            const anchor = native.capture(); if (anchor) nextState.reading = anchor;
+          }
+          if (!acceptsContentState(nextState, element)) { details.open = wasOpen; return; }
+          expanded = nextExpanded; Object.assign(state, nextState);
+          contentStateChanged(element);
+        });
         details.append(children); parent.append(details);
         if (details.open) fill();
       } else {
-        const row = document.createElement('div'); row.className = 'json-leaf'; row.append(keyNode());
+        const row = document.createElement('div'); row.className = 'json-leaf'; row.append(name);
         const literal = document.createElement('span'); literal.className = `json-${item === null ? 'null' : typeof item}`;
         if (typeof item === 'string') {
           const truncated = item.length > 2048;
           literal.textContent = JSON.stringify(truncated ? item.slice(0, 2048) : item) + (truncated ? ` … (${item.length} 字符)` : '');
         } else literal.textContent = String(item);
         row.append(literal); parent.append(row);
+        register({id: `json:${path}`, element: row});
       }
     };
-    add(tree, null, value, 0); element.replaceChildren(tree);
+    const ensurePath = (target: string, reveal = true, reading?: ContentAnchor): boolean => {
+      if (!target.startsWith('json:')) return false;
+      const path = target.slice(5), segments = path.split('/').slice(1);
+      let parent = '';
+      if (reveal) {
+        const nextExpanded = new Set(expanded);
+        for (const segment of segments) { nextExpanded.add(parent); parent += `/${segment}`; }
+        if (nextExpanded.size !== expanded.size) {
+          const nextState = {...state, expanded:[...nextExpanded]};
+          // Check the old and new reading states before revealing lazy branches.
+          if (!acceptsContentState(nextState, element) || reading && !acceptsContentState({...nextState, reading}, element)) return false;
+          expanded = nextExpanded; state.expanded = nextState.expanded;
+        }
+      }
+      parent = '';
+      for (const segment of segments) {
+        branches.get(parent)?.ensure(segment.replace(/~1/g, '/').replace(/~0/g, '~'), reveal);
+        parent += `/${segment}`;
+      }
+      return true;
+    };
+    add(tree, null, value, 0, ''); status.hidden = true;
+    status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite'); element.replaceChildren(status, tree);
+    for (const path of [...expanded].sort((a, b) => a.length - b.length)) ensurePath(`json:${path}`, false);
+    await document.fonts.ready;
+    abort.signal.throwIfAborted();
+    installed = true;
+    native.install(source, targets, (target, anchor) => ensurePath(target, true, anchor));
   }).catch(error => {
     if (!(error instanceof OversizedResourceError)) throw error;
     const message = document.createElement('p'); message.className = 'json-status'; message.textContent = 'JSON 文件较大，无法在预览中展开。';
     const link = document.createElement('a'); link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = '打开原始文件';
     element.replaceChildren(message, link);
   }));
-  return {element, ready, dispose: () => abort.abort()};
+  return {element, native, ready, dispose: () => { abort.abort(); native.dispose(); }};
 };
-export const imageContent: ContentFactory = (url, label) => {
+export const imageContent: ContentFactory = (url, label, spec) => {
   const element = container(); const abort = new AbortController(); let blobUrl: string | undefined;
-  const image = document.createElement('img'); image.alt = label; image.draggable = false; element.append(image);
-  const ready = report(element, bytes(url, abort.signal).then(async buffer => { blobUrl = URL.createObjectURL(new Blob([buffer])); image.src = blobUrl; await image.decode(); }));
-  return {element, ready, dispose: () => { abort.abort(); if (blobUrl) URL.revokeObjectURL(blobUrl); }};
+  const stage = document.createElement('div'); stage.className = 'native-image-stage';
+  const image = document.createElement('img'); image.alt = label; image.draggable = false; stage.append(image); element.append(stage);
+  const native = new ImageReading(element, stage, image, spec);
+  const ready = report(element, bytes(url, abort.signal).then(async buffer => {
+    const source = await sourceIdentity(buffer);
+    abort.signal.throwIfAborted();
+    blobUrl = URL.createObjectURL(new Blob([buffer])); image.src = blobUrl; await image.decode();
+    abort.signal.throwIfAborted();
+    native.install(source);
+  }));
+  return {element, native, ready, dispose: () => { abort.abort(); native.dispose(); if (blobUrl) URL.revokeObjectURL(blobUrl); }};
 };
 export const htmlContent: ContentFactory = (url, label) => {
   const element = container(); const iframe = document.createElement('iframe'); const abort = new AbortController();

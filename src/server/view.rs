@@ -648,7 +648,7 @@ pub(super) async fn view_scene(
         "'none'"
     };
     let policy = format!(
-        "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-src 'self' {}; object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}",
+        "default-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; frame-src 'self' {}; object-src 'none'; base-uri 'self'; frame-ancestors {frame_ancestors}",
         origins.join(" ")
     );
     response.headers_mut().insert(

@@ -106,8 +106,8 @@ impl CollectionLayout {
             || self.columns == 0
             || self.columns as usize > scenes
             || u64::from(self.width) * u64::from(self.height) > 16_000_000
-            || self.width < 16 + self.columns * 160 + (self.columns - 1) * 8
-            || self.height < 16 + rows * 135 + (rows - 1) * 8
+            || self.width < self.columns * 160 + self.columns - 1
+            || self.height < rows * 100 + rows - 1
         {
             bail!("invalid collection layout");
         }
@@ -851,9 +851,13 @@ impl SceneDescriptor {
             let mut ids = std::collections::HashSet::new();
             for c in components {
                 c.validate()?;
-                if !ids.insert(&c.id) || !self.entities.iter().any(|old| old.id == c.id) {
+                let old = self.entities.iter().find(|old| old.id == c.id);
+                if !ids.insert(&c.id) || old.is_none() {
                     bail!("Unknown or duplicate component ID");
                 }
+                old.unwrap()
+                    .component
+                    .validate_native_state(c.state.as_ref())?;
             }
         }
         update.state.light.validate()?;
@@ -1216,6 +1220,80 @@ mod tests {
             reopened
                 .apply_update(update(&reopened, " ", "Report"))
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn native_state_is_validated_before_updates_mutate_or_persist_the_scene() {
+        let mut scene = SceneDescriptor::create(&[PathBuf::from("tests/fixtures/tetra.ply")], None)
+            .await
+            .unwrap();
+        scene.entities = scene.entity_descriptors();
+        scene.attachments.push(SceneAttachment {
+            member: None,
+            id: "report".into(),
+            path: "report.txt".into(),
+            label: "Report".into(),
+            byte_size: None,
+            revision: None,
+            unavailable: Some("fixture".into()),
+        });
+        scene.entities.push(crate::scene::component::SceneEntity {
+            id: "report".into(),
+            component: crate::scene::component::ComponentKind::Text,
+            source: crate::scene::component::ComponentSource::Attachment(0),
+            renderer: None,
+            label: "Report".into(),
+            group: None,
+            position: Some([4., 0., 0.]),
+            size: Some([40., 30.]),
+            visible: true,
+            opacity: 1.,
+            state: None,
+        });
+        let anchor = serde_json::json!({"source":"sha256:revision","target":"line:0","offset":0,"x":0,"y":0});
+        let valid = serde_json::json!({
+            "presentation":"spatial","reading":anchor,"selection":false,
+            "marks":[{"id":"one","label":"复核","color":"#ff6b5e","kind":"point","anchors":[anchor]}]
+        });
+        let update = |scene: &SceneDescriptor, native_state: serde_json::Value| {
+            serde_json::from_value::<SceneUpdate>(serde_json::json!({
+                "meshes":[{"color":"#abcdef","opacity":1.,"visible":true,"quality":"raw"}],
+                "entities":[
+                    {"id":"mesh-0","position":[0,0,0],"size":null,"visible":true,"opacity":1.},
+                    {"id":"report","position":[4,0,0],"size":[40,30],"visible":true,"opacity":1.,"state":native_state}
+                ],
+                "state":scene.state
+            })).unwrap()
+        };
+        scene.apply_update(update(&scene, valid.clone())).unwrap();
+        let saved = serde_json::to_vec(&scene).unwrap();
+        let reopened: SceneDescriptor = serde_json::from_slice(&saved).unwrap();
+        assert_eq!(reopened.entities[1].state.as_ref(), Some(&valid));
+        for invalid in [
+            serde_json::json!({"marks":{}}),
+            serde_json::json!({"marks":[{}]}),
+            serde_json::json!({"marks":[{"id":"x","label":"x","color":"#ffffff","kind":"point","anchors":null}]}),
+            serde_json::json!({"reading":{"source":"sha256:revision","target":"line:0","offset":-1,"x":0,"y":0}}),
+            serde_json::json!({"selection":"false"}),
+            serde_json::json!({"zoom":0}),
+            serde_json::json!({"marks":[],"expanded":["中".repeat(22000)]}),
+        ] {
+            assert!(scene.apply_update(update(&scene, invalid)).is_err());
+            assert_eq!(
+                serde_json::to_vec(&scene).unwrap(),
+                saved,
+                "rejected state must leave the whole scene unchanged"
+            );
+        }
+        scene.entities[1].component =
+            crate::scene::component::ComponentKind::Plugin("review:custom".into());
+        let opaque = serde_json::json!({"marks":{}});
+        scene.apply_update(update(&scene, opaque.clone())).unwrap();
+        assert_eq!(
+            scene.entities[1].state.as_ref(),
+            Some(&opaque),
+            "plugin state remains opaque"
         );
     }
 

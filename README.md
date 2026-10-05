@@ -67,7 +67,7 @@ explains permanent links, reshares and source changes.
 | --- | --- |
 | Share files, label groups, script an agent or create collections | [CLI guide](docs/cli.md) |
 | Inspect, annotate, compare sections or use the viewer on a phone | [Viewer guide](docs/viewer.md) |
-| Display Markdown, JSON, images, HTML or custom content | [Scene components](docs/components.md) |
+| Display Markdown, JSON, images, Mermaid/DOT, HTML or custom content | [Scene components](docs/components.md) |
 | Set up a team server, connect machines, update or troubleshoot | [Client and Server](docs/client-server.md) |
 | Read from S3-compatible storage or signed download domains | [Object storage](docs/oss.md) |
 | Extend Blind with Client or Server resolvers and URL-scoped components | [Plugins](docs/plugins.md) |

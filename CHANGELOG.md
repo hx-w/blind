@@ -3,6 +3,47 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-10-05
+
+### Added
+
+- Read, select and annotate native text, Markdown, JSON, images and SVG diagrams
+  directly inside the 3D scene, with locked body gestures and source-versioned
+  reading continuity across spatial, focused and fullscreen presentations.
+- Render Mermaid and Graphviz DOT locally, including Markdown fences, with
+  semantic node/edge/group marks and optional source-group depth projection.
+- Preserve native reading, content marks, zoom and graph exploration in immutable
+  reshares and PNG exports without editing sources or moving entities.
+- Expand a collection scene into the full viewing area with a per-pane control,
+  switch scenes using top-left tabs, and restore the responsive split layout
+  without rebuilding inactive viewers or discarding their reading and review state.
+- Construct complex scenes and collections from `blind share --help` alone, with
+  complete JSON examples, field constraints and machine-readable output contracts.
+
+### Changed
+
+- Replace native preview input interception with direct DOM interaction; keep
+  opaque HTML/plugin preview isolation.
+- Reduce content chrome to a compact name row and contextual actions. Collections
+  use full-bleed panes, 1px dividers, overlaid names and narrow-screen tabs;
+  mounted scenes retain independent reading and review state.
+- Separate persistent content marks from screen ink, invalidating screen ink when
+  the camera or native content reading window changes.
+- Remove obsolete collection export headers/margins, layout compatibility fields
+  and tests pinning preview gestures or nested scrolling.
+
+### Fixed
+
+- Consume Ctrl/Meta+wheel diagram zoom once, preserving its source-relative
+  reading center without also scrolling the content or moving the scene camera.
+- Include scene and resource indices in invalid share-config diagnostics.
+- Reject malformed or oversized native state before mutation, preserving the last
+  valid annotations, JSON expansion and reading position with a visible error.
+- Restore healthy content independently of unavailable attachments, without
+  letting background collection initialization clear screen ink or steal focus.
+- Bound DOT expansion before isolated worker layout and keep projected edge
+  anchors and arrowheads aligned with their source-relative geometry.
+
 ## [2.0.0] - 2026-10-04
 
 ### Added

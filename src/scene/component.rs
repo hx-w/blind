@@ -40,6 +40,8 @@ pub enum ComponentKind {
     Json,
     Html,
     Image,
+    Mermaid,
+    Dot,
     Plugin(String),
 }
 impl TryFrom<String> for ComponentKind {
@@ -53,6 +55,8 @@ impl TryFrom<String> for ComponentKind {
             "json" => Self::Json,
             "html" => Self::Html,
             "image" => Self::Image,
+            "mermaid" => Self::Mermaid,
+            "dot" => Self::Dot,
             _ => {
                 ensure!(
                     value
@@ -75,6 +79,8 @@ impl From<ComponentKind> for String {
             ComponentKind::Json => "json".into(),
             ComponentKind::Html => "html".into(),
             ComponentKind::Image => "image".into(),
+            ComponentKind::Mermaid => "mermaid".into(),
+            ComponentKind::Dot => "dot".into(),
             ComponentKind::Plugin(s) => s,
         }
     }
@@ -96,13 +102,107 @@ impl ComponentKind {
             "json" => Self::Json,
             "html" | "htm" => Self::Html,
             "png" | "jpg" | "jpeg" | "webp" | "gif" => Self::Image,
+            "mmd" | "mermaid" => Self::Mermaid,
+            "dot" | "gv" => Self::Dot,
             _ => bail!(
-                "Cannot choose a component for {name}; use --component INDEX=mesh|points|text|markdown|json|html|image|PLUGIN:NAME"
+                "Cannot choose a component for {name}; use --component INDEX=mesh|points|text|markdown|json|html|image|mermaid|dot|PLUGIN:NAME"
             ),
         })
     }
     pub fn geometry(&self) -> bool {
         matches!(self, Self::Mesh | Self::Points)
+    }
+    /// Plugin state remains opaque; native consumers have a concrete reading/marks contract.
+    pub fn validate_native_state(&self, state: Option<&serde_json::Value>) -> Result<()> {
+        if !matches!(
+            self,
+            Self::Text | Self::Markdown | Self::Json | Self::Image | Self::Mermaid | Self::Dot
+        ) {
+            return Ok(());
+        }
+        let Some(state) = state else {
+            return Ok(());
+        };
+        let state = state
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("invalid native component state: expected object"))?;
+        if let Some(value) = state.get("presentation") {
+            ensure!(
+                matches!(value.as_str(), Some("spatial" | "focus" | "fullscreen")),
+                "invalid native presentation"
+            );
+        }
+        if let Some(value) = state.get("reading") {
+            validate_content_anchor(value)?;
+        }
+        if let Some(value) = state.get("selection") {
+            ensure!(value.is_boolean(), "invalid native selection");
+        }
+        if let Some(value) = state.get("zoom") {
+            ensure!(
+                value.as_f64().is_some_and(|n| n.is_finite() && n > 0.),
+                "invalid native zoom"
+            );
+        }
+        if let Some(value) = state.get("expanded") {
+            ensure!(
+                value
+                    .as_array()
+                    .is_some_and(|ids| ids.iter().all(|id| id.is_string())),
+                "invalid native expanded targets"
+            );
+        }
+        if let Some(value) = state.get("layer") {
+            ensure!(value.is_string(), "invalid native layer");
+        }
+        if let Some(value) = state.get("marks") {
+            let marks = value
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("invalid native marks: expected array"))?;
+            for mark in marks {
+                let mark = mark
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("invalid native mark: expected object"))?;
+                ensure!(
+                    mark.get("id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|id| !id.is_empty()),
+                    "invalid native mark ID"
+                );
+                ensure!(
+                    mark.get("label").is_some_and(|v| v.is_string()),
+                    "invalid native mark label"
+                );
+                ensure!(
+                    mark.get("color")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|color| {
+                            color.len() == 7
+                                && color.starts_with('#')
+                                && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+                        }),
+                    "invalid native mark color"
+                );
+                let count = match mark.get("kind").and_then(|v| v.as_str()) {
+                    Some("point") => 1,
+                    Some("line") => 2,
+                    _ => bail!("invalid native mark kind"),
+                };
+                let anchors = mark
+                    .get("anchors")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("invalid native mark anchors"))?;
+                ensure!(anchors.len() == count, "invalid native mark anchor count");
+                for anchor in anchors {
+                    validate_content_anchor(anchor)?;
+                    ensure!(
+                        anchor["source"] == anchors[0]["source"],
+                        "native mark anchors must share a source revision"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -208,6 +308,38 @@ impl EntityUpdate {
         Ok(())
     }
 }
+fn validate_content_anchor(value: &serde_json::Value) -> Result<()> {
+    let anchor = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("invalid native anchor: expected object"))?;
+    for key in ["source", "target"] {
+        ensure!(
+            anchor
+                .get(key)
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty()),
+            "invalid native anchor {key}"
+        );
+    }
+    for key in ["offset", "x", "y"] {
+        ensure!(
+            anchor
+                .get(key)
+                .and_then(|v| v.as_f64())
+                .is_some_and(|n| n.is_finite() && (key != "offset" || n >= 0.)),
+            "invalid native anchor {key}"
+        );
+    }
+    if let Some(value) = anchor.get("viewport") {
+        ensure!(
+            value.as_array().is_some_and(
+                |v| v.len() == 2 && v.iter().all(|n| n.as_f64().is_some_and(f64::is_finite))
+            ),
+            "invalid native anchor viewport"
+        );
+    }
+    Ok(())
+}
 
 pub fn validate_member(name: &str) -> Result<()> {
     ensure!(
@@ -238,6 +370,10 @@ mod tests {
             ("tracing.json", ComponentKind::Json),
             ("report.html", ComponentKind::Html),
             ("image.png", ComponentKind::Image),
+            ("architecture.MMD", ComponentKind::Mermaid),
+            ("architecture.mermaid", ComponentKind::Mermaid),
+            ("architecture.dot", ComponentKind::Dot),
+            ("architecture.gv", ComponentKind::Dot),
         ] {
             assert_eq!(ComponentKind::infer(path).unwrap(), kind);
         }

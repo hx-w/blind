@@ -81,8 +81,9 @@ New scenes run Fit against the joint bounds of all visible Meshes after the view
 
 Screen markup is tied to that exact camera framing rather than Mesh geometry.
 It can cross empty space and remaps across viewport aspect ratios. The first
-rotate, pan, zoom, Fit, canonical-view, or projection action hides all marks in
-that browser session; reloading the immutable link restores the snapshot.
+rotate, pan, zoom, Fit, canonical-view, projection, content-scroll, content-zoom,
+layer or reading-window change hides all screen marks in that browser session;
+reloading the immutable link restores the snapshot.
 
 Surface marks are stored in `state.annotations`, separately from screen strokes.
 Each entry has an `id`, zero-based `mesh`, source `revision`, `kind` (`point` or
@@ -99,6 +100,18 @@ Mesh and occluded by geometry; PNG exports use the same stored samples. Editing
 handles and names are editor UI and are not included in PNGs. Saved states
 without annotations load an empty annotation list. As with all scene edits, sharing
 creates a new immutable snapshot and leaves the old URL unchanged.
+
+Native document reading and content marks live in each entity's `state`, not
+`state.annotations` or `state.strokes`. Reading records source SHA-256 identity,
+semantic target, character offset or normalized source coordinates, and the
+viewport attachment when needed. State also records selection, presentation,
+image/diagram zoom, JSON expansion and semantic graph layer. Marks contain
+ID, label, color, point/line kind and source anchors. One state object is shared
+between spatial and expanded reading and travels with the entity in reshares.
+Mismatched source identities are never approximately projected onto new content.
+The existing 64 KiB per-entity state limit applies. Invalid native state is
+rejected before a reshare mutates the scene; mark edits that exceed the limit
+leave the last valid state intact. Sources are not edited.
 
 A read-only section is stored in `state.section`. It binds the plane to a Mesh
 entity and its source revision, and records the selected Mesh targets, plane
@@ -151,11 +164,17 @@ paths resolve from the config file directory. Unknown fields are errors.
 ## Scene collections
 
 A collection shares 2 to 16 independent scenes under one short link. Each
-scene has its own components, focused component, camera, rendering, visibility,
-and annotations. The viewer splits only when every scene has at least a
-480 × 360 px viewport; otherwise it shows tabs. The single bottom toolbar
-controls the focused scene and shares the entire collection. The top-right
-viewer-wide fullscreen control is removed.
+scene has its own components, focused component, camera, reading, selection,
+rendering, visibility and annotations. The viewer splits only when every scene
+has at least a 480 × 360 px viewport; otherwise top-left tabs choose one scene.
+Each pane has a top-right expand/restore button: expand fills the viewing area
+with that scene and folds the others into tabs; restore returns to the responsive
+split layout. Inactive viewers stay mounted at their last size to preserve
+reading, camera, annotations and local undo. Single-scene links have no collection
+tabs or expand/restore buttons.
+Panes fill the viewport with 1px dividers and lightweight overlaid names, not
+reserved headers or outer margins. The shared bottom toolbar controls the focused
+scene and shares the entire collection.
 
 ```json
 {
@@ -188,8 +207,14 @@ and a `scenes` array with each child's `id`, `viewer_url`, `image_url`,
 resources, and warnings. `GET /api/v1/scenes/<token>` returns the collection
 overview; `?scene=<id>` returns one child in the existing scene format.
 `GET /i/<token>.png?scene=<id>` exports that child. Without `scene`, the image
-route renders every child into a labeled grid, including scenes hidden behind
-tabs in the interactive viewer. The active scene has a blue header rule.
+route renders every child into an edge-to-edge grid, including inactive scenes.
+Overlaid name chips identify panes and the focused scene. Captured collection
+layout determines each child viewport and the cross-scene screen-ink coordinates.
+Collection screen ink stays parked while a scene is expanded and returns only
+with the same split layout and scene views. Changed split dimensions, camera or
+content reading windows invalidate it and its undo/redo history. Background
+initial loading does not count as navigation. Expand/restore finishes the active
+annotation tool before hiding its toolbar.
 
 Sharing from the collection viewer posts `active_scene_id` and an `updates`
 object keyed by scene ID to `POST /api/v1/scenes/<token>/share`. Omitted child
@@ -250,7 +275,9 @@ blind serve
 blind share crown.ply preparation.stl --format json
 ```
 
-An MCP adapter should call this contract rather than duplicate resource or lifecycle logic. A Skill can teach when to call it, but should not contain a separate sharing implementation.
+`blind share --help` describes the complete scene and collection construction
+contract, including examples, limits and diagnostic recovery. An Agent needs no
+Skill, repository checkout or direct API calls.
 
 ## Registration API
 

@@ -12,7 +12,7 @@ blind share --config scene.json --format json
 ```
 
 Files are displayed by extension. See [scene components](components.md) for
-Markdown, text, JSON, HTML, images, geometry and renderer overrides.
+Markdown, text, JSON, HTML, images, Mermaid/DOT, geometry and renderer overrides.
 
 ## Directories
 
@@ -126,8 +126,12 @@ Run `blind share --config collection.json --format json` to receive one
 collection URL, a composite image URL, and scene-specific view and image URLs. An agent can pipe JSON
 directly into `blind share --config - --format json`; relative paths then use
 the current directory. Each child has its own camera, selection, and styles.
-The viewer splits when every pane fits, otherwise it shows scene tabs. Its
-single toolbar acts on the focused scene. Collections use short links. See
+The viewer splits when every pane fits; otherwise top-left tabs choose the visible
+scene without discarding other scenes' reading and review state. Each pane's
+top-right button expands it into the full viewing area, with the other scenes
+available as tabs; the same button restores the responsive layout. Single-scene
+links do not add these controls. The shared toolbar acts on the focused scene.
+Collections use short links. See
 [the sharing contract](sharing.md) for the full schema and reshare API.
 
 ## Links and lifetimes
@@ -166,8 +170,10 @@ See [the sharing contract](sharing.md) for source revisions, storage limits and 
 
 ## Agent interface
 
-The CLI is the canonical Agent interface. `blind --help` describes the full
-workflow and every command has focused help.
+The CLI is the canonical Agent interface. `blind --help` gives the workflow;
+`blind share --help` includes complete scene and collection JSON examples,
+fields, grouping conflicts, limits, plugin discovery, and output/error contracts.
+Short `blind share -h` points to that contract.
 
 ```sh
 blind serve
@@ -196,9 +202,11 @@ The JSON result contains:
 - `viewer_url` is the read-only interactive scene capability.
 - `image_url` renders a fresh PNG on each request.
 - `hosts` lists detected origins and marks the primary candidate.
-- `resources` gives the canonical source paths and revisions to the Agent.
+- `resources` gives canonical geometry paths and revisions, not the complete
+  native-content inventory.
 - `source` identifies the owning host, OS user, and registration name.
 
-A Skill is useful for teaching an Agent when to invoke Blind. An MCP adapter
-can wrap the CLI for clients that require tool discovery, but it should call
-this contract instead of reimplementing scene or lifecycle logic.
+An Agent can construct complex inputs from CLI help alone and submit them with
+`blind share --config - --format json`. Diagnostics identify the failing scene,
+resource or constraint on stderr; successful stdout is one JSON result.
+No Skill, repository checkout, MCP adapter or direct Server API call is required.

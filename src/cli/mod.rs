@@ -13,12 +13,150 @@ use clap::{Parser, Subcommand, ValueEnum};
 use share::{ShareOptions, share};
 use std::path::PathBuf;
 
+const SHARE_HELP: &str = r#"CHOOSING AN INPUT
+  Files/directories: one scene, one camera, one world-space layout.
+  Scene config: explicit resources, labels, groups, positions and surface sizes.
+  Collection config: 2 to 16 independent scenes, each with its own camera and
+  review state. The viewer can split panes, expand one scene, or switch via tabs.
+  Prefer the scene/collection formats below for agent-generated plans.
+
+EXAMPLES
+  blind share ./results --recursive --format json
+  blind share jaw.ply review.md report.json architecture.mmd --format json
+  blind share --config scene.json --format json
+  blind share --config collection.json --ttl 0 --format json
+  blind share --config - --format json < collection.json
+  blind share capture.json --component cyclops:trace --format json
+  blind share jaw.ply capture.json --component 2=cyclops:trace --format json
+
+SCENE CONFIG
+{
+  "title": "Model and review documents",
+  "resources": [
+    {"path": "jaw.ply"},
+    {"path": "reference.ply"},
+    {"path": "review.md", "label": "Review", "group": "Documents",
+     "position": [140, 0, 0], "size": [120, 90]},
+    {"path": "bundle.zip", "member": "reports/report.json",
+     "component": "json", "group": "Diagnostics"}
+  ],
+  "groups": [{"label": "Reference geometry", "members": [1, 2]}]
+}
+
+RESOURCE FIELDS
+  Scene fields: resources is required; title and groups are optional.
+  Omit kind and schema_version for this basic scene format.
+  path       Required file path or oss://ALIAS/BUCKET/KEY. Config resources are
+             explicit files, not directory scans.
+  label      Optional display name, 1 to 120 nonblank characters.
+  component  Optional mesh|points|text|markdown|json|html|image|mermaid|dot or
+             PLUGIN:NAME. Omit to infer from the filename or ZIP member name.
+  member     Optional exact ZIP member path, e.g. reports/report.json. Use "/",
+             no absolute paths, empty segments, "." or ".."; no recursive unpack.
+             The extracted member is limited to 64 MiB.
+  group      Optional flat display group, 1 to 120 nonblank characters.
+  position   Optional [x,y,z] absolute world coordinates, not screen pixels.
+             Each number must be finite with absolute value <= 1000000.
+  size       Optional [width,height] in world units for surfaces, not geometry.
+             Default [110,70]; each value must be finite and between 1 and 10000.
+  Unpositioned resources are tiled in stable flat groups. Geometry in a group
+  keeps its source-relative alignment. Explicit positions bypass automatic tiling.
+  groups is optional: at most 64 {"label":STRING,"members":[INDEX,...]} entries.
+  Members are 1-based resource indices within that scene, at least two distinct
+  valid indices per group. Each resource belongs to at most one flat group;
+  groups entries cannot overlap or conflict with resource.group. Repeat a source
+  resource to create another instance in a different group.
+  Use resource.group for ordinary flat grouping.
+
+COLLECTION CONFIG
+{
+  "kind": "collection",
+  "schema_version": 1,
+  "title": "Review collection",
+  "active_scene_id": "model",
+  "scenes": [
+    {"id": "model", "title": "Model",
+     "resources": [{"path": "jaw.ply"}, {"path": "review.md"}]},
+    {"id": "analysis", "title": "Analysis",
+     "resources": [{"path": "architecture.mmd"}, {"path": "report.json"}]}
+  ]
+}
+
+COLLECTION FIELDS
+  kind/schema_version/title/scenes are required; use "collection" and version 1.
+  Titles are 1 to 120 nonblank characters. Each scene requires id and title.
+  IDs are unique, 1 to 64 ASCII lowercase letters, digits, "_" or "-".
+  active_scene_id is optional, defaults to the first scene, and must name a scene.
+  Each child has either resources plus optional groups (same schema as above),
+  or one uri handled by an installed plugin, with no resources or groups.
+  Nested collections are not supported. At most 256 explicit resources total.
+
+PATHS, LIMITS AND CONFLICTS
+  Relative paths resolve from the config file's directory; --config - uses the
+  working directory. Local filesystem paths refer to this Client's machine.
+  Config JSON is limited to 4 MiB. A basic scene has 1 to 256 resources.
+  Unknown fields/types in the basic scene/collection formats fail. Do not add
+  camera, annotations or presentation: those are viewer state, not config fields.
+  --config conflicts with positional files, --recursive, --title, --label and
+  --component. --plugin, --host, --ttl and --format still apply.
+  Directory discovery skips hidden entries and contained symlinks, sorts each
+  directory, removes duplicate canonical paths and preserves argument order.
+  --label and --component indices refer to that final expanded order, starting
+  at 1. --label 1,2=TEXT creates a group; one index names one resource.
+  Sources remain read-only. Links bind exact revisions: changing/deleting or
+  revoking a source invalidates them. Default TTL is 7 days; --ttl 0 has no time
+  expiry but still needs unchanged, reachable sources and a running server.
+
+PLUGINS AND ADVANCED MANIFESTS
+  Run blind plugin list to discover the actual local/Server plugin IDs, URI
+  schemes, component names, filename suffixes, descriptions and readiness.
+  Do not invent a plugin URI syntax; use its advertised description.
+  Installing a plugin does not activate its filename suffixes. Use repeatable
+  --plugin ID or --plugin ./directory to enable inference; an explicit
+  --component INDEX=PLUGIN:NAME selects only that resource's renderer.
+  Run blind plugin --help or blind oss --help for configuration commands.
+  Plugins may return a versioned resolver manifest, also accepted by --config:
+  schema_version: 1; resources: [{id,uri,label?}]; optional title, requires,
+  components, panels, attachments and warnings.
+  components: [{id,uri,label,component?,member?,group?,position?,size?}].
+  panels: [{id,label,members:[RESOURCE_ID,...],group?}], flat geometry assemblies,
+  not independent collection scenes. If present, they cover every geometry
+  resource; members within one panel are distinct existing resource IDs.
+  attachments use the same {id,uri,label?} schema as resources.
+  warnings: [{code,message,resource_id?}].
+  requires advertises capabilities: layout.panels for panels; layout.panel-groups
+  for panel.group; components.v1 for components; archive.members for component
+  members; attachments for attachments. Unsupported required capabilities fail.
+  Resource/attachment IDs are unique nonempty strings up to 128 bytes; component
+  IDs follow the collection ID rules and cannot collide with any resource ID.
+  Panel IDs are unique nonempty strings. Labels use the 1 to 120 character limit.
+  Limits: 4096 geometry resources, 4096 attachments, 256 components, 64 panels,
+  4096 expanded panel members. At least one resource or component is required.
+  Manifest uris are local paths or OSS, not nested plugin or HTTP URLs.
+  No renderer code or private plugin settings belong in a share manifest.
+
+OUTPUT AND FAILURE CONTRACT
+  Use --format json for agents: stdout contains one JSON result on success.
+  viewer_url is the interactive capability; image_url renders a fresh PNG.
+  owner_url includes a private owner capability: do not publish it.
+  ttl_days confirms the lifetime; hosts lists candidate origins.
+  resources lists geometry paths and source revisions, not a complete inventory
+  of native content. source identifies the owning registration. Collection
+  results also contain active_scene_id and scenes, each with id, viewer_url,
+  image_url, resources and warnings.
+  Diagnostics and warnings go to stderr. Inspect warnings (including each
+  scene's warnings): an issued link does not guarantee every resource is available.
+  Invalid input or failed registration exits nonzero; stderr explains the cause.
+  Correct the named field/path or inspect blind status --json before retrying.
+  No Skill, repository checkout or direct Server API call is needed to construct
+  the scene and collection inputs described here."#;
+
 #[derive(Parser)]
 #[command(
     name = "blind",
     version,
-    about = "Share geometry through local or remote Blind sources",
-    after_help = "Run blind serve on A. Join once with blind join --stdin; then use blind share model.ply --label '1=Crown' --format json. For large resource sets, use blind share --config scene.json. Use comma-separated indices to label a group: --label '1,2=Reference'. The Client needs no background process."
+    about = "Share 3D models, documents and independent scenes through Blind sources",
+    after_help = "GET STARTED\n  Check connection: blind status --json\n  Local hosting: blind serve\n  Remote registration: blind join --stdin < invitation.json\n  Share read-only sources: blind share model.ply review.md --format json\n\nCOMPLEX SCENES\n  blind share --help gives complete scene/collection JSON fields, examples,\n  limits, plugin discovery, link lifetimes and the agent output/error contract.\n  Generate a config and submit it with blind share --config - --format json.\n  Every command has --help. The Client needs no background process."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -45,8 +183,9 @@ enum ClientCommand {
     },
     /// Share files or directories as scene components through the registered Blind server.
     #[command(
-        long_about = "Share files or local directories with automatic display selection. Directories include supported files in the current level; add --recursive for subdirectories. Hidden entries and symbolic links inside directories are skipped. Each directory is sorted by path; duplicate paths are removed before assigning label/component indices. At most 256 resources form one scene. PLY/STL/OBJ → mesh, PTS → points, logs/text → text, Markdown → markdown, ordinary JSON → json, HTML → html, PNG/JPEG/WebP/GIF → image. Use --component INDEX=TYPE to override. All geometry in a group keeps its original relative coordinates. Groups are tiled in one scene; explicit positions use world coordinates.",
-        after_help = "EXAMPLES:\n  blind share ./\n  blind share ./results --recursive --format json\n  blind share jaw.ply run.log tracing.json\n  blind share capture.json --component cyclops:trace\n  blind share jaw.ply capture.json --component 2=cyclops:trace\n  blind share --config scene.json\n  blind share --config collection.json --format json\n  generate_collection | blind share --config - --format json\n\nCONFIG:\n  {\"title\":\"Review\",\"resources\":[{\"path\":\"jaw.ply\",\"group\":\"Geometry\"},{\"path\":\"capture.json\",\"component\":\"cyclops:trace\",\"label\":\"Trace\",\"group\":\"Diagnostics\"}]}\n  {\"kind\":\"collection\",\"schema_version\":1,\"title\":\"Case review\",\"active_scene_id\":\"design\",\"scenes\":[{\"id\":\"design\",\"title\":\"Design\",\"resources\":[{\"path\":\"crown.ply\"}]},{\"id\":\"scan\",\"title\":\"Scan\",\"resources\":[{\"path\":\"scan.ply\"}]}]}\n\nResource fields: path, label?, component?, group?, position?: [x,y,z], size?: [width,height]. Paths are relative to the config, or cwd for --config -, or oss://ALIAS/BUCKET/KEY. Types: mesh, points, text, markdown, json, html, image or plugin:name. Collection children accept resources/groups or one plugin uri. Unknown fields/types fail. Existing groups with 1-based members and --label remain supported. --config owns resources, labels and title; delivery options still apply."
+        long_about = "Share files or directories as native scene components through the registered Server. PLY/STL/OBJ → mesh, PTS → points, TXT/LOG/JSONL/CSV → text, MD/Markdown → markdown, JSON → json, HTML/HTM → html, PNG/JPEG/WebP/GIF → image, MMD/Mermaid → mermaid, DOT/GV → dot. Files in one scene share a camera and layout; a collection gives each scene independent review state. Use --config for explicit layouts or several scenes. Source files are never edited.",
+        after_help = "Use blind share --help for complete scene/collection JSON schemas, examples and constraints.",
+        after_long_help = SHARE_HELP
     )]
     Share {
         /// Files, local directories, or oss://ALIAS/BUCKET/KEY addresses, in display order.

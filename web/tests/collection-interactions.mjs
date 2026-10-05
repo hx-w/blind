@@ -25,7 +25,7 @@ async function availablePort() {
   return port;
 }
 
-test('collection layout, focused toolbar, independent rendering, and tab state', async () => {
+test('collection layout, focused toolbar, independent rendering, and scene switching', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'blind-collection-browser-'));
   const port = await availablePort();
   const origin = `http://127.0.0.1:${port}`;
@@ -65,6 +65,8 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await childPage.goto(shared.scenes[1].viewer_url);
     await childPage.locator('#loading-state').waitFor({state:'hidden'});
     assert.equal(await childPage.locator('.collection-shell').count(), 0, 'a child viewer URL should open one scene');
+    assert.equal(await childPage.getByRole('tablist', {name:'场景切换'}).count(), 0, 'one scene does not need collection tabs');
+    assert.equal(await childPage.locator('.collection-scene-expand').count(), 0, 'one scene does not need a pane expansion control');
     await childPage.close();
     assert.equal(await page.locator('.collection-shell .topbar').count(), 0);
     assert.equal(await page.locator('.collection-shell .review-dock #share-view').count(), 1);
@@ -73,7 +75,6 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await page.locator('.collection-frame').first().waitFor();
     assert.equal(await page.locator('.collection-frame').count(), 2);
     assert.equal(await page.locator('.collection-card.active').getAttribute('data-scene'), 'design');
-    assert.equal(await page.locator('#fullscreen-view').count(), 0);
     const scan = page.frameLocator('.collection-card[data-scene="scan"] iframe');
     const design = page.frameLocator('.collection-card[data-scene="design"] iframe');
     await scan.locator('#loading-state').waitFor({state:'hidden'});
@@ -83,7 +84,7 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await design.locator('#viewer').focus();
     await page.waitForFunction(() => document.querySelector('.collection-card.active')?.getAttribute('data-scene') === 'design');
 
-    await page.locator('.collection-card[data-scene="scan"] .collection-card-title').click();
+    await page.locator('.collection-card[data-scene="scan"] .collection-scene-label').click();
     await page.waitForFunction(() => document.querySelector('.collection-card.active')?.getAttribute('data-scene') === 'scan');
     await page.locator('#observe-trigger').click();
     await page.locator('#section-trigger').click();
@@ -95,9 +96,9 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await page.mouse.up();
     await scan.locator('.section-panel').waitFor({state:'visible'});
     assert.equal(await design.locator('.section-panel').isVisible(), false, 'a section belongs to one scene');
-    await page.locator('.collection-card[data-scene="design"] .collection-card-title').click();
+    await page.locator('.collection-card[data-scene="design"] .collection-scene-label').click();
     await scan.locator('.section-panel').waitFor({state:'hidden'});
-    await page.locator('.collection-card[data-scene="scan"] .collection-card-title').click();
+    await page.locator('.collection-card[data-scene="scan"] .collection-scene-label').click();
     await scan.locator('.section-panel').waitFor({state:'visible'});
     await scan.locator('button[aria-label="关闭剖面观察"]').click();
     await page.locator('[data-observe-category="shading"]').click();
@@ -105,9 +106,29 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     await page.waitForFunction(() => document.querySelector('.collection-card[data-scene="scan"] iframe')?.contentDocument?.querySelector('[data-shading="wire"]')?.classList.contains('active'));
     await clickDisplay(page);
     await page.locator('.collection-shell .review-dock [data-observe-mode="normals"]').click();
-    await page.locator('.collection-card[data-scene="design"] .collection-card-title').click();
+    await page.locator('.collection-card[data-scene="design"] .collection-scene-label').click();
     await clickDisplay(page);
     assert.equal(await design.locator('[data-observe-mode="matte"]').getAttribute('aria-pressed'), 'true');
+    await page.getByRole('button', {name:'放大 Scan', exact:true}).click();
+    await page.locator('.collection-shell.collection-maximized').waitFor();
+    const fullStage = await page.locator('.collection-stage').boundingBox();
+    const fullScene = await page.locator('.collection-card[data-scene="scan"]').boundingBox();
+    assert.deepEqual(fullScene, fullStage, 'the expanded scene must occupy the full viewing area');
+    assert.equal(await page.locator('.collection-card[data-scene="design"]').isVisible(), false);
+    assert.equal(await page.getByRole('tab', {name:'Scan', exact:true}).getAttribute('aria-selected'), 'true');
+    await page.getByRole('tab', {name:'Design', exact:true}).click();
+    assert.equal(await page.locator('.collection-card[data-scene="design"]').isVisible(), true);
+    assert.equal(await page.locator('.collection-card[data-scene="scan"]').isVisible(), false);
+    assert.equal(await design.locator('[data-observe-mode="matte"]').getAttribute('aria-pressed'), 'true');
+    await page.getByRole('tab', {name:'Design', exact:true}).press('ArrowRight');
+    await page.waitForFunction(() => document.querySelector('.collection-card.active')?.dataset.scene === 'scan');
+    assert.equal(await scan.locator('[data-observe-mode="normals"]').getAttribute('aria-pressed'), 'true', 'tab switching must retain the other scene rendering state');
+    await page.getByRole('button', {name:'还原分屏', exact:true}).click();
+    await page.locator('.collection-shell.collection-split').waitFor();
+    assert.equal(await page.locator('.collection-card[data-scene="design"]').isVisible(), true);
+    assert.equal(await page.locator('.collection-card[data-scene="scan"]').isVisible(), true);
+    assert.equal(await page.getByRole('tablist', {name:'场景切换'}).isVisible(), false);
+    await page.locator('.collection-card[data-scene="design"] .collection-scene-label').click();
 
     const shareResponse = page.waitForResponse(response => response.url().endsWith('/share') && response.request().method() === 'POST');
     await page.locator('#observe-back').click();
@@ -137,7 +158,7 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
       await sharePaused;
       await route.continue();
     });
-    await page.locator('.collection-card[data-scene="design"] .collection-card-title').focus();
+    await page.locator('.collection-card[data-scene="design"] .collection-scene-label').focus();
     await page.keyboard.press(`${process.platform === 'darwin' ? 'Meta' : 'Control'}+c`);
     assert.equal(await page.evaluate(() => window.clipboardWriteStarted), true,
       'clipboard write must start before the collection reshare request returns');
@@ -177,24 +198,114 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
     assert.equal(inkImage.readUInt32BE(16), Math.round(inkBounds.width));
     assert.equal(inkImage.readUInt32BE(20), Math.round(inkBounds.height));
     await page.locator('.collection-share button', {hasText:'关闭'}).click();
-    await page.setViewportSize({width:800,height:800});
-    await page.locator('.collection-shell.collection-tabbed').waitFor();
-    assert.equal(await page.locator('.collection-shell').evaluate(element => element.classList.contains('annotation-mode')), false);
-    assert.equal(await page.locator('.collection-shell .review-dock').isVisible(), true);
+    await page.evaluate(() => {
+      window.collectionFrames = [...document.querySelectorAll('.collection-frame')].map(frame => frame.contentWindow);
+    });
+    await page.getByRole('button', {name:'放大 Design', exact:true}).click();
+    await page.locator('.collection-shell.collection-maximized').waitFor();
+    await design.locator('.app-shell.surface-mode').waitFor({state:'hidden'});
+    await page.locator('.collection-shell > #surface-toolbar').waitFor({state:'hidden'});
+    assert.equal(await design.locator('#brush-tool').getAttribute('aria-pressed'), 'false',
+      'maximizing the already focused pane must finish its child annotation tool');
+    const maximizedShare = page.waitForRequest(request => request.url().endsWith('/share') && request.method() === 'POST');
+    await page.locator('#share-view').click();
+    const maximizedPayload = (await maximizedShare).postDataJSON();
+    assert.deepEqual(maximizedPayload.strokes, inkPayload.strokes, 'maximizing parks rather than deletes split ink');
+    assert.deepEqual(maximizedPayload.layout, inkPayload.layout, 'parked ink retains its captured split layout');
+    await page.locator('.collection-share button', {hasText:'关闭'}).click();
+
+    await page.locator('#brush-tool').click();
+    await page.locator('.collection-shell > #surface-toolbar').waitFor({state:'visible'});
+    await page.locator('.collection-shell > #surface-toolbar [data-surface-mode="point"]').click();
+    await page.getByRole('tab', {name:'Scan', exact:true}).click();
+    await design.locator('.app-shell.surface-mode').waitFor({state:'hidden'});
+    await page.locator('.collection-shell > #surface-toolbar').waitFor({state:'hidden'});
+    await page.getByRole('tab', {name:'Design', exact:true}).click();
+    await design.locator('.app-shell.surface-mode').waitFor({state:'visible'});
+    await page.locator('.collection-shell > #surface-toolbar').waitFor({state:'visible'});
+    assert.equal(await page.locator('.collection-shell > #surface-toolbar [data-surface-mode="point"]').getAttribute('aria-pressed'), 'true',
+      'returning to a tab must resume its scene tool with a visible parent toolbar');
+    await page.getByRole('button', {name:'还原分屏', exact:true}).click();
+    await page.locator('.collection-shell.collection-split').waitFor();
+    await design.locator('.app-shell.surface-mode').waitFor({state:'hidden'});
+    await page.locator('.collection-shell > #surface-toolbar').waitFor({state:'hidden'});
+    assert.equal(await design.locator('#brush-tool').getAttribute('aria-pressed'), 'false',
+      'restoring the already focused pane must not leave an invisible point tool active');
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll('.collection-frame')]
+      .every((frame, index) => frame.contentWindow === window.collectionFrames[index])), true,
+      'maximize, tabs, and restore must retain the original scene frames');
+    const restoredShare = page.waitForRequest(request => request.url().endsWith('/share') && request.method() === 'POST');
+    await page.locator('#share-view').click();
+    const restoredPayload = (await restoredShare).postDataJSON();
+    assert.deepEqual(restoredPayload.strokes, inkPayload.strokes, 'restoring the unchanged split must retain its ink');
+    assert.deepEqual(restoredPayload.updates.design.state.camera, inkPayload.updates.design.state.camera,
+      'view toggles must not move the first scene camera');
+    assert.deepEqual(restoredPayload.updates.scan.state.camera, inkPayload.updates.scan.state.camera,
+      'view toggles must not move the second scene camera');
+    await page.locator('.collection-share button', {hasText:'关闭'}).click();
+    await page.locator('#brush-tool').click();
+    await page.locator('.collection-markup.enabled').waitFor();
+    await page.locator('.collection-shell > #surface-toolbar #surface-undo').click();
+    assert.equal(await page.locator('.collection-shell > #surface-toolbar #surface-redo').isEnabled(), true,
+      'unchanged view toggles must retain the collection undo history');
+    await page.locator('.collection-shell > #surface-toolbar #surface-redo').click();
+    assert.equal(await page.locator('.collection-ink-badges button').count(), 1);
+    await page.locator('.collection-shell > #surface-toolbar #surface-done').click();
+    await page.getByRole('button', {name:'放大 Design', exact:true}).click();
+    await page.locator('.collection-shell.collection-maximized').waitFor();
+    await scan.locator('[data-projection="orthographic"]').evaluate(button => button.click());
+    await page.waitForFunction(() => document.querySelector('.collection-card[data-scene="scan"] iframe')
+      ?.contentDocument?.querySelector('[data-projection="orthographic"]')?.classList.contains('active'));
+    assert.equal(await page.locator('.collection-ink-badges button').count(), 1,
+      'a parked scene change must not immediately delete hidden collection ink');
+    await page.getByRole('button', {name:'还原分屏', exact:true}).click();
+    await page.locator('.collection-shell.collection-split').waitFor();
+    await page.waitForFunction(() => !document.querySelector('.collection-ink-badges button'));
+    assert.equal(await page.locator('.collection-ink-badges button').count(), 0,
+      'returning to a genuinely changed split composition must invalidate its stale screen ink');
+
+    await page.locator('#brush-tool').click();
+    await page.locator('.collection-markup.enabled').waitFor();
+    await page.mouse.move(inkBounds.x + inkBounds.width * .25, inkY);
+    await page.mouse.down();
+    await page.mouse.move(inkBounds.x + inkBounds.width * .75, inkY, {steps:24});
+    await page.mouse.up();
+    await page.locator('.collection-shell > #surface-toolbar #surface-undo').click();
+    assert.equal(await page.locator('.collection-shell > #surface-toolbar #surface-redo').isEnabled(), true,
+      'undo must retain a redo copy until the scene view actually changes');
+    await page.locator('.collection-shell > #surface-toolbar #surface-redo').click();
+    assert.equal(await page.locator('.collection-ink-badges button').count(), 1);
+    await page.locator('.collection-shell > #surface-toolbar #surface-undo').click();
+    await design.locator('[data-projection="orthographic"]').evaluate(button => button.click());
+    await page.waitForFunction(() => document.querySelector('.collection-shell > #surface-toolbar #surface-redo')?.disabled);
+    assert.equal(await page.locator('.collection-ink-badges button').count(), 0,
+      'an actual visible camera change invalidates ink even when it exists only in redo history');
+    await page.mouse.move(inkBounds.x + inkBounds.width * .25, inkY);
+    await page.mouse.down();
+    await page.mouse.move(inkBounds.x + inkBounds.width * .75, inkY, {steps:24});
+    await page.mouse.up();
+    assert.equal(await page.locator('.collection-ink-badges button').count(), 1);
+    await page.setViewportSize({width:1400,height:800});
+    await page.waitForFunction(() => document.querySelector('.collection-stage')?.clientWidth === 1400 &&
+      !document.querySelector('.collection-ink-badges button'));
+    assert.equal(await page.locator('.collection-shell > #surface-toolbar #surface-undo').isEnabled(), false,
+      'a changed split viewport must invalidate both screen ink and its undo copies');
+    assert.equal(await page.locator('.collection-shell > #surface-toolbar').isVisible(), true,
+      'viewport invalidation must not leave active annotation input without its toolbar');
+    await page.setViewportSize({width:800,height:640});
+    await page.locator('.collection-shell.collection-single').waitFor();
+    assert.equal(await page.locator('.collection-shell').evaluate(element => element.classList.contains('annotation-mode')), true,
+      'resizing must retain the active scene annotation tool');
+    await page.locator('.collection-shell > #surface-toolbar #surface-done').click();
     const loneCard = page.locator('.collection-card.active');
-    assert.equal(await loneCard.evaluate(element => getComputedStyle(element).borderTopWidth), '0px');
-    assert.equal(await loneCard.evaluate(element => getComputedStyle(element).borderRadius), '0px');
-    assert.equal(await loneCard.locator('.collection-card-title').isVisible(), false);
+    assert.equal(await loneCard.locator('.collection-scene-label').isVisible(), false);
     assert.equal((await loneCard.boundingBox()).x, 0);
 
     await page.setViewportSize({width:390,height:844});
-    await page.locator('.collection-shell.collection-tabbed').waitFor();
-    assert.ok((await page.locator('.collection-stage').boundingBox()).y <= 56, 'mobile tabs and share should occupy one top row');
-    assert.equal(await page.locator('.collection-shell .review-dock .dock-main .dock-tool').count(), 4);
-    assert.equal(await page.locator('.collection-shell .review-dock .dock-observe .observe-primary .dock-tool').count(), 6);
+    await page.locator('.collection-shell.collection-single').waitFor();
+    assert.equal((await page.locator('.collection-stage').boundingBox()).y, 0, 'scene tabs overlay the full viewport');
     assert.ok((await page.locator('.collection-stage').boundingBox()).y + (await page.locator('.collection-stage').boundingBox()).height >= 842);
-    await page.waitForFunction(() => document.querySelectorAll('.collection-frame').length === 1);
-    await page.locator('.collection-tabs [data-scene="scan"]').click();
+    await page.getByRole('tab', {name:'Scan', exact:true}).click();
     await page.waitForFunction(() => document.querySelector('.collection-card.active')?.dataset.scene === 'scan');
     await page.frameLocator('.collection-card[data-scene="scan"] iframe').locator('#loading-state').waitFor({state:'hidden'});
     await clickDisplay(page);
@@ -209,7 +320,7 @@ test('collection layout, focused toolbar, independent rendering, and tab state',
       'Fit must use the restored component position after switching to tabs');
     await page.locator('.collection-share button', {hasText:'关闭'}).click();
     await page.setViewportSize({width:320,height:700});
-    await page.locator('.collection-shell.collection-tabbed').waitFor();
+    await page.locator('.collection-shell.collection-single').waitFor();
     const dockBounds = await page.locator('.collection-shell .review-dock').boundingBox();
     assert.ok(dockBounds.x >= 0 && dockBounds.x + dockBounds.width <= 320, 'the dock must fit at 320px');
     await page.setViewportSize({width:390,height:844});

@@ -512,7 +512,9 @@ fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
             position: resource.position,
             size: resource.size,
         };
-        options.validate()?;
+        options
+            .validate()
+            .with_context(|| format!("invalid resources[{}]", index + 1))?;
         display.push(options);
         if resource.path.as_os_str().is_empty() {
             bail!("resources[{}].path must not be empty", index + 1);
@@ -609,7 +611,9 @@ pub(super) async fn share(
     let config_mode = config.is_some();
     let mut renderers = ShareRenderers::new(&plugins).await?;
     let plan = match config {
-        Some(path) => read_share_config(&path)?,
+        Some(path) => read_share_config(&path).context(
+            "cannot build share config; see blind share --help for input formats and constraints",
+        )?,
         None => {
             let meshes =
                 super::discovery::expand_inputs(meshes, recursive, &renderers.extensions())?;
@@ -750,7 +754,7 @@ fn parse_components(
         );
         display[index - 1].component = Some(
             serde_json::from_value(serde_json::Value::String(kind.into())).context(
-                "component must be mesh, points, text, markdown, json, html, image or plugin:name",
+                "component must be mesh, points, text, markdown, json, html, image, mermaid, dot or plugin:name",
             )?,
         );
     }

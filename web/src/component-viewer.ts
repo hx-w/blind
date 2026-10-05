@@ -5,6 +5,11 @@ import type { PublicScene, Vec3 } from './api';
 import { MeshViewer } from './viewer';
 import { ComponentRegistry, componentGroups, entityUpdate, effectiveVisibility, sceneEntities, type ComponentCapabilities, type ComponentRuntime, type Presentation, type SceneEntity } from './scene-components';
 import { textContent, markdownContent, jsonContent, pluginContent, htmlContent, imageContent, type ContentFactory } from './component-content';
+import {diagramContent} from './diagram-content';
+import {ContentAnnotations} from './content-annotations';
+import {updateContentState} from './content-reading';
+import type {ContentAnchor, ContentState} from './content-surface';
+import type {SurfaceContent} from './component-content';
 import {installIcons} from './icons';
 import {compactLabel} from './compact-label';
 import './components.css';
@@ -32,8 +37,8 @@ export function builtInComponents(): ComponentRegistry<Context> {
       };
     },
   });
-  for (const [type, content] of Object.entries({text: textContent, markdown: markdownContent, json: jsonContent, html: htmlContent, image: imageContent})) {
-    registry.register({type, capabilities: {presentations: ['spatial', 'focus'], movable: false, resizable: false, input: contentInput},
+  for (const [type, content] of Object.entries({text: textContent, markdown: markdownContent, json: jsonContent, html: htmlContent, image: imageContent, mermaid: diagramContent, dot: diagramContent})) {
+    registry.register({type, capabilities: {presentations: type === 'html' ? ['spatial', 'focus'] : ['spatial', 'focus', 'fullscreen'], movable: false, resizable: false, input: {...contentInput, spatial: type === 'html' ? 'scene' : 'content'}},
       create: (spec, context) => new SurfaceRuntime(spec, context, content)});
   }
   return registry;
@@ -65,11 +70,24 @@ export class ComponentViewer {
   private selected?: Entry;
   private opened = this.viewport.matches;
   private syncing = false;
+  private readonly touches = new Map<number, {event: PointerEvent; runtime?: SurfaceRuntime}>();
+  private cameraTouch = false;
   onSelect?: (entity: SceneEntity) => void;
   onChange?: () => void;
+  onScreenAnnotation?: () => void;
+  onContentViewChange?: () => void;
   get selectedEntity(): SceneEntity | undefined { return this.selected?.spec; }
   get selectedGeometry(): 'mesh' | 'points' | undefined { return this.selected?.capabilities.geometry; }
   openInfo(): void { this.showTreeView('info'); this.setOpen(true); }
+  annotateContent(): boolean {
+    const runtime = this.selected?.runtime;
+    if (!(runtime instanceof SurfaceRuntime)) return false;
+    return runtime.annotate();
+  }
+  closeContentAnnotation(): void {
+    for (const entry of this.entries) if (entry.runtime instanceof SurfaceRuntime) entry.runtime.closeAnnotation();
+  }
+  returnToScene(): void { this.close(); }
   get entities(): readonly SceneEntity[] { return this.entries.map(e => e.spec); }
   private setLabel(entry: Entry, value: string): void {
     const spec = entry.spec;
@@ -107,6 +125,8 @@ export class ComponentViewer {
       root.addEventListener('pointerdown', this.routePointer, true);
       root.addEventListener('click', this.routeClick, true);
       root.addEventListener('wheel', this.routeWheel, {capture: true, passive: false});
+      window.addEventListener('pointerup', this.releaseTouch, true);
+      window.addEventListener('pointercancel', this.releaseTouch, true);
     }
     this.layout(); this.buildTree(); this.buildDialog(); this.sync();
     viewer.renderListeners.add(this.render); this.viewport.addEventListener('change', this.viewportChanged);
@@ -116,7 +136,18 @@ export class ComponentViewer {
     if (this.entries[0]) this.select(this.entries.find(e => e.spec.id === viewer.focusedComponentId)?.spec ?? this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec ?? this.entries[0].spec, false);
     this.render();
   }
-  async ready(): Promise<void> { await Promise.all(this.entries.filter(e => effectiveVisibility(e.spec)).map(e => e.runtime.ready)); this.render(); }
+  async ready(): Promise<void> {
+    const visible = this.entries.filter(e => effectiveVisibility(e.spec));
+    const results = await Promise.allSettled(visible.map(e => e.runtime.ready));
+    const expanded = visible.find((entry, index) => results[index].status === 'fulfilled'
+      && entry.runtime instanceof SurfaceRuntime && ['focus', 'fullscreen'].includes((entry.spec.state as ContentState | undefined)?.presentation ?? 'spatial'));
+    if (expanded && (!document.documentElement.classList.contains('embedded-scene') || document.documentElement.classList.contains('embedded-active'))) {
+      this.present(expanded.spec, (expanded.spec.state as ContentState).presentation!);
+    }
+    this.render();
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failure) throw failure.reason;
+  }
   // Geometry bands do not intercept DOM events. Route their covered pixels
   // to geometry, while exposed content controls remain interactive.
   private occluded(event: MouseEvent): boolean {
@@ -125,12 +156,33 @@ export class ComponentViewer {
     return entry?.runtime instanceof SurfaceRuntime && entry.runtime.occludedAt(event.clientX, event.clientY);
   }
   private routePointer = (event: PointerEvent): void => {
+    // Forwarded canvas events already belong to ArcballControls.
+    if (!event.isTrusted && event.target instanceof HTMLCanvasElement) return;
+    if (event.pointerType === 'touch') {
+      const element = event.target instanceof Element ? event.target.closest('.scene-surface') : null;
+      const runtime = this.entries.find(entry => entry.runtime.element === element)?.runtime;
+      this.touches.set(event.pointerId, {event, runtime: runtime instanceof SurfaceRuntime && runtime.isNativeSpatial && !this.occluded(event) && !(event.target instanceof Element && event.target.closest('.component-handle, .component-overflow')) ? runtime : undefined});
+      if (this.touches.size > 1 && [...this.touches.values()].some(touch => touch.runtime)) {
+        for (const touch of this.touches.values()) touch.runtime?.cancelContentGesture();
+        if (!this.cameraTouch) {
+          this.cameraTouch = true;
+          for (const touch of this.touches.values()) {
+            if (touch.runtime || touch.event === event) this.viewer.navigatePointer(touch.event);
+          }
+        } else this.viewer.navigatePointer(event);
+        event.preventDefault(); event.stopImmediatePropagation(); return;
+      }
+      if (this.cameraTouch) { event.preventDefault(); event.stopImmediatePropagation(); this.viewer.navigatePointer(event); return; }
+    }
     if (event.target === this.root || this.occluded(event)) {
       event.preventDefault(); event.stopImmediatePropagation(); this.viewer.navigatePointer(event);
       // Picking listens for pointerup on the canvas. Keep the native gesture
       // there after redirecting its start, even though DOM content receives hits.
       this.root.querySelector('canvas')?.setPointerCapture(event.pointerId);
     }
+  };
+  private releaseTouch = (event: PointerEvent): void => {
+    this.touches.delete(event.pointerId); if (!this.touches.size) this.cameraTouch = false;
   };
   private routeClick = (event: MouseEvent): void => {
     if (this.occluded(event)) { event.preventDefault(); event.stopImmediatePropagation(); }
@@ -324,18 +376,23 @@ export class ComponentViewer {
       entry.runtime.focus();
       return;
     }
-    if (this.expanded && this.expanded !== entry) this.close();
+    if (entry.runtime instanceof SurfaceRuntime && !entry.runtime.preparePresentation(mode)) return;
+    if (this.expanded && this.expanded !== entry) { this.close(); if (this.expanded) return; }
     if (!this.expanded) {
       this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
       this.expanded = entry; this.dialogTitle.textContent = spec.label;
       moveElement(this.expandedContent, entry.runtime.element);
+      this.dialog.classList.toggle('native-dialog', entry.runtime instanceof SurfaceRuntime && entry.runtime.hasNative);
       this.viewer.setInteractionEnabled(false); this.dialog.showModal();
     }
+    this.dialog.classList.toggle('fullscreen-dialog', mode === 'fullscreen');
     entry.runtime.setPresentation(mode);
   }
   private close = (): void => {
     if (!this.expanded) return;
-    const entry = this.expanded; this.expanded = undefined;
+    const entry = this.expanded;
+    if (entry.runtime instanceof SurfaceRuntime && !entry.runtime.preparePresentation('spatial')) return;
+    this.expanded = undefined;
     entry.runtime.setPresentation('spatial'); this.dialog.close(); this.viewer.setInteractionEnabled(true);
     this.returnFocus?.focus({preventScroll: true}); this.viewer.invalidate();
   };
@@ -470,6 +527,8 @@ export class ComponentViewer {
       if (!plane) {
         plane = {scene: new THREE.Scene(), renderer: new CSS3DRenderer()};
         plane.renderer.domElement.className = 'component-layer';
+        // Clipping must not let focus/scrollIntoView shift the projected world.
+        plane.renderer.domElement.style.overflow = 'clip';
         this.planes.set(z, plane); this.compositor.append(plane.renderer.domElement);
       }
       // Keep hidden wrappers connected so visibility toggles do not reload
@@ -509,6 +568,7 @@ export class ComponentViewer {
     }
   }
   private render = (): void => {
+    for (const entry of this.entries) if (entry.runtime instanceof SurfaceRuntime) entry.runtime.updateScreenScale(this.viewer.activeCamera, this.root.clientWidth, this.root.clientHeight);
     this.renderLayers();
     for (const caption of this.captions) {
       const box = new THREE.Box3(); caption.entries.filter(e => effectiveVisibility(e.spec)).forEach(e => box.union(e.runtime.bounds));
@@ -519,7 +579,7 @@ export class ComponentViewer {
       caption.element.style.transform = `translate(${(p.x + 1) * this.root.clientWidth / 2}px,${(1 - p.y) * this.root.clientHeight / 2 - 32}px)`;
     }
   };
-  dispose(): void { document.removeEventListener('click', this.dismissColorPicker); this.root.classList.remove('has-spatial-content'); this.root.removeEventListener('pointerdown', this.routePointer, true); this.root.removeEventListener('click', this.routeClick, true); this.root.removeEventListener('wheel', this.routeWheel, true); this.close(); this.treeResize?.disconnect(); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.entityUpdates = undefined; this.root.classList.remove('composited-content'); this.compositor.remove(); this.planes.clear(); this.bands.length = 0; this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
+  dispose(): void { document.removeEventListener('click', this.dismissColorPicker); window.removeEventListener('pointerup', this.releaseTouch, true); window.removeEventListener('pointercancel', this.releaseTouch, true); this.root.classList.remove('has-spatial-content'); this.root.removeEventListener('pointerdown', this.routePointer, true); this.root.removeEventListener('click', this.routeClick, true); this.root.removeEventListener('wheel', this.routeWheel, true); this.close(); this.treeResize?.disconnect(); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.entityUpdates = undefined; this.root.classList.remove('composited-content'); this.compositor.remove(); this.planes.clear(); this.bands.length = 0; this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
 }
 
 class SurfaceRuntime implements ComponentRuntime {
@@ -527,45 +587,217 @@ class SurfaceRuntime implements ComponentRuntime {
   private readonly wrapper = document.createElement('div');
   readonly object = new CSS3DObject(this.wrapper);
   get spatialObject(): CSS3DObject | undefined { return this.mode === 'spatial' && this.object.visible ? this.object : undefined; }
-  private readonly content;
+  get hasNative(): boolean { return !!this.content.native; }
+  get isNativeSpatial(): boolean { return this.hasNative && this.mode === 'spatial'; }
+  private readonly content: SurfaceContent;
+  private readonly body = document.createElement('div');
+  private readonly header = document.createElement('header');
+  private readonly menu = document.createElement('div');
+  private readonly overflow: HTMLButtonElement;
+  private readonly expand: HTMLButtonElement;
+  private annotations?: ContentAnnotations;
+  private readonly state: ContentState;
   private mode: Presentation = 'spatial';
+  private gesture?: AbortController;
+  private pointer?: number;
+  private pendingReading?: ContentAnchor;
+  private resize?: ResizeObserver;
+  private settleFrame = 0;
+  private nativeWidth = 0;
+  private nativeHeight = 0;
+  private viewKey?: string;
+  private contentReady = false;
+  private initializingContent = true;
+  private readonly ray = new THREE.Raycaster();
+  private readonly rayPointer = new THREE.Vector2();
+  private screenScale = 1;
+  private readonly projectedOrigin = new THREE.Vector3();
+  private readonly projectedX = new THREE.Vector3();
+  private readonly projectedY = new THREE.Vector3();
+  private readonly surfacePlane = new THREE.Plane();
+  private readonly surfacePoint = new THREE.Vector3();
   constructor(private readonly spec: SceneEntity, private readonly context: Context, factory: ContentFactory) {
     const {host, scene} = context; this.element.className = 'scene-surface'; this.element.dataset.component = spec.component;
-    const header = document.createElement('header'); header.className = 'component-handle'; header.title = spec.label;
-    const label = document.createElement('span'); label.textContent = spec.label;
-    header.append(label);
+    this.header.className = 'component-handle'; this.header.title = spec.label;
+    const label = document.createElement('span'); label.textContent = spec.label; this.header.append(label);
     const source = scene.attachments?.[spec.source.index];
     this.content = source?.url ? factory(source.url, spec.label, spec) : {element: document.createElement('p'), ready: Promise.reject(new Error('资源不可用')), dispose() {}};
+    this.state = (spec.state ?? {}) as ContentState;
     void this.content.ready.catch(() => {});
     if (!source?.url) this.content.element.textContent = source?.unavailable ?? '资源不可用';
-    const body = document.createElement('div'); body.className = 'component-body'; body.append(this.content.element);
-    const enter = button(`选中 ${spec.label}`, () => host.select(spec)); enter.className = 'component-enter'; enter.setAttribute('aria-label', `选中 ${spec.label}，双击展开`); enter.textContent = ''; body.append(enter);
-    // The same orbit/pan/zoom gestures work over content previews. Single click selects.
-    let navigating = false;
-    let gesture: AbortController | undefined;
-    enter.onclick = () => { if (!navigating) host.select(spec); };
-    enter.addEventListener('dblclick', event => { event.preventDefault(); host.open(spec); });
-    enter.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); host.open(spec); } });
-    header.addEventListener('dblclick', event => { event.preventDefault(); host.open(spec); });
-    enter.addEventListener('pointerdown', event => {
-      if (event.isPrimary) {
-        gesture?.abort(); gesture = new AbortController(); navigating = false;
-        const x = event.clientX, y = event.clientY;
-        window.addEventListener('pointermove', move => { if (Math.hypot(move.clientX - x, move.clientY - y) > 6) navigating = true; }, {signal: gesture.signal});
-        window.addEventListener('pointerup', () => gesture?.abort(), {once: true, signal: gesture.signal});
-        window.addEventListener('pointercancel', () => { navigating = true; gesture?.abort(); }, {once: true, signal: gesture.signal});
-      } else navigating = true;
-      host.select(spec); context.viewer.navigatePointer(event);
+    this.body.className = 'component-body'; this.body.append(this.content.element);
+    this.expand = button('全屏', () => {
+      if (this.mode !== 'spatial') host.returnToScene();
+      else if (this.hasNative) host.present(spec, 'fullscreen');
+      else host.open(spec);
     });
-    enter.addEventListener('wheel', event => { event.preventDefault(); context.viewer.navigateWheel(event); }, {passive: false});
-    this.content.element.inert = true;
-    this.element.append(header, body); this.wrapper.append(this.element); host.layer.add(this.object);
+    this.expand.setAttribute('aria-label', `全屏 ${spec.label}`);
+    this.menu.className = 'component-overflow'; this.menu.hidden = true; this.menu.setAttribute('aria-label', `${spec.label} 内容操作`);
+    this.overflow = button('更多', () => this.showMenu(this.menu.hidden)); this.overflow.setAttribute('aria-expanded', 'false');
+    this.header.append(this.expand, this.overflow); this.element.append(this.header, this.body, this.menu);
+    this.wrapper.append(this.element); host.layer.add(this.object);
     this.setPosition(spec.position ?? [0, 0, 0]); this.setOpacity(spec.opacity); this.size();
-    header.addEventListener('pointerdown', event => {
+    // Opaque frames retain scene-owned preview input; native bodies never get this overlay.
+    if (!this.content.native) {
+      const enter = button(`选中 ${spec.label}`, () => host.select(spec)); enter.className = 'component-enter'; enter.setAttribute('aria-label', `选中 ${spec.label}，双击展开`); enter.textContent = ''; this.body.append(enter);
+      let navigating = false, previewGesture: AbortController | undefined;
+      enter.onclick = () => { if (!navigating) host.select(spec); };
+      enter.addEventListener('dblclick', event => { event.preventDefault(); host.open(spec); });
+      enter.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); host.open(spec); } });
+      enter.addEventListener('pointerdown', event => {
+        if (event.isPrimary) {
+          previewGesture?.abort(); previewGesture = new AbortController(); navigating = false;
+          const x = event.clientX, y = event.clientY;
+          window.addEventListener('pointermove', move => { if (Math.hypot(move.clientX - x, move.clientY - y) > 6) navigating = true; }, {signal: previewGesture.signal});
+          window.addEventListener('pointerup', () => previewGesture?.abort(), {once: true, signal: previewGesture.signal});
+          window.addEventListener('pointercancel', () => { navigating = true; previewGesture?.abort(); }, {once: true, signal: previewGesture.signal});
+        } else navigating = true;
+        host.select(spec); context.viewer.navigatePointer(event);
+      });
+      enter.addEventListener('wheel', event => { event.preventDefault(); context.viewer.navigateWheel(event); }, {passive: false});
+      this.content.element.inert = true;
+    }
+    this.header.addEventListener('dblclick', event => { if (!(event.target as Element).closest('button')) { event.preventDefault(); host.open(spec); } });
+    this.header.addEventListener('pointerdown', event => {
       host.select(spec);
-      if (!(event.target as Element).closest('button')) context.viewer.navigatePointer(event);
+      if (!(event.target as Element).closest('button') && this.mode === 'spatial') context.viewer.navigatePointer(event);
+      else event.stopPropagation();
     });
-    header.addEventListener('wheel', event => {event.preventDefault(); context.viewer.navigateWheel(event);}, {passive: false});
+    this.header.addEventListener('wheel', event => { event.preventDefault(); event.stopPropagation(); if (this.mode === 'spatial') context.viewer.navigateWheel(event); }, {passive: false});
+    this.menu.addEventListener('pointerdown', event => event.stopPropagation());
+    this.menu.addEventListener('wheel', event => event.stopPropagation(), {passive: true});
+    this.element.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !this.menu.hidden) { event.preventDefault(); event.stopPropagation(); this.closeAnnotation(); this.showMenu(false); this.overflow.focus(); }
+    });
+    document.addEventListener('pointerdown', this.dismissMenu);
+    this.bindNative();
+  }
+  private bindNative(): void {
+    const native = this.content.native; if (!native) return;
+    this.element.classList.add('native-surface');
+    this.spec.state = this.state;
+    this.content.element.addEventListener('contentstatechange', this.nativeStateChanged);
+    native.scroll.addEventListener('dblclick', this.contentDoubleClick);
+    native.setSelection(this.state.selection === true); this.element.classList.toggle('content-selecting', this.state.selection === true);
+    const selection = button('选择文字', () => {
+      if (!updateContentState(this.state, {selection: !this.state.selection}, this.content.element)) return;
+      this.closeAnnotation(); native.setSelection(this.state.selection === true);
+      this.element.classList.toggle('content-selecting', this.state.selection); selection.setAttribute('aria-pressed', String(this.state.selection)); this.changed(); this.showMenu(false);
+    });
+    selection.setAttribute('aria-pressed', String(this.state.selection)); this.menu.append(selection);
+    this.menu.append(button('聚焦内容', () => { this.focus(); this.showMenu(false); }), button('添加内容标注', () => this.annotate()), button('屏幕画笔', () => { this.closeAnnotation(); this.showMenu(false); this.context.host.onScreenAnnotation?.(); }));
+    if (native.zoom) {
+      const zoom = document.createElement('div'); zoom.className = 'content-tool-row';
+      for (const [label, factor] of [['缩小', .8], ['放大', 1.25]] as const) zoom.append(button(label, () => {
+        native.zoom!(factor); this.changed();
+      }));
+      this.menu.append(zoom);
+    }
+    this.annotations = new ContentAnnotations(native, this.state, this.body, this.changed); this.menu.append(this.annotations.tools);
+    const addLayers = () => {
+      if (!native.layers?.length || this.menu.querySelector('.content-layer-select')) return;
+      const label = document.createElement('label'); label.className = 'content-layer-select'; label.textContent = '图层';
+      const select = document.createElement('select'); select.setAttribute('aria-label', '图层');
+      for (const layer of native.layers) { const option = document.createElement('option'); option.value = layer.id; option.textContent = layer.label; select.append(option); }
+      select.value = this.state.layer ?? native.layers[0].id;
+      select.addEventListener('change', () => {
+        if (!updateContentState(this.state, {layer: select.value}, this.content.element)) { select.value = this.state.layer ?? native.layers![0].id; return; }
+        this.cancelContentGesture(); native.setLayer?.(select.value); this.pendingReading = this.state.reading;
+        this.settle(); this.changed(); this.annotations?.refresh();
+      }); label.append(select); this.menu.prepend(label);
+    };
+    addLayers(); void this.content.ready.then(() => {
+      this.contentReady = true; addLayers(); this.annotations?.refresh(); this.settle();
+    }, () => {});
+    native.scroll.addEventListener('pointerdown', this.contentPointer);
+    native.scroll.addEventListener('wheel', this.contentWheel, {passive: false});
+    this.resize = new ResizeObserver(() => {
+      const width = native.scroll.clientWidth, height = native.scroll.clientHeight;
+      if (width !== this.nativeWidth || height !== this.nativeHeight) {
+        if (!this.initializingContent && this.nativeWidth && this.nativeHeight) this.context.host.onContentViewChange?.();
+        this.pendingReading ??= this.state.reading;
+        this.nativeWidth = width; this.nativeHeight = height;
+        this.settle();
+      }
+      this.annotations?.refresh();
+    }); this.resize.observe(native.scroll);
+    this.pendingReading = this.state.reading; this.settle();
+  }
+  private changed = (): void => { this.content.element.dispatchEvent(new CustomEvent('contentstatechange', {bubbles: true})); };
+  private nativeStateChanged = (): void => {
+    this.element.classList.toggle('content-selecting', this.state.selection === true);
+    const viewKey = JSON.stringify([this.state.reading, this.state.zoom, this.state.expanded, this.state.layer, this.state.presentation]);
+    if (!this.initializingContent && this.viewKey !== undefined && this.viewKey !== viewKey) this.context.host.onContentViewChange?.();
+    this.viewKey = viewKey;
+    this.annotations?.refresh(); this.context.host.onChange?.();
+  };
+  private contentDoubleClick = (event: MouseEvent): void => {
+    if (this.mode !== 'spatial' || this.state.selection || this.annotations?.active || event.target instanceof Element && event.target.closest('a, button, input, select, textarea, summary')) return;
+    event.preventDefault(); event.stopPropagation(); this.context.host.open(this.spec);
+  };
+  private readingChanged = (): void => {
+    if (!this.pendingReading) { const reading = this.content.native?.capture(); if (reading && !updateContentState(this.state, {reading}, this.content.element)) return; this.changed(); }
+  };
+  private showMenu(open: boolean): void { this.menu.hidden = !open; this.overflow.setAttribute('aria-expanded', String(open)); }
+  private dismissMenu = (event: PointerEvent): void => { if (event.target instanceof Node && !this.element.contains(event.target)) this.showMenu(false); };
+  annotate(): boolean {
+    if (!this.annotations) return false;
+    if (!updateContentState(this.state, {selection: false}, this.content.element)) return true;
+    this.context.host.select(this.spec); this.element.classList.remove('content-selecting');
+    this.menu.querySelector<HTMLButtonElement>('button[aria-pressed]')?.setAttribute('aria-pressed', 'false');
+    this.showMenu(true); this.annotations.open(); this.changed(); this.content.native!.scroll.focus({preventScroll: true}); return true;
+  }
+  closeAnnotation(): void { this.annotations?.close(); this.content.native?.setSelection(this.state.selection === true); }
+  cancelContentGesture(): void {
+    const pointer = this.pointer; this.pointer = undefined;
+    this.gesture?.abort(); this.gesture = undefined;
+    if (pointer !== undefined && this.content.native?.scroll.hasPointerCapture(pointer)) this.content.native.scroll.releasePointerCapture(pointer);
+    this.annotations?.cancel();
+  }
+  private contentPointer = (event: PointerEvent): void => {
+    const native = this.content.native!; this.context.host.select(this.spec); event.stopPropagation();
+    if (event.button !== 0 || event.target instanceof Element && event.target.closest('a, button, input, select, textarea, summary, [contenteditable=\"true\"]') || this.state.selection && !this.annotations?.active) return;
+    if (!event.isPrimary) return;
+    const start = this.local(event.clientX, event.clientY); if (!start) return;
+    event.preventDefault(); this.cancelContentGesture(); this.pointer = event.pointerId; this.gesture = new AbortController();
+    const signal = this.gesture.signal; let previous = start;
+    const marking = this.annotations?.active === true;
+    if (marking) this.annotations!.begin(start.x, start.y);
+    native.scroll.setPointerCapture(event.pointerId);
+    window.addEventListener('pointermove', move => {
+      if (move.pointerId !== this.pointer) return;
+      move.preventDefault(); move.stopImmediatePropagation();
+      const point = this.local(move.clientX, move.clientY); if (!point) return;
+      if (marking) this.annotations!.move(point.x, point.y);
+      else { native.scroll.scrollLeft += previous.x - point.x; native.scroll.scrollTop += previous.y - point.y; }
+      previous = point;
+    }, {capture: true, passive: false, signal});
+    window.addEventListener('pointerup', up => {
+      if (up.pointerId !== this.pointer) return;
+      up.preventDefault(); up.stopImmediatePropagation(); if (marking) this.annotations!.end(); else this.readingChanged(); this.cancelContentGesture();
+    }, {capture: true, signal});
+    window.addEventListener('pointercancel', cancel => { if (cancel.pointerId === this.pointer) this.cancelContentGesture(); }, {capture: true, signal});
+    native.scroll.addEventListener('lostpointercapture', () => this.cancelContentGesture(), {once: true, signal});
+  };
+  private contentWheel = (event: WheelEvent): void => {
+    event.stopPropagation();
+    if (event.defaultPrevented) return;
+    event.preventDefault();
+    const native = this.content.native!; const unit = event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? native.scroll.clientHeight : 1;
+    native.scroll.scrollLeft += event.deltaX * unit; native.scroll.scrollTop += event.deltaY * unit;
+  };
+  private local(x: number, y: number): {x: number; y: number} | undefined {
+    const scroll = this.content.native!.scroll;
+    if (this.mode !== 'spatial') { const rect = scroll.getBoundingClientRect(); return {x: x - rect.left, y: y - rect.top}; }
+    const rect = this.context.host.root.getBoundingClientRect();
+    this.ray.setFromCamera(this.rayPointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2), this.context.viewer.activeCamera);
+    this.object.updateWorldMatrix(true, false);
+    this.surfacePlane.setComponents(0, 0, 1, 0).applyMatrix4(this.object.matrixWorld);
+    const point = this.ray.ray.intersectPlane(this.surfacePlane, this.surfacePoint); if (!point) return;
+    this.object.worldToLocal(point);
+    let left = 0, top = 0, element: HTMLElement | null = scroll;
+    while (element && element !== this.wrapper) { left += element.offsetLeft; top += element.offsetTop; element = element.offsetParent as HTMLElement | null; }
+    return {x: point.x + this.wrapper.clientWidth / 2 - left, y: -point.y + this.wrapper.clientHeight / 2 - top};
   }
   get ready(): Promise<void> { return this.content.ready; }
   get bounds(): THREE.Box3 {
@@ -576,27 +808,75 @@ class SurfaceRuntime implements ComponentRuntime {
   setVisible(visible: boolean): void { this.object.visible = visible; }
   setOpacity(opacity: number): void { this.element.style.opacity = String(opacity); }
   setLabel(label: string): void {
-    this.element.querySelector<HTMLElement>('.component-handle > span')!.textContent = label;
-    this.element.querySelector<HTMLElement>('.component-handle')!.title = label;
-    this.element.querySelector<HTMLButtonElement>('.component-enter')!.setAttribute('aria-label', `选中 ${label}，双击展开`);
+    this.header.querySelector<HTMLElement>('span')!.textContent = label; this.header.title = label;
+    this.body.querySelector<HTMLButtonElement>('.component-enter')?.setAttribute('aria-label', `选中 ${label}，双击展开`);
+    this.expand.setAttribute('aria-label', this.mode === 'spatial' ? `全屏 ${label}` : '返回场景');
   }
   occludedAt(x: number, y: number): boolean {
     if (this.mode !== 'spatial') return false;
     const rect = this.context.host.root.getBoundingClientRect();
-    const ray = new THREE.Raycaster(); ray.setFromCamera(new THREE.Vector2((x-rect.left)/rect.width*2-1, 1-(y-rect.top)/rect.height*2), this.context.viewer.activeCamera);
-    const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,0,1), -this.object.position.z), new THREE.Vector3());
+    this.ray.setFromCamera(this.rayPointer.set((x-rect.left)/rect.width*2-1, 1-(y-rect.top)/rect.height*2), this.context.viewer.activeCamera);
+    this.object.updateWorldMatrix(true, false);
+    this.surfacePlane.setComponents(0, 0, 1, 0).applyMatrix4(this.object.matrixWorld);
+    const point = this.ray.ray.intersectPlane(this.surfacePlane, this.surfacePoint);
     return !!point && this.context.viewer.geometryOccludes(x, y, point.toArray() as Vec3);
   }
   select(): void { this.element.classList.add('selected'); }
   focus(): void { this.context.viewer.focusBounds(this.bounds); }
+  preparePresentation(mode?: Presentation): boolean {
+    this.cancelContentGesture();
+    const reading = this.pendingReading ?? this.content.native?.capture();
+    if (this.hasNative && !updateContentState(this.state, {...(reading ? {reading} : {}), ...(mode ? {presentation: mode} : {})}, this.content.element)) return false;
+    if (reading) this.pendingReading = reading;
+    return true;
+  }
   setPresentation(mode: Presentation): void {
-    this.mode = mode; this.context.viewer.invalidate(); this.element.classList.toggle('expanded', mode !== 'spatial');
-    this.content.element.inert = mode === 'spatial';
+    if (!this.preparePresentation(mode)) return;
+    this.mode = mode;
+    this.context.viewer.invalidate(); this.element.classList.toggle('expanded', mode !== 'spatial');
+    this.expand.textContent = mode === 'spatial' ? '全屏' : '返回'; this.expand.setAttribute('aria-label', mode === 'spatial' ? `全屏 ${this.spec.label}` : '返回场景');
+    this.content.element.inert = !this.hasNative && mode === 'spatial';
     if (mode === 'spatial') moveElement(this.wrapper, this.element);
-    this.content.present?.(mode);
+    this.content.present?.(mode); this.settle(); this.changed();
+  }
+  private settle(): void {
+    if (this.settleFrame) cancelAnimationFrame(this.settleFrame);
+    // Wait for the final ResizeObserver delivery and one stable painted layout.
+    this.settleFrame = requestAnimationFrame(() => {
+      this.settleFrame = requestAnimationFrame(() => {
+        this.settleFrame = 0; const native = this.content.native;
+        if (native && this.pendingReading && native.scroll.clientWidth && native.scroll.clientHeight) {
+          native.restore(this.pendingReading); this.pendingReading = undefined;
+        }
+        this.annotations?.refresh();
+        if (this.contentReady) this.initializingContent = false;
+      });
+    });
+  }
+  updateScreenScale(camera: THREE.Camera, width: number, height: number): void {
+    if (!this.hasNative) return;
+    let scale = 1;
+    if (this.mode === 'spatial') {
+      this.object.updateWorldMatrix(true, false);
+      this.object.localToWorld(this.projectedOrigin.set(0, 0, 0)).project(camera);
+      this.object.localToWorld(this.projectedX.set(1, 0, 0)).project(camera);
+      this.object.localToWorld(this.projectedY.set(0, 1, 0)).project(camera);
+      const x = Math.hypot((this.projectedX.x - this.projectedOrigin.x) * width / 2, (this.projectedX.y - this.projectedOrigin.y) * height / 2);
+      const y = Math.hypot((this.projectedY.x - this.projectedOrigin.x) * width / 2, (this.projectedY.y - this.projectedOrigin.y) * height / 2);
+      scale = Math.min(8, Math.max(.5, 1 / Math.max(.001, Math.min(x, y))));
+    }
+    if (Math.abs(scale - this.screenScale) < .01) return;
+    if (!this.preparePresentation()) return;
+    this.screenScale = scale; this.element.style.setProperty('--content-ui-scale', String(scale));
+    this.settle();
   }
   private size(): void { const [w,h] = this.spec.size ?? [110,70]; this.wrapper.style.width = '800px'; this.wrapper.style.height = `${800 * h / w}px`; this.object.scale.setScalar(w / 800); this.context.viewer.invalidate(); }
-  dispose(): void { this.content.dispose(); this.object.removeFromParent(); this.wrapper.remove(); this.element.remove(); }
+  dispose(): void {
+    this.cancelContentGesture(); if (this.settleFrame) cancelAnimationFrame(this.settleFrame); this.resize?.disconnect(); this.annotations?.dispose();
+    const native = this.content.native; native?.scroll.removeEventListener('pointerdown', this.contentPointer); native?.scroll.removeEventListener('wheel', this.contentWheel);
+    native?.scroll.removeEventListener('dblclick', this.contentDoubleClick); this.content.element.removeEventListener('contentstatechange', this.nativeStateChanged);
+    document.removeEventListener('pointerdown', this.dismissMenu); this.content.dispose(); this.object.removeFromParent(); this.wrapper.remove(); this.element.remove();
+  }
 }
 function button(text: string, action: () => void): HTMLButtonElement { const button = document.createElement('button'); button.type = 'button'; button.textContent = text; button.onclick = action; return button; }
 function moveElement(parent: HTMLElement, element: HTMLElement): void {

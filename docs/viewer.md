@@ -41,10 +41,23 @@ not duplicate visibility with a Solo mode.
 
 ## Reading documents and other surfaces
 
-Click a surface once to select it, then double-click or press Enter to expand
-and interact. Escape or **返回场景** returns to the same layout. Expanded content
-stays fully readable regardless of its spatial opacity. HTML and Perfetto own
-keyboard input inside their frames; the return button remains available outside.
+Text, Markdown, JSON, images and vector diagrams are interactive inside the
+spatial scene. Drag or scroll the body to read; one finger scrolls and two fingers
+navigate the spatial camera. Body gestures never become camera gestures at a
+scroll boundary. Titles and empty scene space retain camera navigation.
+
+Use **全屏**, or double-click noninteractive body space or the title to expand.
+Escape or **返回场景** returns to the same source target, including reading
+continued in the expanded view and layout changes on another device. The content
+is the same DOM, not a second preview. HTML and Perfetto retain their isolated
+frame interaction after expansion.
+
+**更多 → 选择文字** enables normal selection/copy. The same menu offers focus,
+content annotation, screen brush, image/diagram zoom and genuine diagram groups.
+Content marks attach to source text, image coordinates or semantic graph targets;
+camera navigation does not erase them. While annotating, arrows position the
+cursor and Enter creates a point or completes line endpoints; Escape closes the
+annotation tools. Names, colors, delete, undo and redo are contextual controls.
 
 Surface sizes and entity positions come from the share configuration. Dragging a
 surface title navigates the scene; it does not move or resize the surface.
@@ -53,7 +66,10 @@ See [components and layout](components.md#groups-and-layout).
 On macOS, Cmd+C copies an image link and Cmd+Shift+C copies a view link.
 Use Ctrl on other desktop systems. Text selections and editable fields retain
 their normal copy behavior. Sharing preserves camera, labels, positions, surface
-sizes, visibility, opacity and annotations. See [links and lifetimes](cli.md#links-and-lifetimes).
+sizes, visibility, opacity, source-anchored reading and content annotations.
+Screen brush remains a distinct temporary view annotation: camera changes or
+content scrolling, zoom, layer changes and reading-window changes clear it.
+See [links and lifetimes](cli.md#links-and-lifetimes).
 
 The scene list opens by default when the viewport is at least 1100 pixels wide
 and 600 pixels high. Hiding an entity preserves its opacity setting. Raising

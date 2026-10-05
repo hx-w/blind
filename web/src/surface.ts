@@ -41,6 +41,7 @@ export class SurfaceEditor {
   private gesture?: { id: number; before: Snapshot; x: number; y: number; moving?: number; markId?: string; selectionOnly?: boolean; changed: boolean; dragged?: boolean };
   private status = '';
   private pending?: {id:number; x:number; y:number; up:boolean; samples:Array<[number,number]>};
+  private suspended?: {mode: Mode; selected?: string; screen?: number};
 
   constructor(private viewer: MeshViewer, private markup: MarkupCanvas, private shell: HTMLElement,
     private callbacks: { toast: (message: string) => void; change: () => void }) {
@@ -200,6 +201,19 @@ export class SurfaceEditor {
   }
   private get current(): SurfaceAnnotation | undefined { return this.viewer.annotations.find(mark => mark.id === this.selected); }
   get isActive(): boolean { return this.active; }
+  suspend(): void {
+    if (!this.active) return;
+    this.suspended = {mode: this.mode, selected: this.selected, screen: this.selectedScreen};
+    this.exit();
+  }
+  resume(): void {
+    const saved = this.suspended;
+    if (!saved) return;
+    this.suspended = undefined;
+    void this.enter();
+    this.mode = saved.mode; this.selected = saved.selected; this.selectedScreen = saved.screen;
+    this.sync();
+  }
   setExternalScreenMarkup(external: boolean): void { this.externalScreenMarkup=external; this.sync(); }
   async enter(id?: string): Promise<void> {
     this.active = true;

@@ -1,0 +1,10 @@
+.component-content.component-diagram { display: flex; flex-direction: column; overflow: hidden; }
+.diagram-viewport { position: relative; flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; background: #fff; color: #222; cursor: grab; touch-action: pan-x pan-y; user-select: none; }
+.diagram-viewport.diagram-selectable { cursor: default; user-select: text; }
+.diagram-viewport:focus-visible, .markdown-diagram:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.diagram-canvas { padding: 24px; box-sizing: border-box; }
+.diagram-canvas > svg { display: block; flex: none; overflow: visible; max-width: none; }
+.markdown-diagram { margin: 0 0 1em; width: max-content; max-width: none; overflow: visible; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-xs); background: #fff; color: #222; }
+.markdown-diagram > svg { display: block; max-width: none; }
+.diagram-error { padding: 16px; color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.diagram-render-mount { position: fixed; left: -100000px; top: 0; width: 2000px; visibility: hidden; pointer-events: none; }

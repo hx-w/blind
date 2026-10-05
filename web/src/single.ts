@@ -126,6 +126,7 @@ if (embedded && sceneId) {
   window.addEventListener('focusin', focusScene);
   window.addEventListener('keydown', event => {
     if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'c' || event.altKey || event.repeat) return;
+    if (window.getSelection()?.toString()) return;
     if (event.target instanceof HTMLElement && event.target.closest('input,textarea,select,[contenteditable],dialog[open]')) return;
     event.preventDefault();
     parent.postMessage({type:'blind:scene-shortcut', id:sceneId, kind:event.shiftKey ? 'view' : 'image'}, location.origin);
@@ -139,8 +140,12 @@ if (embedded && sceneId) {
       return;
     }
     if (!sceneReady) return;
-    if (command === 'activate') document.documentElement.classList.add('embedded-active');
-    if (command === 'deactivate') { document.documentElement.classList.remove('embedded-active'); section.deactivate(); surface.exit(); saveEmbeddedState(); }
+    if (command === 'activate') {
+      document.documentElement.classList.add('embedded-active'); surface.resume();
+      void components?.ready().catch(() => {});
+      parent.postMessage({type:'blind:scene-tool-mode', id:sceneId, annotation:surface.isActive}, location.origin);
+    }
+    if (command === 'deactivate') { document.documentElement.classList.remove('embedded-active'); section.deactivate(); surface.suspend(); saveEmbeddedState(); }
     if (command === 'fit') meshViewer.fitAll();
     if (command === 'details') components?.openInfo();
     if (command === 'render') setObserveToolbar(true);
@@ -234,6 +239,12 @@ async function start(): Promise<void> {
     components = new ComponentViewer(root, meshViewer, scene);
     components.onSelect = () => syncSceneControls();
     components.onChange = () => syncSceneControls();
+    components.onContentViewChange = invalidateMarkupForViewChange;
+    components.onScreenAnnotation = () => {
+      components?.closeContentAnnotation(); components?.returnToScene();
+      setObserveToolbar(false); section.close(); void surface.enter();
+    };
+    if (!exportMode) void components.ready().catch(() => {});
     window.addEventListener('pagehide', event => { if (!event.persisted) components?.dispose(); });
     markup.load(scene.state.strokes ?? []);
     surface.load();
@@ -412,7 +423,12 @@ document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((butto
 axesToggle.addEventListener('change', () => meshViewer.setAxes(axesToggle.checked));
 lightToggle.addEventListener('change', () => meshViewer.setBackground(lightToggle.checked ? 'light' : 'dark'));
 
-brushTool.addEventListener('click', () => { setObserveToolbar(false); section.close(); void surface.enter(); });
+brushTool.addEventListener('click', () => {
+  setObserveToolbar(false); section.close();
+  if (components?.annotateContent()) { surface.exit(); return; }
+  components?.closeContentAnnotation();
+  void surface.enter();
+});
 $('#share-view').addEventListener('click', async () => {
   if (!token) return;
   const button = $('#share-view') as HTMLButtonElement; button.disabled = true; button.classList.add('working');

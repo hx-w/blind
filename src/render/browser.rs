@@ -167,7 +167,7 @@ struct Cdp {
 }
 fn auto_attach() -> Value {
     json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,
-        "filter":[{"type":"iframe","exclude":false},{"exclude":true}]})
+        "filter":[{"type":"iframe","exclude":false},{"type":"worker","exclude":false},{"exclude":true}]})
 }
 impl Cdp {
     async fn send(&mut self, method: &str, params: Value, session: Option<&str>) -> Result<u64> {
@@ -201,7 +201,8 @@ impl Cdp {
                 if let Some(initializing) = self.pending.remove(&id) {
                     ensure!(
                         value.get("error").is_none(),
-                        "browser request isolation failed"
+                        "browser request isolation failed: {}",
+                        value["error"]
                     );
                     if let Some(session) = initializing {
                         let remaining = self
@@ -244,21 +245,34 @@ impl Cdp {
                     let id = self.send(method, arguments, Some(session)).await?;
                     self.pending.insert(id, None);
                 }
-                Some("Target.attachedToTarget") if params["targetInfo"]["type"] == "iframe" => {
-                    // Cross-origin/opaque iframe renderers may live in separate
-                    // processes. Pause them until interception is installed too.
+                Some("Target.attachedToTarget")
+                    if matches!(
+                        params["targetInfo"]["type"].as_str(),
+                        Some("iframe" | "worker")
+                    ) =>
+                {
+                    // Bundled workers need no network after their entry script
+                    // loads. Workers lack Fetch; deny all their network requests.
                     let session = params["sessionId"]
                         .as_str()
-                        .context("missing child frame session")?
+                        .context("missing child render session")?
                         .to_owned();
-                    self.initializing.insert(session.clone(), 2);
-                    for (method, args) in [
-                        (
-                            "Fetch.enable",
-                            json!({"patterns":[{"urlPattern":"*","requestStage":"Request"}]}),
-                        ),
-                        ("Target.setAutoAttach", auto_attach()),
-                    ] {
+                    let commands = if params["targetInfo"]["type"] == "worker" {
+                        [
+                            ("Network.enable", json!({})),
+                            ("Network.setBlockedURLs", json!({"urls":["*"]})),
+                        ]
+                    } else {
+                        [
+                            (
+                                "Fetch.enable",
+                                json!({"patterns":[{"urlPattern":"*","requestStage":"Request"}]}),
+                            ),
+                            ("Target.setAutoAttach", auto_attach()),
+                        ]
+                    };
+                    self.initializing.insert(session.clone(), commands.len());
+                    for (method, args) in commands {
                         let id = self.send(method, args, Some(&session)).await?;
                         self.pending.insert(id, Some(session.clone()));
                     }
@@ -458,7 +472,7 @@ mod tests {
     /// deliberately permissive CSP so this tests CDP isolation independently.
     #[tokio::test]
     #[ignore = "requires Chrome/Chromium"]
-    async fn chromium_blocks_frame_requests_and_redirects() {
+    async fn chromium_blocks_frame_worker_requests_and_redirects() {
         use std::sync::{
             Arc,
             atomic::{AtomicUsize, Ordering},
@@ -493,7 +507,8 @@ mod tests {
                 let path = request.split_whitespace().nth(1).unwrap_or("");
                 let (status, headers, body) = match path {
                     "/s/test?render=1" => ("200 OK", String::new(), r#"<!doctype html><script>
-                    let initialized=0; addEventListener('message',e=>{if(e.data==='attempted' && ++initialized===2)setTimeout(()=>document.documentElement.dataset.renderStatus='ready',700)});
+                    let initialized=0; addEventListener('message',e=>{if(e.data==='attempted' && ++initialized===3)setTimeout(()=>document.documentElement.dataset.renderStatus='ready',700)});
+                    new Worker('/assets/isolation.js').onmessage=()=>postMessage('attempted','*');
                     </script><iframe sandbox="allow-scripts" src="/api/v1/scenes/test/renderers/outer"></iframe>"#.to_owned()),
                     "/api/v1/scenes/test/renderers/outer" => ("200 OK", "Content-Security-Policy: sandbox allow-scripts\r\n".into(), format!(r#"<!doctype html><script>
                     new Image().src='{external}/image'; fetch('{external}/fetch').catch(()=>{{}});
@@ -502,14 +517,22 @@ mod tests {
                     parent.postMessage('attempted','*');
                     </script><iframe src="{local_origin}/api/v1/scenes/test/renderers/nested"></iframe>"#)),
                     "/api/v1/scenes/test/renderers/nested" => ("200 OK", "Content-Security-Policy: sandbox allow-scripts\r\n".into(), format!(r#"<!doctype html><script>new Image().src='{external}/nested';parent.parent.postMessage('attempted','*');</script>"#)),
+                    "/assets/isolation.js" => ("200 OK", String::new(), format!(
+                        "Promise.allSettled([fetch('{external}/worker'),fetch('{local_origin}/private-worker')]).then(()=>postMessage('attempted'));"
+                    )),
                     "/api/v1/scenes/test/attachments/0" => {
                         redirect_hits.fetch_add(1, Ordering::SeqCst);
                         ("302 Found", format!("Location: {external}/redirected\r\n"), String::new())
                     },
                     _ => { local_hits.fetch_add(1, Ordering::SeqCst); ("404 Not Found", String::new(), String::new()) }
                 };
+                let content_type = if path.ends_with(".js") {
+                    "application/javascript"
+                } else {
+                    "text/html"
+                };
                 let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",
                     body.len()
                 );
                 let _ = stream.write_all(response.as_bytes()).await;

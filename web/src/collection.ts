@@ -15,19 +15,28 @@ const observeTrigger = originalDock.querySelector<HTMLButtonElement>('#observe-t
 const observeBack = originalDock.querySelector<HTMLButtonElement>('#observe-back')!;
 originalShare.setAttribute('aria-label', '分享全部场景');
 const shell = document.createElement('div'); shell.className = 'app-shell collection-shell';
-const tabs = document.createElement('nav'); tabs.className = 'collection-tabs'; tabs.setAttribute('aria-label', '场景');
+const sceneTabs = document.createElement('nav'); sceneTabs.className = 'collection-scene-tabs'; sceneTabs.setAttribute('role', 'tablist'); sceneTabs.setAttribute('aria-label', '场景切换');
+const tabs = new Map<string, HTMLButtonElement>();
+const expandButtons = new Map<string, HTMLButtonElement>();
+sceneTabs.addEventListener('keydown', event => {
+  const index = overview.scenes.findIndex(scene => scene.id === active);
+  const next = event.key === 'ArrowRight' ? (index + 1) % tabs.size : event.key === 'ArrowLeft' ? (index + tabs.size - 1) % tabs.size : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.size - 1 : undefined;
+  if (next === undefined) return;
+  event.preventDefault(); tabs.get(overview.scenes[next].id)?.focus();
+});
 const stage = document.createElement('main'); stage.className = 'collection-stage'; stage.setAttribute('aria-label', '多场景视图');
 const inkCanvas = document.createElement('canvas'); inkCanvas.className = 'markup-canvas collection-markup'; inkCanvas.setAttribute('aria-label', '全部场景屏幕画笔');
 const inkBadges = document.createElement('div'); inkBadges.className = 'collection-ink-badges';
 stage.append(inkCanvas, inkBadges);
 const dialog = document.createElement('dialog'); dialog.className = 'collection-share';
 const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status');
-shell.append(tabs, stage, originalDock, dialog, toast); document.body.replaceChildren(shell);
+shell.append(sceneTabs, stage, originalDock, dialog, toast); document.body.replaceChildren(shell);
 installIcons(shell);
 
 let overview: CollectionOverview;
 let active = new URLSearchParams(location.search).get('scene') ?? '';
-let mode: 'split' | 'tabs' = 'tabs';
+let mode: 'split' | 'single' = 'single';
+let maximized = false;
 let cards = new Map<string, HTMLElement>();
 let frames = new Map<string, HTMLIFrameElement>();
 let ready = new Set<string>();
@@ -35,7 +44,9 @@ let snapshotSequence = 0;
 let copySequence = 0;
 let shareLinks: ShareResponse | undefined;
 let toastTimer = 0;
-let layoutQueue = Promise.resolve();
+let layoutFrame = 0;
+let activated: string | undefined;
+const observeStates = new Map<string, {open: boolean; category: string | null}>();
 let toolbar: HTMLElement | undefined;
 type AnnotationMode = 'select' | 'point' | 'line' | 'screen';
 let annotationMode: AnnotationMode | null = null;
@@ -45,6 +56,7 @@ let color = '#ff6b5e';
 let selectedStroke: number | undefined;
 let strokeBefore: ScreenStroke[] | undefined;
 let strokeLayout: CollectionLayout | undefined;
+let parkedViewChanged = false;
 const strokeHistory: ScreenStroke[][] = [];
 const strokeFuture: ScreenStroke[][] = [];
 const markup = new MarkupCanvas(inkCanvas);
@@ -53,7 +65,7 @@ markup.onStrokeEnd = () => {
   if (strokeBefore && markup.exportStrokes().length > strokeBefore.length) {
     strokeHistory.push(strokeBefore); if (strokeHistory.length > 40) strokeHistory.shift(); strokeFuture.length = 0;
     selectedStroke = markup.exportStrokes().length - 1;
-    strokeLayout ??= currentLayout();
+    strokeLayout = captureLayout();
   }
   strokeBefore = undefined; syncToolbar();
 };
@@ -63,24 +75,31 @@ function sendSurface(control: string, value?: string): void {
   frames.get(active)?.contentWindow?.postMessage({type:'blind:scene-command', id:active, command:'surface-control', control, value}, location.origin);
 }
 function sendScope(id: string): void {
-  frames.get(id)?.contentWindow?.postMessage({type:'blind:scene-command',id,command:'screen-scope',value:mode==='tabs'?'scene':'global'},location.origin);
+  frames.get(id)?.contentWindow?.postMessage({type:'blind:scene-command',id,command:'screen-scope',value:mode==='single'?'scene':'global'},location.origin);
 }
-function currentLayout(): CollectionLayout {
-  if (mode === 'tabs') {
-    const columns=Math.ceil(Math.sqrt(overview.scenes.length));
-    const rows=Math.ceil(overview.scenes.length/columns);
-    const rect=stage.getBoundingClientRect();
-    let tileWidth=Math.round(rect.width), tileHeight=Math.round(rect.height)+35;
-    const extent=(width:number,height:number) => ({width:16+columns*width+(columns-1)*8,height:16+rows*height+(rows-1)*8});
-    const full=extent(tileWidth,tileHeight);
-    const scale=Math.min(1,4096/full.width,4096/full.height,Math.sqrt(16_000_000/(full.width*full.height)));
-    tileWidth=Math.max(160,Math.floor(tileWidth*scale));tileHeight=Math.max(135,Math.floor(tileHeight*scale));
+function captureLayout(): CollectionLayout {
+  const rect = stage.getBoundingClientRect();
+  if (mode === 'single') {
+    const columns = Math.ceil(Math.sqrt(overview.scenes.length));
+    const rows = Math.ceil(overview.scenes.length / columns);
+    let tileWidth = Math.round(rect.width), tileHeight = Math.round(rect.height);
+    const extent = (width:number, height:number) => ({width:columns*width+columns-1, height:rows*height+rows-1});
+    const full = extent(tileWidth, tileHeight);
+    const scale = Math.min(1,4096/full.width,4096/full.height,Math.sqrt(16_000_000/(full.width*full.height)));
+    tileWidth = Math.max(160,Math.floor(tileWidth*scale)); tileHeight = Math.max(135,Math.floor(tileHeight*scale));
     return {columns,...extent(tileWidth,tileHeight)};
   }
-  const rect=stage.getBoundingClientRect();
   return {width:Math.round(rect.width),height:Math.round(rect.height),columns:getComputedStyle(stage).gridTemplateColumns.split(' ').length};
 }
 function rememberStrokes(): void {strokeHistory.push(markup.exportStrokes()); if (strokeHistory.length > 40) strokeHistory.shift(); strokeFuture.length = 0;}
+function invalidateCollectionInk(): void {
+  if (!markup.hasStrokes && !strokeHistory.length && !strokeFuture.length && !strokeBefore) return;
+  selectedStroke = undefined; strokeBefore = undefined; strokeLayout = undefined;
+  parkedViewChanged = false;
+  strokeHistory.length = 0; strokeFuture.length = 0; shareLinks = undefined;
+  markup.clear(); syncToolbar();
+  notify('视角已改变，批注已隐藏');
+}
 function exitAnnotation(): void {
   markup.finishActive(); markup.setEnabled(false); annotationMode = null;
   shell.classList.remove('annotation-mode');
@@ -240,10 +259,8 @@ function beginAnnotation(): void {
   if (!ready.has(active)) { notify('场景尚未就绪，无法标注'); return; }
   ensureToolbar(active);
   if (!toolbar) { notify('标注工具暂时不可用'); return; }
-  annotationMode='point'; shell.classList.add('annotation-mode');
-  toolbar.querySelector('.surface-actions')?.append(originalShare);
   sendScope(active);
-  command(active,'annotate'); syncToolbar();
+  command(active,'annotate');
 }
 
 function sessionKey(id: string): string { return `blind.collection.${token}.${id}`; }
@@ -280,78 +297,108 @@ function readSaved(id: string): SceneUpdate | null {
   try { return JSON.parse(sessionStorage.getItem(sessionKey(id)) ?? 'null') as SceneUpdate | null; }
   catch { return null; }
 }
-async function unmount(id: string): Promise<void> {
-  if (!frames.has(id)) return;
-  await snapshot(id);
-  frames.get(id)!.remove(); frames.delete(id); ready.delete(id);
-}
 function fitGrid(): number | null {
   const count = overview.scenes.length;
-  const style = getComputedStyle(stage);
-  const width = stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-  const height = stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-  const candidates = Array.from({length: count}, (_, i) => i + 1).filter(cols => {
-    const rows = Math.ceil(count / cols);
-    return (width - (cols - 1) * 8) / cols >= 480 && (height - (rows - 1) * 8) / rows >= 396;
+  const width = stage.clientWidth, height = stage.clientHeight;
+  const candidates = Array.from({length:count},(_,i)=>i+1).filter(columns => {
+    const rows = Math.ceil(count / columns);
+    return (width-columns+1)/columns >= 480 && (height-rows+1)/rows >= 360;
   });
-  return candidates.sort((a, b) => {
-    const score = (cols: number) => {
-      const rows = Math.ceil(count / cols);
-      const paneWidth = (width - (cols - 1) * 8) / cols;
-      const paneHeight = (height - (rows - 1) * 8) / rows - 36;
-      return Math.min(paneWidth / paneHeight, paneHeight / paneWidth);
-    };
-    return score(b) - score(a);
-  })[0] ?? null;
+  const score = (columns:number) => {
+    const rows = Math.ceil(count / columns);
+    const paneWidth = (width-columns+1)/columns, paneHeight = (height-rows+1)/rows;
+    return Math.min(paneWidth/paneHeight,paneHeight/paneWidth);
+  };
+  return candidates.sort((a,b)=>score(b)-score(a))[0] ?? null;
 }
-async function layout(): Promise<void> {
-  const cols = fitGrid();
-  const nextMode = cols ? 'split' : 'tabs';
-  if (nextMode !== mode) {
-    exitAnnotation();
-    for (const id of [...frames.keys()]) await unmount(id);
+function layout(): void {
+  for (const card of cards.values()) if (!card.hidden) {
+    const bounds = card.getBoundingClientRect();
+    card.style.setProperty('--park-width', `${bounds.width || stage.clientWidth}px`);
+    card.style.setProperty('--park-height', `${bounds.height || stage.clientHeight}px`);
   }
+  const columns = maximized ? null : fitGrid();
+  const nextMode = columns ? 'split' : 'single';
   mode = nextMode;
-  shell.classList.toggle('collection-split', mode === 'split'); shell.classList.toggle('collection-tabbed', mode === 'tabs');
-  tabs.hidden = mode === 'split';
-  stage.style.gridTemplateColumns = mode === 'split' ? `repeat(${cols}, minmax(0, 1fr))` : 'minmax(0, 1fr)';
+  shell.classList.toggle('collection-split',mode==='split'); shell.classList.toggle('collection-single',mode==='single');
+  shell.classList.toggle('collection-maximized', maximized);
+  sceneTabs.hidden = mode === 'split' || overview.scenes.length < 2;
+  const rows = mode === 'split' ? Math.ceil(overview.scenes.length / columns!) : 1;
+  stage.style.gridTemplateColumns = `repeat(${columns ?? 1},minmax(0,1fr))`;
+  stage.style.gridTemplateRows = `repeat(${rows},minmax(0,1fr))`;
   for (const scene of overview.scenes) {
-    const visible = mode === 'split' || scene.id === active;
-    cards.get(scene.id)!.hidden = !visible;
-    if (visible) mount(scene.id); else await unmount(scene.id);
+    const card = cards.get(scene.id)!;
+    // Park, rather than destroy, inactive frames at their last viewport size.
+    // Camera, reading, quality, selection and local undo stacks stay in that scene.
+    card.hidden = mode === 'single' && scene.id !== active;
+    card.inert = card.hidden;
+    const expand = expandButtons.get(scene.id);
+    if (expand) {
+      const expanded = maximized && scene.id === active;
+      expand.setAttribute('aria-expanded', String(expanded));
+      expand.setAttribute('aria-label', expanded ? '还原分屏' : `放大 ${scene.title}`);
+      expand.title = expanded ? '还原分屏' : '放大场景';
+    }
+    mount(scene.id);
+    if (ready.has(scene.id)) sendScope(scene.id);
   }
-  updateFocus();
-  renderInkBadges();
+  // Global ink belongs to its captured split composition, not the temporary
+  // maximized/tab viewport. Keep it parked until that composition returns.
+  if (mode === 'split' && parkedViewChanged) invalidateCollectionInk();
+  if (mode === 'split' && strokeLayout) {
+    const current = captureLayout();
+    if (current.width !== strokeLayout.width || current.height !== strokeLayout.height || current.columns !== strokeLayout.columns)
+      invalidateCollectionInk();
+  }
+  markup.setEnabled(annotationMode==='screen' && mode==='split');
+  updateFocus(); renderInkBadges(); syncToolbar();
 }
-function scheduleLayout(): void { layoutQueue = layoutQueue.then(layout).catch(error => notify(String(error))); }
+function scheduleLayout(): void {
+  if (layoutFrame) return;
+  layoutFrame = requestAnimationFrame(() => {layoutFrame=0;layout();});
+}
 function updateFocus(): void {
-  for (const [id, card] of cards) {
-    card.classList.toggle('active', id === active);
-    card.querySelector('button')?.setAttribute('aria-pressed', String(id === active));
-    tabs.querySelector<HTMLButtonElement>(`[data-scene="${id}"]`)?.setAttribute('aria-selected', String(id === active));
-    if (ready.has(id)) command(id, id === active ? 'activate' : 'deactivate');
+  for (const [id,card] of cards) {
+    card.classList.toggle('active',id===active);
+    card.querySelector('.collection-scene-label')?.setAttribute('aria-pressed', String(id === active));
+    const tab = tabs.get(id);
+    if (tab) { tab.setAttribute('aria-selected', String(id === active)); tab.tabIndex = id === active ? 0 : -1; }
+  }
+  if (!sceneTabs.hidden) tabs.get(active)?.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  const title = overview.scenes.find(scene=>scene.id===active)?.title ?? '';
+  originalDock.setAttribute('aria-label',`${title} 场景查看工具`);
+  toolbar?.setAttribute('aria-label',`${title} 场景标注工具`);
+  if (activated !== active) {
+    if (activated) command(activated,'deactivate');
+    activated = undefined;
+    if (ready.has(active)) {activated=active;command(active,'activate');}
   }
 }
 function focus(id: string): void {
   if (!cards.has(id) || id === active) return;
+  observeStates.set(active,{open:observeOpen,category:activeObserveCategory});
+  exitAnnotation();
   active = id; shareLinks = undefined;
-  if (annotationMode) { markup.finishActive(); markup.setEnabled(false); }
+  const state = observeStates.get(id);
+  setObserveToolbar(state?.open ?? false,true);
+  activeObserveCategory = null; setObserveCategory(state?.category ?? null);
   syncObserveMode();
-  if (mode === 'tabs') scheduleLayout(); else updateFocus();
-  if (annotationMode && ready.has(id)) {
-    sendScope(id);
-    command(id,'annotate'); sendSurface('mode',annotationMode);
-    markup.setEnabled(annotationMode==='screen' && mode==='split'); syncToolbar();
-  }
+  if (mode === 'single') layout(); else updateFocus();
+}
+function toggleMaximized(id: string): void {
+  focus(id); sendSurface('done'); exitAnnotation();
+  maximized = !maximized; shareLinks = undefined;
+  layout(); expandButtons.get(active)?.focus({preventScroll: true});
 }
 window.addEventListener('message', event => {
   if (event.origin !== location.origin || !overview || !overview.scenes.some(scene => scene.id === event.data?.id)) return;
   const id = event.data.id as string;
   if (event.source !== frames.get(id)?.contentWindow) return;
   if (event.data.type === 'blind:scene-ready') {
-    ready.add(id); ensureToolbar(id); sendScope(id); command(id, id === active ? 'activate' : 'deactivate');
+    ready.add(id); ensureToolbar(id); sendScope(id);
+    if (id === active) updateFocus(); else command(id,'deactivate');
     if (id === active) syncObserveMode();
-    if (id === active && annotationMode) {command(id,'annotate');sendSurface('mode',annotationMode);syncToolbar();}
+    if (id === active && annotationMode) syncToolbar();
   }
   if (event.data.type === 'blind:scene-focus') focus(id);
   if (event.data.type === 'blind:scene-tool-mode' && id === active) {
@@ -364,9 +411,11 @@ window.addEventListener('message', event => {
     } else if (!event.data.annotation && annotationMode) exitAnnotation();
   }
   if (event.data.type === 'blind:scene-annotation-state' && id === active) syncToolbar();
-  if (event.data.type === 'blind:scene-view-change' && ready.has(id) && markup.hasStrokes) {
-    markup.clear(); selectedStroke=undefined; strokeHistory.length=0; strokeFuture.length=0;
-    notify('视角已改变，批注已隐藏');
+  if (event.data.type === 'blind:scene-view-change' && ready.has(id)) {
+    shareLinks = undefined;
+    if (cards.get(id)?.hidden) {
+      if (markup.hasStrokes || strokeHistory.length || strokeFuture.length || strokeBefore) parkedViewChanged = true;
+    } else invalidateCollectionInk();
   }
   if (event.data.type === 'blind:scene-error') notify(`${overview.scenes.find(scene => scene.id === id)?.title}：${event.data.message}`);
   if (event.data.type === 'blind:scene-shortcut' && id === active) void copyLink(event.data.kind as 'view' | 'image');
@@ -382,8 +431,10 @@ async function updates(): Promise<Record<string, SceneUpdate>> {
 }
 async function refreshLinks(origin?: string): Promise<ShareResponse> {
   markup.finishActive();
-  const layout=mode==='tabs' && markup.hasStrokes && strokeLayout ? strokeLayout : currentLayout();
-  const links = await shareCollection(token, active, await updates(), markup.exportStrokes(), layout, owner, origin);
+  const sceneUpdates = await updates();
+  if (parkedViewChanged) invalidateCollectionInk();
+  const layout=mode==='single' && markup.hasStrokes && strokeLayout ? strokeLayout : captureLayout();
+  const links = await shareCollection(token, active, sceneUpdates, markup.exportStrokes(), layout, owner, origin);
   shareLinks = links; return links;
 }
 async function copy(value: string): Promise<void> {
@@ -423,7 +474,7 @@ function showShare(links: ShareResponse): void {
     select.addEventListener('change', async () => { try { showShare(await refreshLinks(select.value)); } catch (error) { notify(String(error)); } }); dialog.append(select);
   }
   for (const [label, value] of [['全部场景视角链接', links.viewer_url], ['全部场景图片', links.image_url], ['完整信息', links.full_text]] as const) {
-    if (!value) continue;
+    if (!value || (label === '完整信息' && !overview.owner)) continue;
     const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
     button.addEventListener('click', async () => { await copy(value); dialog.close(); }); dialog.append(button);
   }
@@ -468,12 +519,25 @@ try {
   document.title = `${overview.title} · Blind`;
   stage.setAttribute('aria-label', `${overview.title} 多场景视图`);
   for (const scene of overview.scenes) {
-    const card = document.createElement('section'); card.className = 'collection-card'; card.dataset.scene = scene.id;
-    const header = document.createElement('button'); header.type = 'button'; header.className = 'collection-card-title'; header.textContent = scene.title;
-    header.addEventListener('click', () => focus(scene.id));
-    const viewport = document.createElement('div'); viewport.className = 'collection-viewport'; card.append(header, viewport); stage.append(card); cards.set(scene.id, card);
-    const tab = document.createElement('button'); tab.type = 'button'; tab.dataset.scene = scene.id; tab.setAttribute('role','tab'); tab.textContent = scene.title;
-    tab.addEventListener('click', () => focus(scene.id)); tabs.append(tab);
+    const card = document.createElement('section'); card.className = 'collection-card'; card.dataset.scene = scene.id; card.setAttribute('aria-label',scene.title);
+    card.id = `collection-scene-${scene.id}`;
+    const label = document.createElement('button'); label.type = 'button'; label.className = 'collection-scene-label'; label.title = scene.title;
+    const chip = document.createElement('span'); chip.className = 'collection-label-chip';
+    const name = document.createElement('span'); name.textContent = scene.title; chip.append(name); label.append(chip);
+    label.addEventListener('click',()=>focus(scene.id)); label.addEventListener('focus',()=>focus(scene.id));
+    card.addEventListener('pointerdown',()=>focus(scene.id));
+    const viewport = document.createElement('div'); viewport.className = 'collection-viewport'; card.append(label,viewport); stage.append(card); cards.set(scene.id,card);
+    if (overview.scenes.length > 1) {
+      const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'collection-scene-expand';
+      expand.setAttribute('aria-controls', card.id);
+      expand.innerHTML = '<i data-lucide="maximize-2"></i><i data-lucide="minimize-2"></i>';
+      expand.addEventListener('click', () => toggleMaximized(scene.id)); card.append(expand); expandButtons.set(scene.id, expand);
+      const tab = document.createElement('button'); tab.type = 'button'; tab.textContent = scene.title; tab.title = scene.title;
+      tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', card.id);
+      tab.addEventListener('click', () => focus(scene.id)); tab.addEventListener('focus', () => focus(scene.id));
+      sceneTabs.append(tab); tabs.set(scene.id, tab);
+    }
   }
+  installIcons(stage);
   scheduleLayout(); new ResizeObserver(() => {scheduleLayout();renderInkBadges();}).observe(stage);
 } catch (error) { notify(error instanceof Error ? error.message : '无法打开多场景'); }

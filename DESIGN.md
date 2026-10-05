@@ -171,8 +171,20 @@ their view-dependent behavior, with shared undo history cleared of obsolete view
 
 Screen brush strokes support the same editable names as surface marks; names survive undo, sharing, reopening, and PNG export. Unnamed strokes keep their numbered fallback.
 
-Component positions are fixed during review, including meshes, images, text and plugin surfaces. Preview and header drags navigate the camera; there are no position drag handles or Alt/arrow movement shortcuts. Explicit positions and automatic initial layout remain part of scene loading.
+Component positions are fixed during review, including meshes, images, text and plugin surfaces. Native document bodies own reading, selection and content marking; title and blank-scene drags navigate the camera. Opaque HTML/plugin previews retain scene gestures until expanded. There are no position drag handles or Alt/arrow movement shortcuts. Explicit positions and automatic initial layout remain part of scene loading.
 
 Spatial content keeps its native DOM opacity. Parallel XY content planes interleave with GPU-clipped geometry bands, copied through one WebGL renderer into canvas layers. Empty bands allocate no bitmap; hidden content stays connected to preserve plugin state. Pointer routing tests painted geometry coverage, including wireframe gaps, and preserves the full pointer lifecycle for mesh selection.
+
+Native content uses one DOM/SVG reading surface across spatial, focus and fullscreen.
+A 42px name row carries only fullscreen and overflow actions; selection, source-bound
+marks, zoom and actual diagram groups are contextual. Reading uses source-versioned
+line/block/pointer anchors, not copied scrollTop values. Content marks use text
+offsets or original visual coordinates and are separate from view-dependent screen ink.
+Collections use full-bleed panes, 1px dividers and overlaid names. Each pane has a
+42px top-right expand/restore button; an expanded scene fills the viewing area
+and top-left tabs switch between the mounted scenes. Restore returns to the
+responsive split layout; narrow screens also use tabs. Inactive scenes retain
+their last viewport size and independent state. Single-scene viewers have neither
+collection tabs nor pane expand/restore buttons.
 
 Global fit and mesh/component focus reset zoom and lens framing while preserving the current viewing direction and roll. Orthographic fit uses bounds projected onto the current camera axes, so rotated geometry fits the same way after either zooming in or out. New camera gestures cancel an unfinished fit transition.

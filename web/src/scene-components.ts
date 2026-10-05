@@ -20,7 +20,7 @@ export interface ComponentCapabilities {
   presentations: readonly Presentation[];
   movable: boolean;
   resizable: boolean;
-  /** The shell owns navigation in space; content owns input when expanded. */
+  /** Native body content owns reading; geometry and opaque previews own scene navigation. */
   input: Readonly<Record<Presentation, 'scene' | 'content'>>;
   /** Additional controls exposed only by geometric component definitions. */
   geometry?: 'mesh' | 'points';

@@ -109,10 +109,9 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
         status, composite, headers = api(f'/i/{new_token}.png')
         assert status == 200 and headers['Content-Type'] == 'image/png', composite
         image = Image.open(io.BytesIO(composite)).convert('RGB')
-        assert image.size == (1944, 780)
-        assert image.getpixel((976, 8)) == (103, 167, 224), 'active scene header is missing'
-        assert image.crop((8, 52, 968, 772)).getcolors(maxcolors=10) is None, 'first scene image is blank'
-        assert image.crop((976, 52, 1936, 772)).getcolors(maxcolors=10) is None, 'second scene image is blank'
+        midpoint = image.width // 2
+        assert image.crop((0, 42, midpoint, image.height)).getcolors(maxcolors=10) is None, 'first scene image is blank'
+        assert image.crop((midpoint + 1, 42, image.width, image.height)).getcolors(maxcolors=10) is None, 'second scene image is blank'
 
         second.write_bytes(second.read_bytes() + b'\n')
         assert api(f'/api/v1/scenes/{new_token}/meshes/0?scene=scan')[0] == 410

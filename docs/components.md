@@ -31,6 +31,8 @@ Explicit component selection always wins over filename inference.
 | `trace.json`, `tracing.json`, `*.trace.json` with Cyclops installed | `cyclops:trace` |
 | `.html`, `.htm` | `html` |
 | `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | `image` |
+| `.mmd`, `.mermaid` | `mermaid` |
+| `.dot`, `.gv` | `dot` (Graphviz) |
 
 Matching is case-insensitive and uses the source filename, including OSS keys.
 Unknown extensions require an explicit component. JSON is not guessed from its
@@ -47,9 +49,11 @@ blind share review.md --component text  # inspect the original syntax
 ```
 
 The `markdown` component renders headings, emphasis, lists, read-only task lists,
-quotes, fenced code, links and GitHub-style tables. It follows the Viewer theme
-and supports the same grouping, double-click expansion, sharing and PNG export
-as other surfaces. Code blocks and wide tables scroll within the document.
+quotes, fenced code, links and GitHub-style tables. `mermaid`, `dot`, `gv` and
+`graphviz` fences render real SVG diagrams. Documents follow the Viewer theme
+and support spatial reading, selection, content marks, fullscreen and PNG export.
+Wide code, tables and diagrams use the document's reading window rather than
+nested gesture owners.
 See [the example document](../tests/fixtures/review.md).
 
 Markdown must be UTF-8. Preview is limited to 1 MiB; larger documents show a
@@ -57,8 +61,54 @@ link to the original attachment. HTML is sanitized to document elements; scripts
 styles, frames and interactive forms are removed. HTTP(S) and mailto links open
 separately. Relative links and fragment navigation are not resolved. Only embedded
 base64 PNG/JPEG/GIF/WebP images render; remote images, sibling file assets and
-images that fail to decode are shown as alt text, keeping previews and isolated exports self-contained. Mermaid,
-math typesetting and code syntax highlighting are not included.
+images that fail to decode are shown as alt text, keeping reading and isolated
+exports self-contained. Math typesetting and code syntax highlighting are not included.
+
+## Native reading and diagrams
+
+Text, Markdown, JSON, images, Mermaid and DOT use native DOM/SVG in the same
+3D scene, not flattened screenshots or Mesh substitutes. Drag, wheel, touchpad
+and one-finger body gestures scroll content. Titles and scene background navigate
+the camera. A gesture stays with its original owner at content scroll boundaries;
+two fingers navigate the spatial camera.
+Ctrl/Meta+wheel zooms standalone diagrams around the reading target without also
+scrolling the content window or navigating the scene camera.
+
+The compact name row provides **全屏** and **更多** with 42px screen-space hit areas.
+Content mark dots and labels also compensate for CSS3D scale.
+The latter menu exposes selection,
+focus, content annotation and screen brush; image/diagram zoom and genuine graph
+groups appear only when relevant. **选择文字** enables native selection and normal
+copy. The source remains read-only and the entity position stays fixed.
+
+Spatial, focused and fullscreen presentations reparent the same content. Returning
+keeps the source target reached while reading, including after viewport reflow.
+Entity state binds reading and marks to a SHA-256 source identity: source lines
+and character offsets for text, blocks for Markdown, JSON pointers, original-image
+coordinates and semantic SVG node/edge/group targets. Inline Markdown images and
+diagrams also retain source-relative visual anchors.
+
+```sh
+blind share architecture.mmd
+blind share dependencies.dot review.md
+```
+
+Mermaid and Graphviz render locally with bundled libraries; Graphviz WASM requires
+no CDN or external service. Diagram sources must be UTF-8 and at most 2 MiB.
+DOT admits at most 1,000 distinct nodes and 10,000 expanded edge requests;
+duplicate strict edges and later subgraph additions count conservatively.
+It also limits input to 100,000 tokens, 64 nested scopes and 1,000 named subgraphs.
+One same-origin bundled worker runs at a time, with up to eight queued requests,
+a 20-second execution deadline and an 8 MiB SVG output limit. Disposing a surface
+cancels its queued or running DOT work. These bounds are not a total-memory sandbox.
+External images, active SVG and resource-bearing diagram styles are rejected.
+Syntax and complexity failures remain explicit and fail image export.
+
+Grouped standalone diagrams additionally offer **语义深度**: an orthographic
+projection of deterministic planes derived from real source groups, with
+cross-plane edges and semantic marks retained. The default is the complete flat
+SVG. Actual group focus, zoom and the selected depth presentation survive reshares
+and PNG export; this does not convert the document into editable 3D geometry.
 
 ## Groups and layout
 
@@ -97,8 +147,8 @@ its path for an additional instance. A scene may consist entirely of surfaces.
 
 The [Viewer guide](viewer.md) covers scene navigation, labels, visibility,
 opacity, surface expansion, annotations, observation tools and sections.
-Each component uses the same scene list and sharing controls; its renderer owns
-input only when expanded.
+Each component uses the same scene list and sharing controls. Native content owns
+body reading in every presentation; geometry and opaque previews retain scene navigation.
 
 ## Renderer contract
 
@@ -232,8 +282,8 @@ produce named warnings without discarding readable geometry.
 ## Image export and content boundaries
 
 PNG export uses the formal Viewer for scenes using the component contract,
-including their position, opacity, labels and plugin content. It awaits text/Markdown loads,
-image decode, HTML load, fonts and each visible plugin's `ready` message. Failed
+including their position, opacity, labels, reading window and content marks. It awaits
+text/Markdown loads, SVG diagram rendering, image decode, HTML load, fonts and each visible plugin's `ready` message. Failed
 or timed-out components fail export explicitly. Hidden components are not awaited.
 Geometry scenes without stored entities use the native renderer; component groups use the Viewer
 even when they contain only geometry, keeping automatic layout consistent.
@@ -242,7 +292,9 @@ Component-scene export requires Chrome/Chromium on the Server (included in the D
 image), or `BLIND_RENDER_BROWSER=/absolute/path/to/chromium`. It starts an isolated
 headless process with a temporary profile, bounded concurrency and a 75-second
 limit. Export requests are restricted to the current scene and embedded Viewer
-assets. The Docker deployment limits the whole service to 4 GiB; native Linux
+assets, including isolated frames. Bundled diagram workers are resumed with all
+subsequent network requests blocked; their renderer and WASM are self-contained.
+The Docker deployment limits the whole service to 4 GiB; native Linux
 services can use `systemctl --user set-property blind.service MemoryMax=4G`.
 This is a service-wide limit, not a per-component JavaScript memory quota.
 It never connects to a user's browser. The frame uses saved canvas dimensions.
@@ -253,11 +305,11 @@ Text renders as text, never HTML. JSON renders as a collapsible, escaped tree.
 The JSON preview is limited to 4 MiB and 5,000 nodes; larger files remain available
 through a link to the original attachment. Long string values are shortened in the preview.
 HTML supports self-contained sandboxed documents with embedded data/blob images;
-relative asset bundles are not expanded. CSS 3D surfaces share the camera with WebGL
-but not its depth buffer, so they are not mesh-occluded geometry. Frame labels have
-no external leader lines.
+relative asset bundles are not expanded. CSS 3D surfaces share the camera with
+WebGL; the compositor interleaves content planes and geometry bands for depth and
+opacity. Frame labels have no external leader lines.
 
-Blind has seven built-ins: `mesh`, `points`, `text`, `markdown`, `json`, `html`, `image`. Order/task naming,
+Blind has nine built-ins: `mesh`, `points`, `text`, `markdown`, `json`, `html`, `image`, `mermaid`, `dot`. Order/task naming,
 trace recognition and Perfetto integration belong to Cyclops. Cyclops provides an
 exportable Chrome Trace JSON preview and optional Perfetto analysis in the expanded
 component; no second scene-level timeline is introduced.
@@ -271,6 +323,8 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked
+npm run test:content --prefix web
+npm run test:collection --prefix web
 python3 tests/integration_components.py
 python3 tests/integration_plugin_bundles.py
 ```

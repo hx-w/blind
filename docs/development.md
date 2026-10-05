@@ -34,6 +34,12 @@ plugin, cross-Client browser-snapshot lifecycle and OSS integration tests.
 deduplication, conflicts, immutable links, PNG export and last-reference cleanup.
 Component and collection exports require Chrome/Chromium; see
 [component verification](components.md#verification).
+
+After `cargo build --locked`, `npm run test:content --prefix web` exercises native
+reading, real reshares, source-versioned content marks and bundled diagram PNGs.
+`npm run test:collection --prefix web` checks collection switching and cross-pane ink.
+Set `BLIND_TEST_CHROMIUM` and `BLIND_RENDER_BROWSER` to a headless Chromium
+executable when it is not discoverable through the standard browser installation.
 The [release workflow](../.github/workflows/release.yml) publishes macOS ARM,
 macOS Intel and Linux x86_64 archives with `SHA256SUMS`.
 
