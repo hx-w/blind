@@ -7,6 +7,8 @@ import {workbenchOperations} from './operations/workbench';
 const token = location.pathname.match(/\/s\/([^/]+)$/)?.[1];
 const params = new URLSearchParams(location.search);
 const childView = params.has('embedded') || params.has('render');
+document.documentElement.classList.toggle('embedded-scene', params.has('embedded'));
+document.documentElement.classList.toggle('export-mode', params.has('render'));
 
 function showUnavailable(status: number, message?: string): void {
   document.querySelector<HTMLElement>('#loading-state')!.hidden = true;

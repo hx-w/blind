@@ -595,15 +595,29 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     const boardPage = await browser.newPage({viewport: {width: 1280, height: 800}});
     // Exercise layout completion with browser work slower than the host operation round trip.
     await (await boardPage.context().newCDPSession(boardPage)).send('Emulation.setCPUThrottlingRate', {rate: 6});
+    const coldContext = await browser.newContext({javaScriptEnabled: false});
+    try {
+      const coldChild = await coldContext.newPage();
+      await coldChild.goto(`${boardLinks.viewer_url}?scene=notes&embedded=1`);
+      assert.equal(await coldChild.locator('.review-dock').isVisible(), false,
+        'embedded child chrome must be absent before any application script can run');
+    } finally { await coldContext.close(); }
     const notesRequested = Promise.withResolvers(), releaseNotes = Promise.withResolvers();
     await boardPage.route(`**/api/v1/scenes/${boardLinks.viewer_url.split('/').at(-1)}?scene=notes`, async route => {
       notesRequested.resolve();
       await releaseNotes.promise;
       await route.continue();
     });
-    await boardPage.goto(boardLinks.viewer_url);
+    await boardPage.goto(boardLinks.viewer_url, {waitUntil: 'commit'});
     await boardPage.locator('.collection-shell.collection-split').waitFor();
     await notesRequested.promise;
+    const coldChildren = boardPage.frames().filter(frame => new URL(frame.url()).searchParams.has('embedded'));
+    assert.equal(coldChildren.length, 2);
+    assert.equal(await boardPage.locator('.review-dock').isVisible(), true,
+      'the collection owns one global toolbar while child scene admission is held');
+    const loadingChild = boardPage.frames().find(frame => new URL(frame.url()).searchParams.get('scene') === 'notes');
+    assert.equal(await loadingChild.locator('.review-dock').isVisible(), false,
+      'embedded child chrome must remain absent while scene admission is held');
     const loadingBoard = await operation(boardPage, 'collection:get');
     assert.deepEqual(loadingBoard.scenes.map(scene => scene.id), ['notes', 'other']);
     assert.equal(loadingBoard.scenes.find(scene => scene.id === 'notes').ready, false,
@@ -617,6 +631,8 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     assert.equal(readyBoard.scenes.length, 2, 'readiness must not succeed on an empty scene catalog');
     assert.equal(readyBoard.scenes.every(scene => scene.ready), true,
       'readiness waits for the resolved operation value, not the truthiness of an async predicate Promise');
+    for (const child of coldChildren) assert.equal(await child.locator('.review-dock').isVisible(), false,
+      'ready embedded scenes must leave toolbar ownership with the collection');
     const boardScene = boardPage.frames().find(frame => new URL(frame.url()).searchParams.get('scene') === 'notes');
     const entities = await sceneOperation(boardPage, 'notes', 'entity:list');
     const pinned = entities.find(entity => entity.placement === 'panel');

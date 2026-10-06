@@ -180,6 +180,9 @@ tabs or expand/restore buttons.
 Panes fill the viewport with 1px dividers and lightweight overlaid names, not
 reserved headers or outer margins. The shared bottom toolbar controls the focused
 scene and shares the entire collection.
+Toolbar markup starts hidden. Only the owning single-scene or Collection
+controller enables it; embedded child scenes never show an independent toolbar,
+including before scripts run or while scene requests are pending.
 
 ```json
 {

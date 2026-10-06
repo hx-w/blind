@@ -39,6 +39,8 @@ All notable changes to Blind are documented here. This project follows
 - Keep Collection ink aligned with native reading and fixed-panel framing while
   retaining it for display-only settings; discard invalidated screen-only undo/redo
   entries without deleting source-anchored edits, and restore operations after BFcache navigation.
+- Keep embedded child toolbars absent from the initial HTML paint through loading
+  and readiness; only the owning single-scene or Collection controller enables its toolbar.
 - Preserve explicit reading changes during presentation transitions and keep
   depth-diagram catalog anchors in source coordinates.
 - Reject sparse operation arrays before mutation and accept the documented

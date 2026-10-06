@@ -1,8 +1,6 @@
 const exportMode = new URLSearchParams(location.search).has('render');
 const sceneId = new URLSearchParams(location.search).get('scene');
 const embedded = new URLSearchParams(location.search).has('embedded');
-if (exportMode) document.documentElement.classList.add('export-mode');
-if (embedded) document.documentElement.classList.add('embedded-scene');
 import './styles.css';
 import { ComponentViewer } from './component-viewer';
 import { ApiError, loadScene, shareScene, type HostCandidate, type MeshQuality, type PublicScene, type ShareResponse } from './api';
@@ -291,6 +289,7 @@ async function start(): Promise<void> {
       }
     }
     sceneReady = true;
+    if (!embedded && !exportMode) dock.hidden = false;
     finishLoading();
     operations.notify('lifecycle', {ready: true});
     operations.notify('ui', workbenchState());

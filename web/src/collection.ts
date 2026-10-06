@@ -674,4 +674,5 @@ try {
   }
   installIcons(stage);
   scheduleLayout(); new ResizeObserver(() => {scheduleLayout();renderInkBadges();}).observe(stage);
+  originalDock.hidden = false;
 } catch (error) { notify(error instanceof Error ? error.message : '无法打开多场景'); }
