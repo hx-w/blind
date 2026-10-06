@@ -480,11 +480,13 @@ function focus(id: string): void {
   if (mode === 'single') layout(); else updateFocus();
   host.notify('collection', collectionState());
 }
-function setMaximized(id: string | undefined, value: boolean): void {
+async function setMaximized(id: string | undefined, value: boolean): Promise<void> {
   if (id !== undefined) focus(id);
   if (annotationMode && ready.has(active)) ui(runScene(active, workbenchOperations.annotationClose, {}));
   exitAnnotation(); maximized = value; shareLinks = undefined;
   layout(); expandButtons.get(active)?.focus({preventScroll: true});
+  await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+  await Promise.all([...ready].map(sceneId => runScene(sceneId, workbenchOperations.get, {})));
 }
 function acceptUIState(id: string, value: unknown): void {
   const state = value as WorkbenchState;
@@ -663,7 +665,7 @@ try {
       const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'collection-scene-expand';
       expand.setAttribute('aria-controls', card.id);
       expand.innerHTML = '<i data-lucide="maximize-2"></i><i data-lucide="minimize-2"></i>';
-      expand.addEventListener('click', () => setMaximized(scene.id, !maximized)); card.append(expand); expandButtons.set(scene.id, expand);
+      expand.addEventListener('click', () => ui(setMaximized(scene.id, !maximized))); card.append(expand); expandButtons.set(scene.id, expand);
       const tab = document.createElement('button'); tab.type = 'button'; tab.textContent = scene.title; tab.title = scene.title;
       tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', card.id);
       tab.addEventListener('click', () => focus(scene.id)); tab.addEventListener('focus', () => focus(scene.id));

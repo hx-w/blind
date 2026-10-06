@@ -22,7 +22,7 @@ export interface CollectionOperations {
   state(): CollectionState;
   uiState(): CollectionUIState;
   select(id: string): void;
-  layout(sceneId: string | undefined, maximized: boolean): void;
+  layout(sceneId: string | undefined, maximized: boolean): Promise<void>;
   catalog(sceneId: string): Promise<OperationDescriptor[]>;
   execute(sceneId: string, operation: string, params: unknown): Promise<unknown>;
   snapshot(sceneId: string, prepare: boolean): Promise<SceneUpdate>;
@@ -110,7 +110,7 @@ export function registerCollectionOperations(host: OperationHost, app: Collectio
   host.register(collectionState, () => app.state());
   host.register(collectionUIGet, () => app.uiState());
   host.register(collectionSelect, p => {app.select(p.sceneId); return app.state();});
-  host.register(collectionLayout, p => {app.layout(p.sceneId, p.maximized); return app.state();});
+  host.register(collectionLayout, async p => {await app.layout(p.sceneId, p.maximized); return app.state();});
   host.register(collectionCatalog, p => app.catalog(p.sceneId));
   host.register(collectionExecute, p => app.execute(p.sceneId, p.operation, p.params));
   host.register(collectionSnapshot, p => app.snapshot(p.sceneId, false));

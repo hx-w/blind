@@ -243,6 +243,7 @@ async function start(): Promise<void> {
     registerSectionOperations(operations, section, geometryViewer);
     registerWorkbenchOperations(operations, {
       state: workbenchState,
+      whenSettled: () => components!.whenSettled(),
       observe: params => {
         if (viewport.kind === 'board' && params.category && params.category !== 'scene') throw new OperationError('UNSUPPORTED', 'This observation category requires a spatial viewport', {target: params.category});
         if (params.open !== undefined) setObserveToolbar(params.open);

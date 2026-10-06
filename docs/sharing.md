@@ -221,6 +221,8 @@ or inactive child defer invalidation until split restoration or sharing. Changed
 split dimensions, camera or content reading windows invalidate ink and its
 undo/redo history. Background initial loading does not count as navigation.
 Expand/restore finishes the active annotation tool before hiding its toolbar.
+The `collection:set-layout` operation waits for browser sizing and native child
+layout settlement before returning, so ink created afterward belongs to the completed composition.
 
 Sharing from the collection viewer posts `active_scene_id` and an `updates`
 object keyed by scene ID to `POST /api/v1/scenes/<token>/share`. Omitted child

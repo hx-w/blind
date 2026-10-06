@@ -40,6 +40,7 @@ export const workbenchOperations = {
 };
 export interface WorkbenchServices {
   state(): WorkbenchState;
+  whenSettled(): Promise<void>;
   observe(params: {open?: boolean; category?: string | null}): void;
   info(): void;
   annotationOpen(target?: 'content' | 'screen'): Promise<void>;
@@ -55,7 +56,7 @@ export interface WorkbenchServices {
   copy(params: {kind: 'view' | 'image' | 'full'; fresh?: boolean}): Promise<ClipboardOutcome>;
 }
 export function registerWorkbenchOperations(host: OperationHost, services: WorkbenchServices): void {
-  host.register(workbenchOperations.get, () => services.state());
+  host.register(workbenchOperations.get, async () => {await services.whenSettled(); return services.state();});
   host.register(workbenchOperations.observe, params => {services.observe(params); return services.state();});
   host.register(workbenchOperations.info, () => {services.info(); host.notify('ui', services.state()); return null;});
   host.register(workbenchOperations.annotationOpen, async ({target}) => {await services.annotationOpen(target); return services.state().annotation;});

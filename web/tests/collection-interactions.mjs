@@ -593,6 +593,8 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     ]};
     const boardLinks = JSON.parse(cli(['share', '--config', '-', '--format', 'json'], JSON.stringify(boardConfig)));
     const boardPage = await browser.newPage({viewport: {width: 1280, height: 800}});
+    // Exercise layout completion with browser work slower than the host operation round trip.
+    await (await boardPage.context().newCDPSession(boardPage)).send('Emulation.setCPUThrottlingRate', {rate: 6});
     const notesRequested = Promise.withResolvers(), releaseNotes = Promise.withResolvers();
     await boardPage.route(`**/api/v1/scenes/${boardLinks.viewer_url.split('/').at(-1)}?scene=notes`, async route => {
       notesRequested.resolve();
