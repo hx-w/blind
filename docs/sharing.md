@@ -216,10 +216,11 @@ route renders every child into an edge-to-edge grid, including inactive scenes.
 Overlaid name chips identify panes and the focused scene. Captured collection
 layout determines each child viewport and the cross-scene screen-ink coordinates.
 Collection screen ink stays parked while a scene is expanded and returns only
-with the same split layout and scene views. Changed split dimensions, camera or
-content reading windows invalidate it and its undo/redo history. Background
-initial loading does not count as navigation. Expand/restore finishes the active
-annotation tool before hiding its toolbar.
+with the same split layout and scene views. Framing changes in either the expanded
+or inactive child defer invalidation until split restoration or sharing. Changed
+split dimensions, camera or content reading windows invalidate ink and its
+undo/redo history. Background initial loading does not count as navigation.
+Expand/restore finishes the active annotation tool before hiding its toolbar.
 
 Sharing from the collection viewer posts `active_scene_id` and an `updates`
 object keyed by scene ID to `POST /api/v1/scenes/<token>/share`. Omitted child

@@ -500,7 +500,7 @@ function receiveSceneEvent(id: string, event: OperationEvent): void {
     if (event.data) viewStates.set(id, event.data as ViewSnapshot);
     if (id === active) syncObserveMode();
   } else if (event.domain === 'view:invalidated') {
-    if (cards.get(id)?.hidden) {
+    if (mode === 'single') {
       if (markup.hasStrokes || strokeHistory.length || strokeFuture.length || strokeBefore) parkedViewChanged = true;
     } else invalidateCollectionInk();
   } else if (event.domain === 'lifecycle') {

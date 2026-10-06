@@ -669,6 +669,9 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     await operation(boardPage, 'collection:set-layout', {maximized: false});
     await operation(boardPage, 'collection:screen-create', globalStroke);
     await operation(boardPage, 'collection:set-layout', {sceneId: 'other', maximized: true});
+    await sceneOperation(boardPage, 'other', 'view:pan', {delta: [10, 0]});
+    assert.equal((await operation(boardPage, 'collection:get')).strokes.length, 1,
+      'framing in the visible maximized child must not delete the parked split composition ink');
     await sceneOperation(boardPage, 'notes', 'content:scroll', {id: pinned.id, x: 0, y: 200});
     assert.equal((await operation(boardPage, 'collection:get')).strokes.length, 1,
       'native framing in a parked child defers invalidation until the split composition returns');
