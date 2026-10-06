@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unified local plugins: real clients, CAS deduplication, isolation and lifecycle."""
+import hashlib
 import io
 import json
 import os
@@ -20,9 +21,13 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / (sys.argv[1] if len(sys.argv) > 1 else 'target/debug') / 'blind'
 REPORT = b'{"task":"actual-source","value":7}'
-HTML = '''<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;background:#e000e0;color:#fff;font:24px sans-serif}</style></head><body><script>
+HTML = '''<!doctype html><html><head><style>html,body{margin:0;width:100%;height:100%;background:#111;color:#fff;font:24px sans-serif}</style></head><body><script>
 addEventListener('message',e=>{if(e.source!==parent||e.data?.type!=='blind:init')return;
-const p=e.ports[0];document.body.textContent='Plugin report: '+new TextDecoder().decode(e.data.buffer);
+const p=e.ports[0],bytes=new Uint8Array(e.data.buffer),expected=new TextEncoder().encode('{"task":"actual-source","value":7}');
+if(bytes.length!==expected.length||!bytes.every((value,index)=>value===expected[index]))return;
+const source=new TextDecoder().decode(bytes);
+document.body.textContent='Plugin report: '+source;
+document.documentElement.style.background=document.body.style.background='#e000e0';
 p.postMessage({version:1,type:'ready'});});
 </script></body></html>'''
 
@@ -133,6 +138,7 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
                 time.sleep(.1)
         else:
             raise AssertionError('server not ready')
+        assert json.loads(api('/api/v1/health')[1])['scene_schema'] == 8
         # Authentication rejects even malformed uploads before parsing their bodies.
         assert api('/api/v1/client/scenes', raw=b'{')[0] == 401
         invitation = cli('invite', '--host', origin).strip()
@@ -214,6 +220,17 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
         assert first['entities'][0]['component'] == second['entities'][0]['component'] == 'sample:panel'
         old_revision = first['entities'][0]['renderer']['revision']
         assert old_revision == second['entities'][0]['renderer']['revision']
+        assert first['state']['viewport'] == {'mode': 'auto'}
+        assert first['entities'][0]['placement'] == 'world'
+        expected_capabilities = {
+            'presentations': ['spatial', 'focus'], 'host_space': 'planar',
+            'operations': ['scene.read', 'scene.write', 'ui.write', 'content.read',
+                           'content.write', 'annotation.write', 'section.write'],
+            'movable': True, 'resizable': False,
+        }
+        # Public bindings normalize operation grants as a set; manifests retain default order.
+        assert first['entities'][0]['renderer']['capabilities'] == {
+            **expected_capabilities, 'operations': sorted(expected_capabilities['operations'])}
         old_url = renderer_url(first_token, first)
         status, old_html, headers = api(old_url)
         assert status == 200 and old_html.decode() == HTML
@@ -227,6 +244,29 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
             assert connection.execute('SELECT count(*) FROM renderer_bundles').fetchone()[0] == 1
             stored = connection.execute('SELECT bundle FROM renderer_bundles').fetchone()[0]
             assert 'LOCAL_PLUGIN_SECRET' not in stored and 'resolver.py' not in stored and '.env' not in stored
+        snapshot = json.loads(stored)
+        assert snapshot['components'][0]['capabilities'] == expected_capabilities
+        # Independently reproduce the normalized, length-framed public revision.
+        digest = hashlib.sha256()
+        for field in [b'blind.renderer-bundle.v1', snapshot['id'].encode(), snapshot['version'].encode()]:
+            digest.update(len(field).to_bytes(8, 'big'))
+            digest.update(field)
+        definitions = sorted(snapshot['components'], key=lambda definition: definition['name'])
+        digest.update(len(definitions).to_bytes(8, 'big'))
+        for definition in definitions:
+            definition['extensions'].sort()
+            definition['frame_origins'].sort()
+            definition['capabilities']['presentations'][1:] = sorted(definition['capabilities']['presentations'][1:])
+            definition['capabilities']['operations'].sort()
+            field = json.dumps(definition, ensure_ascii=False, separators=(',', ':')).encode()
+            digest.update(len(field).to_bytes(8, 'big'))
+            digest.update(field)
+        digest.update(len(snapshot['documents']).to_bytes(8, 'big'))
+        for path, html in sorted(snapshot['documents'].items()):
+            for field in [path.encode(), html.encode()]:
+                digest.update(len(field).to_bytes(8, 'big'))
+                digest.update(field)
+        assert old_revision == 'sha256:'+digest.hexdigest()
 
         # Native package differences do not duplicate an identical browser snapshot.
         (package/'resolver.py').write_text(resolver+'\n# Native build metadata differs.\n')
@@ -281,7 +321,7 @@ result={{'schema_version'""")
         # Resharing keeps the exact implementation and stores component state.
         status, body, _ = api(f'/api/v1/scenes/{first_token}/share', {
             'meshes': [], 'state': first['state'],
-            'entities': [{**{k: first['entities'][0].get(k) for k in ['id', 'position', 'size', 'visible', 'opacity']},
+            'entities': [{**{k: first['entities'][0].get(k) for k in ['id', 'placement', 'position', 'size', 'visible', 'opacity']},
                           'state': {'selection': 'row-7'}}]})
         assert status == 200, body
         reshared_token = json.loads(body)['viewer_url'].rsplit('/', 1)[1]
@@ -316,6 +356,22 @@ result={{'schema_version'""")
         malformed = {**bundle, 'documents': {'../outside.html': HTML}}
         assert api('/api/v1/client/scenes', {
             'paths': ['oss://test/bucket/report.json'], 'renderers': [malformed]}, credential)[0] == 400
+        # Semantic grant validation returns 400; typed host-space JSON parsing returns 422.
+        invalid_capabilities = [
+            ({'operations': ['host']}, 400),
+            ({'operations': ['scene.*']}, 400),
+            ({'operations': ['unknown.read']}, 400),
+            ({'operations': ['scene.read', 'scene.read']}, 400),
+            ({'host_space': 'arbitrary'}, 422),
+        ]
+        for capabilities, expected_status in invalid_capabilities:
+            malformed = {**bundle, 'components': [
+                {**bundle['components'][0], 'capabilities': {
+                    **bundle['components'][0]['capabilities'], **capabilities}}]}
+            status, body, _ = api('/api/v1/client/scenes', {
+                'paths': ['oss://test/bucket/report.json'], 'renderers': [malformed]}, credential)
+            diagnostic = (capabilities, status, body.decode())
+            assert status == expected_status, diagnostic
         with sqlite3.connect(database) as connection:
             assert connection.execute('SELECT count(*) FROM renderer_bundles').fetchone()[0] == 2
 
@@ -334,6 +390,13 @@ entrypoint = "panel.html"
 api_version = 1
 extensions = ["report.json"]
 ''')
+        alternative_manifest = (alternative/'blind-plugin.toml').read_text()
+        for capabilities, _ in invalid_capabilities:
+            (alternative/'blind-plugin.toml').write_text(
+                alternative_manifest+'\n[components.capabilities]\n'+''.join(
+                    f'{key} = {json.dumps(value)}\n' for key, value in capabilities.items()))
+            cli('plugin', 'install', alternative, environment=clients[0], ok=False)
+        (alternative/'blind-plugin.toml').write_text(alternative_manifest)
         cli('plugin', 'install', alternative, environment=clients[0])
         cli('share', 'oss://test/bucket/report.json', '--plugin', 'sample', '--plugin', 'alternative',
             environment=clients[0], ok=False)

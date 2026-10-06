@@ -17,6 +17,7 @@ export interface CameraState {
 }
 
 export interface ScreenStroke {
+  id: string;
   label?: string;
   color: string;
   aspect: number;
@@ -56,8 +57,12 @@ export interface SurfaceAnnotation {
   controls: number[];
 }
 
+export interface BoardViewportState { center: [number, number]; scale: number }
+export interface ViewportState { mode: 'auto' | 'board' | 'spatial'; board?: BoardViewportState }
+
 export interface ViewState {
   selected: number;
+  viewport: ViewportState;
   focused_component_id?: string | null;
   shading: Shading;
   render_mode?: RenderMode;

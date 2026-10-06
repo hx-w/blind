@@ -22,6 +22,8 @@ export interface ContentState {
   layer?: string;
   marks?: ContentMark[];
 }
+export interface ContentTarget { id: string; label: string; anchor: ContentAnchor }
+export interface JsonBranch { path: string; expanded: boolean; loaded: number; total: number }
 export interface NativeContent {
   readonly scroll: HTMLElement;
   capture(): ContentAnchor | undefined;
@@ -29,6 +31,15 @@ export interface NativeContent {
   hit(x: number, y: number): ContentAnchor | undefined;
   locate(anchor: ContentAnchor): {x: number; y: number} | undefined;
   setSelection(enabled: boolean): void;
+  catalogTargets?(): readonly ContentTarget[];
+  readonly targetRange?: {prefix: string; count: number};
+  acceptsAnchor?(anchor: ContentAnchor): boolean;
+  fit?(): void;
+  json?: {
+    branches(): readonly JsonBranch[];
+    setExpanded(path: string, expanded: boolean): void;
+    page(path: string): void;
+  };
   zoom?(factor: number): void;
   layers?: readonly {id: string; label: string}[];
   setLayer?(id: string): void;

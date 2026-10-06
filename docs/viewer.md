@@ -7,9 +7,11 @@ image links preserve the review state without changing the original files.
 
 ## Navigate and select
 
-- One finger or primary drag uses a full arcball rotation without polar limits.
-- Two fingers pinch to zoom and move together to pan.
-- Fit frames all visible Meshes.
+- Auto chooses a DOM 2D board for planar-only scenes; geometry or spatial content
+  uses the spatial viewport. The board creates no WebGL/Arcball/CSS3D renderer.
+- Primary drag rotates in spatial mode and pans in board mode. Two fingers
+  pinch to zoom and move together to pan; board zoom stays anchored to the pointer.
+- Fit frames visible world entities. Fixed sidebar panels never affect framing.
 - The scene list places rename, opacity and visibility controls on each entity row.
   Mesh and PTS rows show their color before the name; click it to choose a
   preset below the row. Long names show their beginning and end; 信息 reveals
@@ -18,8 +20,7 @@ image links preserve the review state without changing the original files.
 - Each Mesh loads as LOD by default. 信息 can switch it to Raw without
   changing the camera and reports Raw size, LOD size, saved bytes, and the
   saving percentage.
-- Shared view snapshots preserve the selected Raw or LOD quality for every
-  Mesh. Links created before this setting open as LOD.
+- Shared view snapshots preserve the selected Raw or LOD quality for every Mesh.
 - The first cold load shows completed Mesh count while the server generates
   LODs. At most four Meshes are requested concurrently, and a single large Mesh
   remains indeterminate until meshoptimizer returns. Individual failures are
@@ -41,10 +42,12 @@ not duplicate visibility with a Solo mode.
 
 ## Reading documents and other surfaces
 
-Text, Markdown, JSON, images and vector diagrams are interactive inside the
-spatial scene. Drag or scroll the body to read; one finger scrolls and two fingers
-navigate the spatial camera. Body gestures never become camera gestures at a
-scroll boundary. Titles and empty scene space retain camera navigation.
+Text, Markdown, JSON, images and vector diagrams are interactive inside both
+board and spatial scenes. Drag or scroll the body to read; one finger scrolls
+and two fingers navigate the viewport. Body gestures never become viewport
+gestures at a scroll boundary. Titles and empty scene space retain navigation.
+Board zoom changes the affine projection and screen-sized chrome, not the
+native source layout or reading anchor.
 
 Use **全屏**, or double-click noninteractive body space or the title to expand.
 Escape or **返回场景** returns to the same source target, including reading
@@ -62,6 +65,15 @@ annotation tools. Names, colors, delete, undo and redo are contextual controls.
 Surface sizes and entity positions come from the share configuration. Dragging a
 surface title navigates the scene; it does not move or resize the surface.
 See [components and layout](components.md#groups-and-layout).
+
+`placement: "panel"` keeps a component in a fixed sidebar outside the world
+layout. Its body owns native input and remains fixed while panning or zooming;
+the host reserves sidebar space from scene controls. Placement is independent
+of focus/fullscreen presentation and survives sharing.
+
+Agents and components use the [public operation catalog](components.md#public-operations)
+for the same controls. Typed operations cover native reading and review tools;
+unsupported geometry actions remain explicitly unavailable on a board.
 
 On macOS, Cmd+C copies an image link and Cmd+Shift+C copies a view link.
 Use Ctrl on other desktop systems. Text selections and editable fields retain

@@ -1,7 +1,7 @@
 {
   "name": "blind-viewer",
   "private": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "type": "module",
   "scripts": {
     "test": "node --experimental-strip-types --test src/*.test.mjs",
@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build --base=./",
     "test:browser": "node --test tests/viewer-interactions.mjs",
     "test:collection": "node --test tests/collection-interactions.mjs",
-    "test:content": "node --test --test-concurrency=1 tests/content-interactions.mjs tests/graph-depth-interactions.mjs tests/graph-interactions.mjs"
+    "test:content": "node --test --test-concurrency=1 tests/content-interactions.mjs tests/graph-depth-interactions.mjs tests/graph-interactions.mjs",
+    "test:operations": "node --test tests/operations-interactions.mjs"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",

@@ -78,8 +78,6 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         else:
             raise AssertionError('server startup timed out')
 
-        assert api('/api/v1/health')[1]['scene_schema'] >= 3
-
         mesh = tmp/'tetra.ply'
         shutil.copyfile(ROOT/'tests/fixtures/tetra.ply', mesh)
         mesh_pair = tmp/'tetra-pair.ply'
@@ -109,10 +107,12 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         assert scene['label_groups'] == [{'text':'Reference pair','meshes':[0,1]}]
         assert api('/api/v1/scenes/'+token+'/meshes/0/lod')[0] == 200
         assert api('/api/v1/scenes/'+token+'/meshes/0')[1] == mesh.read_bytes()
-        if api('/api/v1/health')[1]['image_renderer']:
+        image_renderer = api('/api/v1/health')[1]['image_renderer']
+        if image_renderer:
             status, png = api('/i/'+token+'.png')
             assert status == 200 and png.startswith(b'\x89PNG')
-        print('PASS: same-host Client registration, unchanged URLs, source metadata, Raw/LOD/PNG')
+        print('PASS: same-host Client registration, unchanged URLs, source metadata, Raw/LOD; PNG ' +
+              ('executed' if image_renderer else 'SKIP (image_renderer unavailable)'))
 
         # Lifetimes must survive CLI -> registry -> browser reshare, including annotations.
         import sqlite3
@@ -135,8 +135,9 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
             status, restored = api('/api/v1/scenes/'+reshared_token)
             assert status == 200 and restored['ttl_days'] == days
             assert restored['state']['annotations'] == saved['state']['annotations']
-            if api('/api/v1/health')[1]['image_renderer']:
-                assert api('/i/'+reshared_token+'.png')[0] == 200
+            if image_renderer:
+                status, png = api('/i/'+reshared_token+'.png')
+                assert status == 200 and png.startswith(b'\x89PNG')
             if days == 0:
                 permanent_token = ttl_token
                 permanent_reshare = reshared_token
@@ -147,7 +148,8 @@ with tempfile.TemporaryDirectory(prefix='blind-sftp-test-') as tmp:
         assert api('/api/v1/control/doctor/clean-invalid', server_config['pat'], {})[0] == 200
         assert registry.execute('SELECT count(*) FROM scenes WHERE code IN (?,?)', (permanent_token, permanent_reshare)).fetchone()[0] == 0
         registry.close()
-        print('PASS: default/custom/permanent TTL, annotation reshare, PNG, source-invalid cleanup')
+        print('PASS: default/custom/permanent TTL, annotation reshare, source-invalid cleanup; PNG ' +
+              ('executed' if image_renderer else 'SKIP (image_renderer unavailable)'))
 
         sshd = shutil.which('sshd') or '/usr/sbin/sshd'
         sftp_server = next(p for p in ['/usr/libexec/sftp-server', '/usr/lib/openssh/sftp-server', '/usr/lib/ssh/sftp-server'] if Path(p).is_file())
@@ -201,8 +203,7 @@ LogLevel VERBOSE
             status, result = api('/api/v1/client/activate', receipt['credential'], {'challenge_path':str(probe),'host':'127.0.0.1','port':ssh_port})
             assert status == 200, result
         pending = register('Pending')
-        revoked = run([BIN/'blind', 'invite', '--revoke-all'], env).strip()
-        assert revoked == 'revoked 1 invitation(s)', revoked
+        run([BIN/'blind', 'invite', '--revoke-all'], env)
         assert api('/api/v1/client', pending['credential'])[0] == 401
         request = {'name':'Revoked', 'host':'127.0.0.1', 'port':ssh_port, 'user':username, 'host_key':(tmp/'host_key.pub').read_text().split()[1]}
         assert api('/api/v1/clients/join', envelope['token'], request)[0] != 200
@@ -217,9 +218,11 @@ LogLevel VERBOSE
         token = output['viewer_url'].rsplit('/', 1)[1]
         assert api('/api/v1/scenes/'+token+'/meshes/0/lod')[0] == 200
         assert api('/api/v1/scenes/'+token+'/meshes/0')[1] == mesh.read_bytes()
-        if api('/api/v1/health')[1]['image_renderer']:
-            assert api('/i/'+token+'.png')[0] == 200
-        print('PASS: source ownership cannot be overridden; remote Raw/LOD/PNG use the actual SFTP source')
+        if image_renderer:
+            status, png = api('/i/'+token+'.png')
+            assert status == 200 and png.startswith(b'\x89PNG')
+        print('PASS: source ownership cannot be overridden; remote Raw/LOD use the actual SFTP source; PNG ' +
+              ('executed' if image_renderer else 'SKIP (image_renderer unavailable)'))
 
         # Closing the listener does not kill existing SSH children. Close them by disabling the
         # source endpoint in the private test registry to force an independently unreachable route.

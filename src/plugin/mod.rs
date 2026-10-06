@@ -140,6 +140,8 @@ pub struct Panel {
 pub struct ShareManifest {
     pub schema_version: u32,
     #[serde(default)]
+    pub viewport: crate::scene::ViewportState,
+    #[serde(default)]
     pub requires: Vec<String>,
     pub title: Option<String>,
     pub resources: Vec<Resource>,
@@ -234,6 +236,7 @@ pub fn list(dir: &Path) -> Result<Value> {
 }
 impl ShareManifest {
     pub fn validate(&self) -> Result<()> {
+        self.viewport.validate(&[])?;
         ensure!(
             self.schema_version == 1,
             "unsupported share manifest version"
@@ -361,6 +364,7 @@ mod tests {
             .collect();
         let mut plan = ShareManifest {
             components: vec![],
+            viewport: Default::default(),
             schema_version: 1,
             requires: vec!["layout.panels".into()],
             title: None,

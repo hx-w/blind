@@ -8,14 +8,14 @@
     <title>Blind</title>
   </head>
   <body>
-    <a class="skip-link" href="#viewer">跳到 3D 视图</a>
+    <a class="skip-link" href="#viewer">跳到场景</a>
     <div class="app-shell" id="app-shell">
       <header class="topbar" aria-label="场景操作">
         <div class="top-actions" data-viewer-chrome data-label-obstacle></div>
       </header>
 
       <main id="viewer" class="viewer" tabindex="-1">
-        <div id="canvas-root" class="canvas-root" aria-label="可交互 3D 场景"></div>
+        <div id="canvas-root" class="canvas-root" aria-label="可交互场景"></div>
         <canvas id="markup-canvas" class="markup-canvas" aria-label="屏幕批注画布" aria-hidden="true"></canvas>
         <button id="scene-notice" class="scene-notice" type="button" hidden data-viewer-chrome data-label-obstacle aria-label="查看场景异常详情"></button>
         <div class="gesture-hint" id="gesture-hint" role="status" data-viewer-chrome><span>单指旋转</span><i></i><span>双指移动</span><i></i><span>捏合缩放</span></div>

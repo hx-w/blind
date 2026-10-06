@@ -56,6 +56,9 @@ pub(in crate::server) async fn scene_from_sources(
         } else {
             None
         };
+        if kind.geometry() && options.placement == crate::scene::component::Placement::Panel {
+            return Err(AppError::bad_request("geometry cannot use panel placement"));
+        }
         if kind.geometry() && options.size.is_some() {
             return Err(AppError::bad_request(
                 "size applies to surface components; geometry retains source dimensions",
@@ -101,6 +104,7 @@ pub(in crate::server) async fn scene_from_sources(
         };
         entities.push(SceneEntity {
             id: format!("resource-{}", i + 1),
+            placement: options.placement,
             state: None,
             component: kind.clone(),
             renderer,
@@ -162,7 +166,7 @@ pub(in crate::server) async fn scene_from_sources(
     });
     Ok(SceneDescriptor {
         source,
-        schema: 5,
+        schema: 8,
         title,
         created_at: crate::storage::sources::now() as u64,
         ttl_days: None,

@@ -14,6 +14,20 @@ blind share --config scene.json --format json
 Files are displayed by extension. See [scene components](components.md) for
 Markdown, text, JSON, HTML, images, Mermaid/DOT, geometry and renderer overrides.
 
+## Help and command groups
+
+Use `blind --help` for the workflow, `blind <command> --help` for command details,
+and `-h` for brief help. The CLI has no `help` subcommand.
+Plugin administration, OSS aliases and background services remain grouped by
+responsibility; inspect a leaf with `blind plugin install --help`,
+`blind oss set --help` or `blind service install --help`.
+
+Help includes links to [viewport and fixed-panel configuration](components.md#groups-and-layout),
+[live viewer operations](components.md#public-operations), the
+[renderer API and grants](components.md#plugin-components-api-1), and
+[plugin packages](plugins.md). CLI commands create scenes and manage Blind;
+live review control uses the viewer's discovered operation catalog.
+
 ## Directories
 
 ```sh

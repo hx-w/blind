@@ -13,6 +13,19 @@ import { SectionViewer } from './section-viewer';
 import { installIcons } from './icons';
 import { installShortcuts } from './shortcuts';
 import {takeInitialScene} from './bootstrap';
+import {OperationHost, OperationError, type Operation} from './operations/core';
+import {publishOperations, serveWindowOperations} from './operations/transport';
+import {registerWorkbenchOperations, workbenchOperations, type WorkbenchState, type ShareSheetState, type ClipboardOutcome} from './operations/workbench';
+import {registerEntityOperations, entityOperations} from './operations/entities';
+import {registerContentOperations} from './operations/content';
+import {registerViewOperations, viewOperations, readView} from './operations/view';
+import {registerAnnotationOperations} from './operations/annotations';
+import {registerSectionOperations} from './operations/section';
+import {BoardViewport} from './viewport/board';
+import {resolveViewportMode} from './viewport/mode';
+import type {SceneViewport} from './viewport/types';
+import {ScreenAnnotationEditor} from './annotations/screen-editor';
+import type {AnnotationEditor} from './annotations/editor';
 
 const $ = <T extends HTMLElement>(selector: string): T => {
   const element = document.querySelector<T>(selector);
@@ -85,26 +98,15 @@ let shortcutCopyGeneration = 0;
 let toastTimer = 0;
 let loadProgress = { completed: 0, total: 0, rawFallbacks: 0, failed: 0 };
 let longLoadTimer = 0;
-const meshViewer = new MeshViewer(root);
+const operations = new OperationHost({sceneId: sceneId ?? 'scene', ready: () => sceneReady, exporting: exportMode});
+let viewport: SceneViewport;
+let geometryViewer: MeshViewer | undefined;
+let surface: AnnotationEditor;
+let section: SectionViewer | undefined;
 const markup = new MarkupCanvas($('#markup-canvas') as HTMLCanvasElement);
-const surface = new SurfaceEditor(meshViewer, markup, shell, {toast: showToast, change: () => {
-  syncSceneControls();
-  if (embedded && sceneId) parent.postMessage({type:'blind:scene-annotation-state', id:sceneId}, location.origin);
-}});
-const section = new SectionViewer(meshViewer, showToast);
-
-meshViewer.onSelectionChange = () => {
-  components?.selectMesh(meshViewer.selectedIndex); syncSceneControls(); surface.refreshList();
-};
-meshViewer.onModelChange = () => { syncSceneControls(); syncSceneMeta(); surface.refreshList(); components?.sync(); section.refresh(); };
-meshViewer.onLoadProgress = (progress) => {
-  loadProgress = progress;
-  renderLoadProgress();
-};
-meshViewer.onViewChangeStart = invalidateMarkupForViewChange;
 markup.onChange = () => {
-  meshViewer.setStrokes(markup.exportStrokes());
-  surface.refreshList();
+  viewport?.setStrokes(markup.exportStrokes());
+  surface?.refreshList();
 };
 markup.onActiveChange = (active) => shell.classList.toggle('drawing-stroke', active);
 
@@ -114,13 +116,15 @@ void start();
 function saveEmbeddedState(): import('./api').SceneUpdate | null {
   if (!embedded || !sceneReady || !sessionKey) return null;
   markup.finishActive(); surface.finishForShare();
-  const update = meshViewer.exportUpdate();
+  const update = viewport.exportUpdate();
   sessionStorage.setItem(sessionKey, JSON.stringify(update));
   return update;
 }
 
+const unpublishOperations = publishOperations(operations);
+const disconnectParent = embedded ? serveWindowOperations(operations) : undefined;
 if (embedded && sceneId) {
-  const focusScene = () => parent.postMessage({type:'blind:scene-focus', id:sceneId}, location.origin);
+  const focusScene = () => operations.notify('lifecycle', {focus: true});
   window.addEventListener('pointerdown', focusScene, true);
   window.addEventListener('focus', focusScene);
   window.addEventListener('focusin', focusScene);
@@ -129,65 +133,28 @@ if (embedded && sceneId) {
     if (window.getSelection()?.toString()) return;
     if (event.target instanceof HTMLElement && event.target.closest('input,textarea,select,[contenteditable],dialog[open]')) return;
     event.preventDefault();
-    parent.postMessage({type:'blind:scene-shortcut', id:sceneId, kind:event.shiftKey ? 'view' : 'image'}, location.origin);
+    operations.notify('lifecycle', {shortcut: event.shiftKey ? 'view' : 'image'});
   }, true);
   window.addEventListener('pagehide', () => { saveEmbeddedState(); });
-  window.addEventListener('message', event => {
-    if (event.source !== parent || event.origin !== location.origin || event.data?.type !== 'blind:scene-command' || event.data.id !== sceneId) return;
-    const command = event.data.command as string;
-    if (command === 'snapshot') {
-      parent.postMessage({type:'blind:scene-snapshot', id:sceneId, requestId:event.data.requestId, update:saveEmbeddedState()}, location.origin);
-      return;
-    }
-    if (!sceneReady) return;
-    if (command === 'activate') {
-      document.documentElement.classList.add('embedded-active'); surface.resume();
-      void components?.ready().catch(() => {});
-      parent.postMessage({type:'blind:scene-tool-mode', id:sceneId, annotation:surface.isActive}, location.origin);
-    }
-    if (command === 'deactivate') { document.documentElement.classList.remove('embedded-active'); section.deactivate(); surface.suspend(); saveEmbeddedState(); }
-    if (command === 'fit') meshViewer.fitAll();
-    if (command === 'details') components?.openInfo();
-    if (command === 'render') setObserveToolbar(true);
-    if (command === 'observe-open') setObserveToolbar(true);
-    if (command === 'observe-close') setObserveToolbar(false);
-    if (command.startsWith('observe-mode:')) document.querySelector<HTMLButtonElement>(`[data-observe-mode="${command.slice(13)}"]`)?.click();
-    if (command.startsWith('observe-category:')) document.querySelector<HTMLButtonElement>(`[data-observe-category="${command.slice(17)}"]`)?.click();
-    if (command.startsWith('observe-setting:')) {
-      const [, kind, value] = command.split(':');
-      if (kind === 'shading' && ['smooth','flat','wire'].includes(value)) document.querySelector<HTMLButtonElement>(`[data-shading="${value}"]`)?.click();
-      if (kind === 'projection' && ['perspective','orthographic'].includes(value)) document.querySelector<HTMLButtonElement>(`[data-projection="${value}"]`)?.click();
-      if (kind === 'axes' || kind === 'background') {
-        const input = kind === 'axes' ? axesToggle : lightToggle;
-        input.checked = value === 'true'; input.dispatchEvent(new Event('change', {bubbles:true}));
-      }
-    }
-    if (command === 'observe-light' && event.data.control && Number.isFinite(event.data.value)) {
-      const input = {azimuth:lightAzimuth, elevation:lightElevation, intensity:lightIntensity}[event.data.control as 'azimuth'|'elevation'|'intensity'];
-      if (input) {input.value = String(event.data.value); input.dispatchEvent(new Event('input', {bubbles:true}));}
-    }
-    if (command === 'section') section.open();
-    if (command === 'annotate') brushTool.click();
-    if (command === 'screen-scope') surface.setExternalScreenMarkup(event.data.value !== 'scene');
-    if (command === 'surface-control') {
-      const control = event.data.control as string;
-      const value = event.data.value as string;
-      const selector = control === 'mode' && ['select','point','line','screen'].includes(value) ? `[data-surface-mode="${value}"]`
-        : control === 'color' && /^#[0-9a-f]{6}$/i.test(value) ? `[data-surface-color="${value}"]`
-        : ['done','undo','redo','close','end','delete'].includes(control) ? `#surface-${control}` : '';
-      if (selector) document.querySelector<HTMLButtonElement>(`#surface-toolbar ${selector}`)?.click();
-      if (control === 'name' && typeof value === 'string' && value.length <= 120) {
-        const input = document.querySelector<HTMLInputElement>('#surface-toolbar #surface-name');
-        if (input) { input.value = value; input.dispatchEvent(new Event('change', {bubbles:true})); }
-      }
-    }
-    if (command === 'info') components?.openInfo();
-  });
-  new MutationObserver(() => parent.postMessage({type:'blind:scene-tool-mode', id:sceneId, annotation:shell.classList.contains('surface-mode')}, location.origin))
-    .observe(shell, {attributes:true, attributeFilter:['class']});
 }
+operations.subscribe(event => {
+  if (!sceneReady || event.domain === 'ui' || event.domain === 'lifecycle') return;
+  syncSceneControls(); syncSceneMeta();
+  operations.notify('ui', workbenchState());
+});
+window.addEventListener('pagehide', event => {
+  if (event.persisted) return;
+  operations.dispose(); disconnectParent?.(); unpublishOperations(); components?.dispose();
+});
 
-$('#scene-notice').addEventListener('click', () => components?.openInfo());
+$('#scene-notice').addEventListener('click', () => runUI(workbenchOperations.info, {}));
+
+function runUI<P, R>(operation: Operation<P, R>, params: P): void {
+  void operations.run(operation, params).catch(error => showToast(error instanceof Error ? error.message : '操作失败'));
+}
+function workbenchState(): WorkbenchState {
+  return {observe: {open: observeOpen, category: activeObserveCategory}, annotation: surface.toolbarState, view: readView(viewport)};
+}
 
 async function start(): Promise<void> {
   if (!token) {
@@ -231,26 +198,89 @@ async function start(): Promise<void> {
     }
     title.insertAdjacentElement('afterend', artifactList);
     startLongLoadHint();
-    await meshViewer.load(scene, exportMode);
+    viewport = resolveViewportMode(scene) === 'board' ? new BoardViewport(root) : new MeshViewer(root);
+    geometryViewer = viewport.kind === 'spatial' ? viewport : undefined;
+    shell.dataset.viewport = viewport.kind;
+    root.setAttribute('aria-label', viewport.kind === 'board' ? '可交互二维画板' : '可交互 3D 场景');
+    $('.skip-link').textContent = viewport.kind === 'board' ? '跳到画板' : '跳到 3D 视图';
+    $('#gesture-hint span').textContent = viewport.kind === 'board' ? '单指移动' : '单指旋转';
+    observeCategories.forEach(button => {button.hidden = viewport.kind === 'board' && button.dataset.observeCategory !== 'scene';});
+    $('#section-trigger').hidden = viewport.kind === 'board';
+    axesToggle.closest('label')!.hidden = viewport.kind === 'board';
+    viewport.onLoadProgress = progress => {loadProgress = progress; renderLoadProgress();};
+    viewport.onViewChangeStart = invalidateMarkupForViewChange;
+    viewport.onViewChangeEnd = () => {if (sceneReady) operations.notify('view', readView(viewport));};
+    viewport.onModelChange = () => {
+      syncSceneControls(); syncSceneMeta(); surface?.refreshList(); components?.sync(); section?.refresh();
+      if (sceneReady && !components?.entityMutationActive) operations.notify('entity');
+    };
+    if (geometryViewer) geometryViewer.onSelectionChange = () => {
+      components?.selectMesh(geometryViewer!.selectedIndex); syncSceneControls(); surface?.refreshList();
+    };
+    if (geometryViewer) geometryViewer.onEntityFocus = (ids, animate) => runUI(entityOperations.focus, {ids: [...ids], animate});
+    const annotationCallbacks = {toast: showToast, change: () => {
+      syncSceneControls();
+      if (sceneReady) operations.notify('annotation', surface.toolbarState);
+    }};
+    surface = geometryViewer ? new SurfaceEditor(geometryViewer, markup, shell, annotationCallbacks) : new ScreenAnnotationEditor(viewport, markup, shell, annotationCallbacks);
+    section = geometryViewer ? new SectionViewer(geometryViewer, showToast) : undefined;
+    await viewport.load(scene, exportMode);
     if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !scene.entities.some(c => c.source.kind === 'attachment')) {
       throw new Error('No models could be loaded');
     }
     $('[data-copy="image"]').hidden = false;
-    components = new ComponentViewer(root, meshViewer, scene);
+    components = new ComponentViewer(root, viewport, scene, undefined, {operations});
     components.onSelect = () => syncSceneControls();
     components.onChange = () => syncSceneControls();
     components.onContentViewChange = invalidateMarkupForViewChange;
-    components.onScreenAnnotation = () => {
-      components?.closeContentAnnotation(); components?.returnToScene();
-      setObserveToolbar(false); section.close(); void surface.enter();
-    };
+    components.onScreenAnnotation = () => runUI(workbenchOperations.annotationOpen, {target: 'screen'});
+    if (section) section.onShow = () => {components?.setSceneList({open: false});};
     if (!exportMode) void components.ready().catch(() => {});
-    window.addEventListener('pagehide', event => { if (!event.persisted) components?.dispose(); });
+    registerViewOperations(operations, viewport);
+    registerEntityOperations(operations, components);
+    registerContentOperations(operations, components);
+    registerAnnotationOperations(operations, surface, viewport, markup);
+    registerSectionOperations(operations, section, geometryViewer);
+    registerWorkbenchOperations(operations, {
+      state: workbenchState,
+      observe: params => {
+        if (viewport.kind === 'board' && params.category && params.category !== 'scene') throw new OperationError('UNSUPPORTED', 'This observation category requires a spatial viewport', {target: params.category});
+        if (params.open !== undefined) setObserveToolbar(params.open);
+        if (params.category !== undefined) setObserveCategory(params.category);
+        operations.notify('ui', workbenchState());
+      },
+      info: () => components!.openInfo(),
+      shareSheet: setShareSheet,
+      copy: copyShareLink,
+      annotationOpen: async target => {
+        setObserveToolbar(false); section?.close();
+        if (target !== 'screen' && components?.annotateContent()) {surface.exit(); return;}
+        components?.closeContentAnnotation(); components?.returnToScene(); await surface.enter();
+      },
+      annotationClose: () => {components?.closeContentAnnotation(); surface.exit();},
+      annotationScope: scope => surface.setExternalScreenMarkup(scope === 'collection'),
+      activate: async active => {
+        document.documentElement.classList.toggle('embedded-active', active);
+        if (active) {surface.resume(); await components!.ready();}
+        else {section?.deactivate(); surface.suspend(); saveEmbeddedState();}
+        operations.notify('ui', workbenchState());
+      },
+      snapshot: () => viewport.exportUpdate(),
+      prepareSnapshot: () => {markup.finishActive(); surface.finishForShare(); const update = viewport.exportUpdate(); if (sessionKey) sessionStorage.setItem(sessionKey, JSON.stringify(update)); return update;},
+      share: createShare,
+      resources: () => (scene!.attachments ?? []).map(item => ({id: item.id, label: item.label, byteSize: item.byte_size, available: !!item.url})),
+      resource: id => {
+        const item = scene!.attachments?.find(candidate => candidate.id === id);
+        if (!item) throw new OperationError('UNKNOWN_ENTITY', 'Unknown attachment', {target: id});
+        if (!item.url) throw new OperationError('RESOURCE_UNAVAILABLE', 'Attachment is unavailable', {target: id});
+        return {id, url: item.url, filename: item.label};
+      },
+    });
     markup.load(scene.state.strokes ?? []);
     surface.load();
     owner = scene.owner ? owner : undefined;
     syncSceneControls(); syncSceneMeta();
-    section.load();
+    section?.load();
     const notices = (scene.warnings?.length ?? 0) + loadProgress.failed;
     if (notices > 0) {
       const notice = $('#scene-notice'); notice.hidden = false;
@@ -261,15 +291,18 @@ async function start(): Promise<void> {
     }
     sceneReady = true;
     finishLoading();
-    if (embedded && sceneId) parent.postMessage({type:'blind:scene-ready', id:sceneId}, location.origin);
+    operations.notify('lifecycle', {ready: true});
+    operations.notify('ui', workbenchState());
     if (exportMode) {
       if (loadProgress.failed) throw new Error('Export failed: geometry unavailable');
       await components.ready(); await document.fonts.ready;
-      await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+      const settled = Promise.withResolvers<void>();
+      requestAnimationFrame(() => requestAnimationFrame(() => settled.resolve()));
+      await settled.promise;
       document.documentElement.dataset.renderStatus = 'ready';
     }
   } catch (error) {
-    if (embedded && sceneId) parent.postMessage({type:'blind:scene-error', id:sceneId, message:error instanceof Error ? error.message : 'Scene failed'}, location.origin);
+    operations.notify('lifecycle', {error: error instanceof Error ? error.message : 'Scene failed'});
     sceneReady = false;
     if (exportMode) { document.documentElement.dataset.renderStatus = 'error'; document.documentElement.dataset.renderError = error instanceof Error ? error.message : 'Scene render failed'; }
     finishLoading(); hideViewerControls();
@@ -317,12 +350,12 @@ function hideViewerControls(): void {
 function syncSceneControls(): void {
   const component = components?.selectedEntity;
   const geometry = !component || !!components?.selectedGeometry;
-  const state = meshViewer.currentState;
+  const state = viewport.currentState;
   axesToggle.checked = state.axes; lightToggle.checked = state.background === 'light';
   syncRenderControls();
   document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach(button => button.classList.toggle('active', button.dataset.shading === state.shading));
   document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach(button => button.classList.toggle('active', button.dataset.projection === state.projection));
-  const selected = geometry ? meshViewer.selectedModel : undefined;
+  const selected = geometry ? geometryViewer?.selectedModel : undefined;
   sceneSelectedInfo.hidden = !component && !selected;
   sceneInfoQuality.hidden = !selected;
   if (component || selected) {
@@ -336,9 +369,9 @@ function syncSceneControls(): void {
     const quality = button.dataset.quality as MeshQuality;
     button.classList.toggle('active', quality === selected.quality);
     button.setAttribute('aria-pressed', String(quality === selected.quality));
-    button.disabled = selected.loading || (quality === 'lod' && meshViewer.annotations.some(mark => mark.mesh === meshViewer.selectedIndex));
+    button.disabled = selected.loading || (quality === 'lod' && geometryViewer!.annotations.some(mark => mark.mesh === geometryViewer!.selectedIndex));
   });
-  if (meshViewer.annotations.some(mark => mark.mesh === meshViewer.selectedIndex)) lodSaving.textContent = '表面标记使用 Raw，分享后位置保持一致';
+  if (geometryViewer!.annotations.some(mark => mark.mesh === geometryViewer!.selectedIndex)) lodSaving.textContent = '表面标记使用 Raw，分享后位置保持一致';
   else if (selected.loading) lodSaving.textContent = `正在加载 ${selected.quality === 'lod' ? 'Raw' : 'LOD'} Mesh`;
   else if (selected.lod_bytes !== undefined) {
     const { delta, percent } = savings(selected.raw_bytes, selected.lod_bytes);
@@ -349,10 +382,9 @@ function syncSceneControls(): void {
   else lodSaving.textContent = '首次切换到 LOD 后显示节省量';
 }
 
-function setObserveToolbar(open: boolean, keyboard = false): void {
+function setObserveToolbar(open: boolean): void {
   if (observeOpen === open) return;
   observeOpen = open;
-  if (keyboard) dock.classList.add('dock-no-motion');
   dock.classList.toggle('is-observing', open);
   mainDock.classList.toggle('is-current', !open);
   observeDock.classList.toggle('is-current', open);
@@ -360,18 +392,21 @@ function setObserveToolbar(open: boolean, keyboard = false): void {
   mainDock.setAttribute('aria-hidden', String(open));
   observeDock.setAttribute('aria-hidden', String(!open));
   observeTrigger.setAttribute('aria-expanded', String(open));
-  if (keyboard) requestAnimationFrame(() => dock.classList.remove('dock-no-motion'));
 }
 observeTrigger.addEventListener('click', event => {
-  setObserveToolbar(true, event.detail === 0);
-  observeBack.focus({preventScroll:true});
+  if (event.detail === 0) dock.classList.add('dock-no-motion');
+  runUI(workbenchOperations.observe, {open: true});
+  requestAnimationFrame(() => dock.classList.remove('dock-no-motion'));
+  observeBack.focus({preventScroll: true});
 });
 observeBack.addEventListener('click', event => {
-  setObserveToolbar(false, event.detail === 0);
-  observeTrigger.focus({preventScroll:true});
+  if (event.detail === 0) dock.classList.add('dock-no-motion');
+  runUI(workbenchOperations.observe, {open: false});
+  requestAnimationFrame(() => dock.classList.remove('dock-no-motion'));
+  observeTrigger.focus({preventScroll: true});
 });
 function setObserveCategory(category: string | null): void {
-  activeObserveCategory = activeObserveCategory === category ? null : category;
+  activeObserveCategory = category;
   for (const button of observeCategories) {
     const active = button.dataset.observeCategory === activeObserveCategory;
     button.classList.toggle('active', active); button.setAttribute('aria-expanded', String(active));
@@ -380,15 +415,12 @@ function setObserveCategory(category: string | null): void {
   dock.classList.toggle('detail-open', !!activeObserveCategory);
   syncRenderControls();
 }
-observeCategories.forEach(button => button.addEventListener('click', () => setObserveCategory(button.dataset.observeCategory ?? null)));
-$('#section-trigger').addEventListener('click', () => { if (activeObserveCategory) setObserveCategory(null); });
-document.querySelectorAll<HTMLButtonElement>('[data-observe-mode]').forEach(button => button.addEventListener('click', () => {
-  meshViewer.setRenderMode(button.dataset.observeMode as 'matte' | 'raking' | 'normals');
-  syncRenderControls();
-}));
+observeCategories.forEach(button => button.addEventListener('click', () => runUI(workbenchOperations.observe, {category: activeObserveCategory === button.dataset.observeCategory ? null : button.dataset.observeCategory as 'shading' | 'light' | 'projection' | 'scene'})));
+$('#section-trigger').addEventListener('click', () => {if (activeObserveCategory) runUI(workbenchOperations.observe, {category: null});});
+document.querySelectorAll<HTMLButtonElement>('[data-observe-mode]').forEach(button => button.addEventListener('click', () => runUI(viewOperations.settings, {render_mode: button.dataset.observeMode as 'matte' | 'raking' | 'normals'})));
 
 function syncRenderControls(): void {
-  const mode = meshViewer.renderMode, light = meshViewer.lightSettings;
+  const mode = geometryViewer?.renderMode ?? 'matte', light = geometryViewer?.lightSettings ?? {azimuth: 45, elevation: 20, intensity: 1};
   document.querySelectorAll<HTMLButtonElement>('[data-observe-mode]').forEach(button => {
     const active = button.dataset.observeMode === mode;
     button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
@@ -401,60 +433,44 @@ function syncRenderControls(): void {
   $('#light-intensity-value').textContent = `${Math.round(light.intensity * 100)}%`;
 }
 
-for (const input of [lightAzimuth, lightElevation, lightIntensity]) input.addEventListener('input', () => {
-  meshViewer.setLight({azimuth: Number(lightAzimuth.value), elevation: Number(lightElevation.value), intensity: Number(lightIntensity.value) / 100});
-  syncRenderControls();
-});
-
-$('#fit-view').addEventListener('click', () => { meshViewer.fitAll(); showToast('已适配全部可见元素'); });
-document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach((button) => button.addEventListener('click', async () => {
-  const quality = button.dataset.quality as MeshQuality;
-  try {
-    await meshViewer.setQuality(meshViewer.selectedIndex, quality);
-    syncSceneControls(); syncSceneMeta();
-  } catch (error) {
-    showToast(error instanceof Error ? error.message : `无法加载 ${quality.toUpperCase()} Mesh`);
-  }
+for (const input of [lightAzimuth, lightElevation, lightIntensity]) input.addEventListener('input', () => runUI(viewOperations.settings, {light: {azimuth: Number(lightAzimuth.value), elevation: Number(lightElevation.value), intensity: Number(lightIntensity.value) / 100}}));
+$('#fit-view').addEventListener('click', () => runUI(viewOperations.fit, {}));
+document.querySelectorAll<HTMLButtonElement>('[data-quality]').forEach(button => button.addEventListener('click', () => {
+  const entityId = components?.selectedEntity?.id;
+  if (entityId) runUI(entityOperations.quality, {id: entityId, quality: button.dataset.quality as MeshQuality});
 }));
-document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach((button) => button.addEventListener('click', () => { meshViewer.setShading(button.dataset.shading as 'smooth' | 'flat' | 'wire'); syncSceneControls(); }));
-// Framing changes surface through meshViewer.onViewChangeStart from the viewer
-// itself, so programmatic actions clear marks the same way gestures do.
-document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach((button) => button.addEventListener('click', () => { meshViewer.setProjection(button.dataset.projection as 'perspective' | 'orthographic'); syncSceneControls(); }));
-axesToggle.addEventListener('change', () => meshViewer.setAxes(axesToggle.checked));
-lightToggle.addEventListener('change', () => meshViewer.setBackground(lightToggle.checked ? 'light' : 'dark'));
-
-brushTool.addEventListener('click', () => {
-  setObserveToolbar(false); section.close();
-  if (components?.annotateContent()) { surface.exit(); return; }
-  components?.closeContentAnnotation();
-  void surface.enter();
-});
+document.querySelectorAll<HTMLButtonElement>('[data-shading]').forEach(button => button.addEventListener('click', () => runUI(viewOperations.settings, {shading: button.dataset.shading as 'smooth' | 'flat' | 'wire'})));
+document.querySelectorAll<HTMLButtonElement>('[data-projection]').forEach(button => button.addEventListener('click', () => runUI(viewOperations.settings, {projection: button.dataset.projection as 'perspective' | 'orthographic'})));
+axesToggle.addEventListener('change', () => runUI(viewOperations.settings, {axes: axesToggle.checked}));
+lightToggle.addEventListener('change', () => runUI(viewOperations.settings, {background: lightToggle.checked ? 'light' : 'dark'}));
+brushTool.addEventListener('click', () => runUI(workbenchOperations.annotationOpen, {}));
 $('#share-view').addEventListener('click', async () => {
   if (!token) return;
   const button = $('#share-view') as HTMLButtonElement; button.disabled = true; button.classList.add('working');
   try {
-    if (!await refreshShareLinks()) return;
-    resetShareSheet();
-    shareDialog.showModal();
+    await operations.run(workbenchOperations.shareSheet, {open: true});
   } catch (error) { showToast(error instanceof Error ? error.message : '无法创建分享链接'); }
   finally { button.disabled = false; button.classList.remove('working'); }
 });
 
-shareHostTrigger.addEventListener('click', openHostPicker);
-backHost.addEventListener('click', showShareMain);
+shareHostTrigger.addEventListener('click', () => runUI(workbenchOperations.shareSheet, {open: true, mode: 'hosts'}));
+backHost.addEventListener('click', () => runUI(workbenchOperations.shareSheet, {open: true, mode: 'main'}));
 
+async function createShare(origin?: string): Promise<ShareResponse> {
+  if (!token) throw new OperationError('RESOURCE_UNAVAILABLE', '场景链接不可用');
+  markup.finishActive(); surface.finishForShare();
+  const links = await shareScene(token, viewport.exportUpdate(), owner, origin);
+  operations.notify('share', {viewer_url: links.viewer_url, image_url: links.image_url});
+  return links;
+}
 async function refreshShareLinks(origin?: string): Promise<ShareResponse | null> {
-  if (!token) throw new Error('场景链接不可用');
   const generation = ++shareRequestGeneration;
-  markup.finishActive();
-  surface.finishForShare();
   let links: ShareResponse;
-  try { links = await shareScene(token, meshViewer.exportUpdate(), owner, origin); }
+  try { links = await operations.run(workbenchOperations.share, {origin}) as ShareResponse; }
   catch (error) { if (generation !== shareRequestGeneration) return null; throw error; }
   if (generation !== shareRequestGeneration) return null;
   shareLinks = links;
-  renderShareHosts(links);
-  copyFull.hidden = !links.full_text;
+  renderShareHosts(links); copyFull.hidden = !links.full_text;
   return links;
 }
 
@@ -472,35 +488,24 @@ async function selectShareHost(origin: string): Promise<void> {
   }
 }
 
-document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((button) => button.addEventListener('click', async () => {
-  if (!shareLinks) return;
-  const kind = button.dataset.copy as 'view' | 'image' | 'full';
-  const value = kind === 'view' ? shareLinks.viewer_url : kind === 'image' ? shareLinks.image_url : shareLinks.full_text;
-  if (!value) return;
-  try {
-    if (await copyText(value)) {
-      shareDialog.close();
-      showToast(kind === 'view' ? '视角链接已复制' : kind === 'image' ? '图片链接已复制' : '完整信息已复制');
-    } else {
-      showManualCopy(value);
-    }
-  } catch {
-    showManualCopy(value);
-  }
+document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach(button => button.addEventListener('click', () => {
+  runUI(workbenchOperations.copy, {kind: button.dataset.copy as 'view' | 'image' | 'full'});
 }));
 installShortcuts([
-  {key: 'c', run: () => copyCurrentLink('image')},
-  {key: 'c', shift: true, run: () => copyCurrentLink('view')},
+  {key: 'c', run: () => runUI(workbenchOperations.copy, {kind: 'image', fresh: true})},
+  {key: 'c', shift: true, run: () => runUI(workbenchOperations.copy, {kind: 'view', fresh: true})},
 ], () => sceneReady && !exportMode && !(/Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
   || embedded
   || matchMedia('(pointer: coarse) and (hover: none)').matches));
 
-async function copyCurrentLink(kind: 'image' | 'view'): Promise<void> {
-  if (!token) return;
+async function copyShareLink({kind, fresh = false}: {kind: 'image' | 'view' | 'full'; fresh?: boolean}): Promise<ClipboardOutcome> {
+  if (!navigator.userActivation.isActive) throw new OperationError('USER_ACTIVATION_REQUIRED', 'Clipboard writes require a user gesture; use share:create to obtain links');
   const generation = ++shortcutCopyGeneration;
-  const pending = refreshShareLinks(shareLinks?.origin).then(links => {
-    if (!links || generation !== shortcutCopyGeneration) throw new SupersededShare();
-    return kind === 'image' ? links.image_url : links.viewer_url;
+  const pending = (fresh || !shareLinks ? refreshShareLinks(shareLinks?.origin) : Promise.resolve(shareLinks)).then(links => {
+    if (!links || generation !== shortcutCopyGeneration) throw new OperationError('CANCELLED', 'A newer copy request superseded this one');
+    const value = kind === 'image' ? links.image_url : kind === 'view' ? links.viewer_url : links.full_text;
+    if (!value) throw new OperationError('RESOURCE_UNAVAILABLE', 'This share has no full owner information');
+    return value;
   });
   // Start the clipboard write in the key event's user activation. Safari loses
   // that activation if the share request is awaited before calling write().
@@ -511,36 +516,42 @@ async function copyCurrentLink(kind: 'image' | 'view'): Promise<void> {
       writeResult = navigator.clipboard.write([item]).then(() => true, () => false);
     } catch { /* Fall back to a plain text write or manual copy. */ }
   }
-  try {
-    const value = await pending;
-    if (generation !== shortcutCopyGeneration) return;
-    if (writeResult ? await writeResult : await copyText(value).catch(() => false)) {
-      if (generation === shortcutCopyGeneration) showToast(kind === 'image' ? '图片链接已复制' : '视角链接已复制');
-      return;
-    }
-    if (generation !== shortcutCopyGeneration) return;
-    resetShareSheet(); shareDialog.showModal(); showManualCopy(value);
-  } catch (error) {
-    if (error instanceof SupersededShare) return;
-    if (generation === shortcutCopyGeneration) showToast(error instanceof Error ? error.message : '无法复制链接');
+  const value = await pending;
+  if (generation !== shortcutCopyGeneration) throw new OperationError('CANCELLED', 'A newer copy request superseded this one');
+  if (writeResult ? await writeResult : await copyText(value).catch(() => false)) {
+    shareDialog.close(); resetShareSheet();
+    showToast(kind === 'image' ? '图片链接已复制' : kind === 'view' ? '视角链接已复制' : '完整信息已复制');
+    return {status: 'copied', value};
   }
+  resetShareSheet(); if (!shareDialog.open) shareDialog.showModal(); showManualCopy(value);
+  return {status: 'manual', value};
 }
-class SupersededShare extends Error {}
+
+async function setShareSheet({open, mode = 'main'}: {open: boolean; mode?: 'main' | 'hosts' | 'manual'}): Promise<ShareSheetState> {
+  if (!open) {shareDialog.close(); resetShareSheet();}
+  else {
+    if ((mode === 'main' || !shareLinks) && !await refreshShareLinks()) throw new OperationError('CANCELLED', 'A newer share request superseded this one');
+    resetShareSheet(); if (!shareDialog.open) shareDialog.showModal();
+    if (mode === 'hosts') openHostPicker();
+    if (mode === 'manual') showManualCopy(shareLinks!.viewer_url);
+  }
+  return {open: shareDialog.open, mode: open ? mode : 'main', origin: shareLinks?.origin ?? null};
+}
 $('#select-copy').addEventListener('click', selectManualCopy);
-$('#back-share').addEventListener('click', resetShareSheet);
-$('#close-share').addEventListener('click', () => { shareDialog.close(); resetShareSheet(); });
+$('#back-share').addEventListener('click', () => runUI(workbenchOperations.shareSheet, {open: true}));
+$('#close-share').addEventListener('click', () => runUI(workbenchOperations.shareSheet, {open: false}));
 shareDialog.addEventListener('click', (event) => {
-  if (event.target === shareDialog) { shareDialog.close(); resetShareSheet(); }
+  if (event.target === shareDialog) runUI(workbenchOperations.shareSheet, {open: false});
 });
 
 viewerElement.addEventListener('pointerdown', () => $('#gesture-hint').classList.add('dismissed'), { once: true });
 
 function invalidateMarkupForViewChange(): void {
-  if (embedded && sceneId) parent.postMessage({type:'blind:scene-view-change', id:sceneId}, location.origin);
-  if (!markup.hasStrokes) return;
-  markup.clear();
-  surface.invalidateScreenHistory();
-  showToast('视角已改变，批注已隐藏');
+  if (!sceneReady) return;
+  operations.notify('view:invalidated');
+  const hadStrokes = markup.hasStrokes;
+  markup.clear(); surface.invalidateScreenHistory();
+  if (hadStrokes) showToast('视角已改变，批注已隐藏');
 }
 
 async function copyText(value: string): Promise<boolean> {
@@ -636,7 +647,12 @@ function savings(raw: number, lod: number): { delta: number; percent: number; co
 
 function syncSceneMeta(): void {
   if (!scene) return;
-  const models = meshViewer.modelInfos;
+  if (!geometryViewer) {
+    const documents = scene.entities.filter(entity => entity.source.kind === 'attachment');
+    meta.textContent = `${documents.length} 个组件 · ${formatBytes((scene.attachments ?? []).reduce((sum, item) => sum + (item.byte_size ?? 0), 0))} · 2D 画板`;
+    return;
+  }
+  const models = geometryViewer?.modelInfos ?? [];
   const rawBytes = models.reduce((sum, mesh) => sum + mesh.raw_bytes, 0);
   const activeBytes = models.reduce((sum, mesh) => sum + (mesh.quality === 'lod' ? mesh.lod_bytes ?? mesh.raw_bytes : mesh.raw_bytes), 0);
   meta.textContent = `${models.length} ${models.length === 1 ? 'mesh' : 'meshes'} · 当前 ${formatBytes(activeBytes)} · ${savings(rawBytes, activeBytes).comparison}`;

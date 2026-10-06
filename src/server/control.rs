@@ -14,7 +14,7 @@ pub(super) async fn health(State(state): State<AppState>) -> Json<HealthResponse
     Json(HealthResponse {
         status: "ok",
         version: env!("CARGO_PKG_VERSION"),
-        scene_schema: 7,
+        scene_schema: 8,
         image_renderer: state.renderer.is_some(),
     })
 }

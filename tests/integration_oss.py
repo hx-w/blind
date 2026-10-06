@@ -167,11 +167,13 @@ with tempfile.TemporaryDirectory(prefix='blind-oss-test-') as temp:
         assert api(mesh_url) == (200, PAYLOAD)
         assert api(mesh_url+'/lod')[0] == 200
         assert api(f'/api/v1/scenes/{token}/meshes/1') == (200, PAYLOAD)
-        if json.loads(api('/api/v1/health')[1])['image_renderer']:
+        image_renderer = json.loads(api('/api/v1/health')[1])['image_renderer']
+        if image_renderer:
             status, png = api('/i/'+token+'.png')
             assert status == 200 and png.startswith(b'\x89PNG')
         assert set((x[0], x[1]) for x in state['requests']) == {('key-a', 'bucket-a'), ('key-b', 'bucket-b')}
-        print('PASS: signed GET, separate credentials, encoded keys, mixed local/OSS, Raw/LOD/PNG')
+        print('PASS: signed GET, separate credentials, encoded keys, mixed local/OSS, Raw/LOD; PNG ' +
+              ('executed' if image_renderer else 'SKIP (image_renderer unavailable)'))
 
         manifest = tmp/'scene.json'
         manifest.write_text(json.dumps({'resources': [{'path': first, 'label': 'Crown'}], 'title': 'Config test'}))

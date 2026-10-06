@@ -1,6 +1,13 @@
 /* Scene chrome shares the Viewer tokens. Content surfaces live in world coordinates. */
 .component-layer { position: absolute; inset: 0; pointer-events: none; }
 .component-layer > div { pointer-events: none; }
+.component-world-wrapper { position: absolute; left: 0; top: 0; pointer-events: auto; }
+.board-stage .component-world-wrapper { transform-origin: 0 0; }
+.component-world-wrapper[hidden], .panel-wrapper[hidden], .scene-surface[hidden], .component-fixed-panels[hidden] { display: none; }
+.component-fixed-panels { position: absolute; inset: 0 0 0 auto; z-index: 8; width: min(360px, 40%); display: flex; flex-direction: column; gap: 12px; padding: 12px; overflow: auto; overscroll-behavior: contain; background: var(--surface-1); border-left: 1px solid var(--line); pointer-events: auto; }
+.panel-wrapper { width: 100%; flex: 0 0 auto; min-height: 240px; }
+.panel-surface .component-handle { cursor: default; }
+.panel-surface .component-enter { display: none; }
 .scene-surface { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-xs); color: var(--text); pointer-events: auto; }
 .scene-surface.selected { border-color: var(--accent); }
 .component-handle { display: flex; flex: 0 0 42px; align-items: center; gap: 6px; height: 42px; min-height: 42px; padding: 0 0 0 12px; border-bottom: 1px solid var(--line); cursor: grab; touch-action: none; }
@@ -148,6 +155,13 @@
 .native-surface :is(.content-mark-status, .content-layer-select) { font-size: calc(12px * var(--content-ui-scale, 1)); }
 .native-surface .content-tool-row > input[type="color"] { width: calc(42px * var(--content-ui-scale, 1)); }
 .native-surface .json-node > summary, .native-surface .json-more { min-height: calc(42px * var(--content-ui-scale, 1)); }
+/* Screen-sized board chrome must not reflow the source reading viewport. */
+.board-stage .native-surface .component-handle { position: absolute; inset: 0 0 auto; z-index: 1; }
+.board-stage .native-surface .component-body { margin-top: 42px; }
+.board-stage .native-surface .component-content pre { font-size: 13px; }
+.board-stage .native-surface .component-markdown { font-size: 15px; }
+.board-stage .native-surface .component-json { font-size: 14px; }
+.board-stage .native-surface .json-node > summary, .board-stage .native-surface .json-more { min-height: 42px; }
 .native-surface .component-body { cursor: grab; }
 .native-surface .component-body:active { cursor: grabbing; }
 .native-surface .component-body :is(a, button, input, summary, select) { cursor: pointer; }

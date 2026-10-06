@@ -18,6 +18,12 @@ LaunchAgent or Linux systemd user service when one is installed.
 `BLIND_VERSION` and `BLIND_INSTALL_DIR` select a version and installation
 directory. The installer never invokes sudo.
 
+Before upgrading a 2.1.0 Server to 2.2.0, explicitly authorize and run
+`blind doctor --clear-all` with the existing executable. This removes published
+short links and pinned browser snapshots; recreate shares after the upgrade.
+It does not remove Client registrations, configuration, SSH authorization or
+original sources. The updater does not perform this destructive cutover automatically.
+
 Prebuilt releases support macOS 14+ on Apple Silicon and Intel, plus native
 x86_64 Linux servers. For an optional Docker deployment, see [Linux Server](#linux-server).
 
@@ -287,7 +293,8 @@ renewal hook that reloads Nginx. The Server itself listens on HTTP behind TLS.
 ## Migration
 
 The installation remains one `blind` binary on each host. Preserve the existing
-Server configuration and scene database when upgrading A, then register the
+Server configuration when upgrading A, follow any release-specific link cutover
+above, then register the
 Client locally if A also shares files. `blind serve`, `blind service install`
 and `blind update` keep their existing entry points. Client commands do not
 start the Server. `blind status` reports local Server state, Client connectivity and target plugins.

@@ -33,6 +33,7 @@ fn normalized_definition(definition: &RendererDefinition) -> RendererDefinition 
     let mut definition = definition.clone();
     definition.extensions.sort();
     definition.frame_origins.sort();
+    definition.capabilities.operations.sort();
     // Spatial remains the protocol's primary presentation; the rest is a set.
     definition.capabilities.presentations[1..].sort();
     definition
@@ -127,9 +128,15 @@ pub(crate) fn validate_binding_metadata(
     expected_presentations.sort();
     let mut expected_origins = definition.frame_origins.clone();
     expected_origins.sort();
+    let mut operations = binding.capabilities.operations.clone();
+    operations.sort();
+    let mut expected_operations = definition.capabilities.operations.clone();
+    expected_operations.sort();
     ensure!(
         origins == expected_origins
             && presentations == expected_presentations
+            && operations == expected_operations
+            && binding.capabilities.host_space == definition.capabilities.host_space
             && binding.capabilities.movable == definition.capabilities.movable
             && binding.capabilities.resizable == definition.capabilities.resizable,
         "renderer binding metadata does not match pinned package"
@@ -310,6 +317,7 @@ mod tests {
             definition.extensions.reverse();
             definition.frame_origins.reverse();
             definition.capabilities.presentations[1..].reverse();
+            definition.capabilities.operations.reverse();
         }
         assert_eq!(revision, reordered.revision().unwrap());
         validate_bundle_set(&[original.clone(), reordered]).unwrap();
@@ -325,7 +333,7 @@ mod tests {
             ("table.html".into(), "btable.htmlc".into()),
         ]);
         assert_ne!(first.revision().unwrap(), second.revision().unwrap());
-        for change in 0..5 {
+        for change in 0..7 {
             let mut changed = original.clone();
             match change {
                 0 => changed.version = "1.0.1".into(),
@@ -336,6 +344,14 @@ mod tests {
                     .push_str("<p>changed</p>"),
                 2 => changed.components[0].extensions.push("other".into()),
                 3 => changed.components[0].capabilities.movable = false,
+                4 => {
+                    changed.components[0].capabilities.host_space =
+                        crate::scene::component::HostSpace::Spatial
+                }
+                5 => changed.components[0]
+                    .capabilities
+                    .operations
+                    .push("share.create".into()),
                 _ => changed.components[0]
                     .frame_origins
                     .push("https://c.example".into()),
@@ -343,6 +359,54 @@ mod tests {
             assert_ne!(revision, changed.revision().unwrap());
             assert!(validate_bundle_set(&[original.clone(), changed]).is_err());
         }
+    }
+    #[test]
+    fn renderer_grants_are_explicit_bounded_and_bound_to_the_pinned_package() {
+        let original = bundle();
+        let kind = ComponentKind::Plugin("example:table".into());
+        let mut binding = bind_renderer(&kind, std::slice::from_ref(&original))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            binding.capabilities.host_space,
+            crate::scene::component::HostSpace::Planar
+        );
+        assert!(!binding.capabilities.operations.iter().any(|grant| {
+            [
+                "share.create",
+                "resource.open",
+                "collection.write",
+                "content.read-scene",
+            ]
+            .contains(&grant.as_str())
+        }));
+        validate_binding_metadata(&original, &binding).unwrap();
+        binding.capabilities.operations.push("share.create".into());
+        assert!(validate_binding_metadata(&original, &binding).is_err());
+        binding.capabilities.operations.pop();
+        binding.capabilities.host_space = crate::scene::component::HostSpace::Spatial;
+        assert!(validate_binding_metadata(&original, &binding).is_err());
+        let mut declared = original.clone();
+        declared.components[0]
+            .capabilities
+            .operations
+            .push("share.create".into());
+        declared.components[0]
+            .capabilities
+            .operations
+            .push("content.read-scene".into());
+        declared.validate().unwrap();
+        for grant in ["host", "scene.*", "unknown.read", "scene.read"] {
+            let mut invalid = original.clone();
+            invalid.components[0]
+                .capabilities
+                .operations
+                .push(grant.into());
+            assert!(invalid.validate().is_err());
+        }
+        let mut invalid = serde_json::to_value(original).unwrap();
+        invalid["components"][0]["capabilities"]["host_space"] = json!("arbitrary");
+        assert!(serde_json::from_value::<RendererBundle>(invalid).is_err());
     }
     #[test]
     fn bundle_boundary_rejects_protocol_paths_files_and_sizes() {

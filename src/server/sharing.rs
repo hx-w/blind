@@ -27,6 +27,7 @@ pub(super) async fn client_scene(
             || !request.display.is_empty()
             || request.labels.as_ref().is_some_and(|ls| !ls.is_empty())
             || !request.label_groups.is_empty()
+            || request.viewport.is_some()
         {
             return Err(AppError::bad_request(
                 "collection conflicts with standalone scene fields",
@@ -55,6 +56,7 @@ pub(super) async fn client_scene(
     let (mut scene, renderers) = build_scene(
         &state,
         SceneInput {
+            viewport: request.viewport,
             paths: request.paths,
             display: request.display,
             manifest: request.manifest,
@@ -185,6 +187,7 @@ async fn create_collection_scene(
         let (mut scene, child_renderers) = build_scene(
             state,
             SceneInput {
+                viewport: part.viewport,
                 paths: part.paths,
                 display: part.display,
                 manifest: part.manifest,
@@ -226,7 +229,7 @@ async fn create_collection_scene(
         .map_err(|_| AppError::unauthorized("Client was revoked"))?;
     let first = parts.remove(0);
     let mut scene = first.scene;
-    scene.schema = 6;
+    scene.schema = 8;
     scene.collection = Some(crate::scene::SceneCollection {
         title: request.title,
         first_id: first.id,
@@ -306,6 +309,7 @@ pub(super) async fn create_scene(
     let (mut scene, renderers) = build_scene(
         &state,
         SceneInput {
+            viewport: request.viewport,
             paths: request.paths,
             display: request.display,
             manifest: request.manifest,
@@ -346,6 +350,7 @@ pub(super) async fn create_scene(
 }
 
 struct SceneInput {
+    viewport: Option<crate::scene::ViewportState>,
     paths: Vec<String>,
     display: Vec<crate::scene::component::DisplayOptions>,
     manifest: Option<crate::plugin::ShareManifest>,
@@ -366,6 +371,7 @@ async fn build_scene(
     AppError,
 > {
     let SceneInput {
+        viewport,
         paths,
         display,
         manifest,
@@ -407,7 +413,7 @@ async fn build_scene(
         })
         .unwrap_or_else(|| display.clone());
     let (renderers, selection) = prepare_renderers(renderers, options.into_iter(), shared)?;
-    let scene = if let Some(plan) = plan {
+    let mut scene = if let Some(plan) = plan {
         scene_from_manifest(state, plan, &selection, source, title).await?
     } else {
         let mut normalized = Vec::with_capacity(paths.len());
@@ -424,6 +430,12 @@ async fn build_scene(
         }
         scene_from_sources(state, &normalized, &display, &selection, source, title).await?
     };
+    if let Some(viewport) = viewport {
+        scene.state.viewport = viewport;
+    }
+    scene
+        .validate_viewport()
+        .map_err(|e| AppError::bad_request(&e.to_string()))?;
     Ok((scene, renderers))
 }
 

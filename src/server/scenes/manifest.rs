@@ -62,6 +62,11 @@ pub(in crate::server) async fn scene_from_manifest(
                 )
             })
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        if kind.geometry()
+            && component.display.placement == crate::scene::component::Placement::Panel
+        {
+            return Err(AppError::bad_request("geometry cannot use panel placement"));
+        }
         if let crate::scene::component::ComponentKind::Plugin(name) = &kind {
             if !renderers.bindings.contains_key(name) {
                 return Err(AppError::bad_request(
@@ -326,7 +331,7 @@ pub(in crate::server) async fn scene_from_manifest(
     }
     let mut scene = SceneDescriptor {
         source: source.clone(),
-        schema: 4,
+        schema: 8,
         title: title
             .or(plan.title)
             .unwrap_or_else(|| "Plugin scene".into()),
@@ -340,6 +345,7 @@ pub(in crate::server) async fn scene_from_manifest(
         warnings,
         collection: None,
     };
+    scene.state.viewport = plan.viewport;
     if !plan.components.is_empty() || has_panel_groups {
         scene.entities = scene.entity_descriptors();
         // Existing geometry groups and new surface groups share the same flat layout contract.
@@ -396,7 +402,10 @@ pub(in crate::server) async fn scene_from_manifest(
         if scene.entities.is_empty() {
             return Err(AppError::unprocessable("No readable scene components"));
         }
-        scene.schema = 5;
+        scene.schema = 8;
     }
+    scene
+        .validate_viewport()
+        .map_err(|e| AppError::bad_request(&e.to_string()))?;
     Ok(scene)
 }

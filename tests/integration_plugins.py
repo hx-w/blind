@@ -94,6 +94,7 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   for _ in range(100):
    try:http(origin+'/api/v1/health');break
    except (OSError,urllib.error.URLError):time.sleep(.1)
+  assert json.loads(http(origin+'/api/v1/health')[1])['scene_schema']==8
   invitation=cli('invite','--host',origin).stdout.strip()
   # Separate config root: this Client must not start or require a local Server.
   remote={**env,'BLIND_CONFIG_DIR':str(tmp/'remote-server'),'BLIND_CLIENT_DIR':str(tmp/'remote-client')}
@@ -139,16 +140,18 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   cli('share','--config','-',input=json.dumps(collection),environment=remote,ok=False)
   code=shared['viewer_url'].rsplit('/',1)[1]
   scene=json.loads(http(origin+'/api/v1/scenes/'+code)[1])
+  assert scene['state']['viewport']=={'mode':'auto'}
   assert len(scene['meshes'])==3 and scene['meshes'][0]['translation']!=scene['meshes'][1]['translation']
   assert scene['meshes'][1]['translation']==scene['meshes'][2]['translation']
   assert 'oss://' not in json.dumps(scene) and 'PRIVATE' not in json.dumps(scene)
   assert http(origin+'/'+scene['attachments'][0]['url'])[1]==b'attachment-data'
-  raw=http(origin+'/'+scene['meshes'][0]['source_url'])[1];assert raw
+  raw=http(origin+'/'+scene['meshes'][0]['source_url'])[1];assert raw==PLY
   assert http(origin+'/'+scene['meshes'][0]['source_url']+'/lod')[0]==200
   png=http(shared['image_url'])[1];assert png.startswith(b'\x89PNG')
   grouped=json.loads(cli('share','demo://grouped','--format','json',environment=remote).stdout)
   gscene=json.loads(http(origin+'/api/v1/scenes/'+grouped['viewer_url'].rsplit('/',1)[1])[1])
   assert [c['group'] for c in gscene['entities']]==['Stage one']*4+['Stage two']*2
+  assert all(c['placement']=='world' for c in gscene['entities'])
   assert len(gscene['meshes'])==6
   positions=[m['translation'] for m in gscene['meshes']]
   assert positions[0]==positions[1] and positions[2]==positions[3] and positions[4]==positions[5]
@@ -157,8 +160,16 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   ccode=collision['viewer_url'].rsplit('/',1)[1]
   cscene=json.loads(http(origin+'/api/v1/scenes/'+ccode)[1])
   assert len({c['id'] for c in cscene['entities']})==len(cscene['entities'])
-  update={'state':cscene['state'],'meshes':[{k:m[k] for k in ['color','opacity','visible','quality']} for m in cscene['meshes']], 'entities':[{k:c.get(k) for k in ['id','position','size','visible','opacity']} for c in cscene['entities']]}
-  assert http(origin+'/api/v1/scenes/'+ccode+'/share',data=update)[0]==200
+  update={'state':cscene['state'],'meshes':[{k:m[k] for k in ['color','opacity','visible','quality']} for m in cscene['meshes']], 'entities':[{k:c.get(k) for k in ['id','placement','position','size','visible','opacity']} for c in cscene['entities']]}
+  status,body=http(origin+'/api/v1/scenes/'+ccode+'/share',data=update);assert status==200
+  saved_code=json.loads(body)['viewer_url'].rsplit('/',1)[1]
+  saved_collision=json.loads(http(origin+'/api/v1/scenes/'+saved_code)[1])
+  assert [(c['id'],c['component'],c['source']) for c in saved_collision['entities']]==[(c['id'],c['component'],c['source']) for c in cscene['entities']]
+  for entity in saved_collision['entities']:
+   binding=entity['source']
+   resource=saved_collision['meshes'][binding['index']] if binding['kind']=='mesh' else saved_collision['attachments'][binding['index']]
+   url=resource['source_url'] if binding['kind']=='mesh' else resource['url']
+   assert http(origin+'/'+url)[1]==(PLY if binding['kind']=='mesh' else b'attachment-data')
   partial=json.loads(cli('share','demo://partial','--format','json',environment=remote).stdout);assert partial['status']=='partial'
   pscene=json.loads(http(origin+'/api/v1/scenes/'+partial['viewer_url'].rsplit('/',1)[1])[1])
   assert any(w['code']=='PANEL_INCOMPLETE' for w in pscene['warnings'])
@@ -175,7 +186,9 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   # Client-only identity can never read Server filesystem paths.
   c=json.loads((tmp/'remote-client'/'client.json').read_text())
   try:http(origin+'/api/v1/client/scenes',c['credential'],{'paths':[str(ROOT/'tests/fixtures/tetra.ply')]});raise AssertionError('filesystem escape')
-  except urllib.error.HTTPError:pass
+  except urllib.error.HTTPError as e:assert e.code==503
+  authorized=json.loads(http(origin+'/api/v1/client/plugins',c['credential'])[1])
+  assert [item['id'] for item in authorized['plugins']]==['demo']
   cli('plugin','remove','demo')
   assert http(origin+'/'+scene['meshes'][0]['source_url'])[1]==raw
   assert http(shared['image_url'])[1].startswith(b'\x89PNG')

@@ -14,11 +14,17 @@ use clap::Subcommand;
 #[derive(Subcommand)]
 pub enum Command {
     /// Manage plugins installed on this machine.
+    #[command(
+        after_help = "Use blind plugin <command> --help for an administration action.\nRenderer components declare host_space and operation grants, and control the viewer through a private MessagePort.\nRenderer API 1: https://github.com/hx-w/blind/blob/main/docs/components.md#plugin-components-api-1\nOperation catalog and permissions: https://github.com/hx-w/blind/blob/main/docs/components.md#public-operations\nResolver packages and administration: https://github.com/hx-w/blind/blob/main/docs/plugins.md"
+    )]
     Plugin {
         #[command(subcommand)]
         command: super::plugin::Command,
     },
     /// Configure named OSS stores on this Server.
+    #[command(
+        after_help = "Use blind oss <command> --help for alias configuration or discovery.\nObject storage: https://github.com/hx-w/blind/blob/main/docs/oss.md"
+    )]
     Oss {
         #[command(subcommand)]
         command: super::oss::Command,
@@ -98,7 +104,10 @@ pub enum Command {
         long_about = "Download the latest Blind release for this machine, verify its SHA-256 checksum and archive contents, and atomically replace the current executable. Blind never uses sudo. If a managed background service is installed, it is reconciled with the new binary."
     )]
     Update,
-    #[command(about = "Manage the per-user background service")]
+    #[command(
+        about = "Manage the per-user background service",
+        after_help = "Use blind service <command> --help to install, uninstall or inspect this machine's service.\nBackground service: https://github.com/hx-w/blind/blob/main/docs/client-server.md#background-service"
+    )]
     Service {
         #[command(subcommand)]
         command: ServiceCommand,

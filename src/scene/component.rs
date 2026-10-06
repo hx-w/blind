@@ -17,6 +17,8 @@ pub struct RendererBinding {
 #[serde(default, deny_unknown_fields)]
 pub struct RendererCapabilities {
     pub presentations: Vec<String>,
+    pub host_space: HostSpace,
+    pub operations: Vec<String>,
     pub movable: bool,
     pub resizable: bool,
 }
@@ -24,10 +26,53 @@ impl Default for RendererCapabilities {
     fn default() -> Self {
         Self {
             presentations: vec!["spatial".into(), "focus".into()],
+            host_space: HostSpace::Planar,
+            operations: [
+                "scene.read",
+                "scene.write",
+                "ui.write",
+                "content.read",
+                "content.write",
+                "annotation.write",
+                "section.write",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             movable: true,
             resizable: false,
         }
     }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HostSpace {
+    #[default]
+    Planar,
+    Spatial,
+}
+
+pub const OPERATION_GRANTS: &[&str] = &[
+    "scene.read",
+    "scene.write",
+    "ui.write",
+    "content.read",
+    "content.write",
+    "annotation.write",
+    "section.write",
+    "share.create",
+    "resource.open",
+    "collection.write",
+    "content.read-scene",
+];
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    #[default]
+    World,
+    Panel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +255,8 @@ impl ComponentKind {
 #[serde(deny_unknown_fields)]
 pub struct DisplayOptions {
     pub component: Option<ComponentKind>,
+    #[serde(default)]
+    pub placement: Placement,
     /// Exact ZIP member path. Extraction belongs to the source layer, not renderers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub member: Option<String>,
@@ -220,6 +267,11 @@ pub struct DisplayOptions {
 }
 impl DisplayOptions {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.placement != Placement::Panel
+                || !self.component.as_ref().is_some_and(ComponentKind::geometry),
+            "geometry cannot use panel placement"
+        );
         if let Some(member) = &self.member {
             validate_member(member)?;
         }
@@ -258,6 +310,8 @@ pub enum ComponentSource {
 pub struct SceneEntity {
     pub id: String,
     pub component: ComponentKind,
+    #[serde(default)]
+    pub placement: Placement,
     pub source: ComponentSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renderer: Option<crate::scene::component::RendererBinding>,
@@ -275,6 +329,8 @@ pub struct SceneEntity {
 #[serde(deny_unknown_fields)]
 pub struct EntityUpdate {
     pub id: String,
+    #[serde(default)]
+    pub placement: Placement,
     #[serde(default)]
     pub label: Option<String>,
     pub position: Option<[f32; 3]>,
@@ -296,6 +352,7 @@ impl EntityUpdate {
             validate_label(label)?;
         }
         DisplayOptions {
+            placement: self.placement,
             position: self.position,
             size: self.size,
             ..Default::default()

@@ -141,6 +141,7 @@ function textNodes(element: HTMLElement): Text[] {
 const SOURCE_LINE_STRIDE = 1024;
 export class DOMReading implements NativeContent {
   readonly scroll: HTMLElement;
+  json?: NativeContent['json'];
   private source = '';
   private targets: ReadingTarget[] = [];
   private byId = new Map<string, ReadingTarget>();
@@ -193,6 +194,20 @@ export class DOMReading implements NativeContent {
     return {id: `line:${line}`, element: lines.element, node: lines.node, start, end: end < 0 ? lines.node.length : end};
   }
   add(target: ReadingTarget): void { this.targets.push(target); this.byId.set(target.id, target); }
+  catalogTargets() {
+    return this.targets.map(target => ({id: target.id, label: target.id,
+      anchor: {source: this.source, target: target.id, offset: 0, x: 0, y: 0}}));
+  }
+  get targetRange(): {prefix: string; count: number} | undefined { return this.lines ? {prefix: 'line:', count: this.lines.count} : undefined; }
+  acceptsAnchor(anchor: ContentAnchor): boolean {
+    if (anchor.source !== this.source) return false;
+    const target = this.lines && /^line:\d+$/.test(anchor.target) ? this.sourceLine(Number(anchor.target.slice(5))) : this.byId.get(anchor.target);
+    if (target && !target.visual) {
+      const length = target.node ? (target.end ?? target.node.length) - (target.start ?? 0) : textNodes(target.element).reduce((sum, node) => sum + node.length, 0);
+      return Number.isInteger(anchor.offset) && anchor.offset >= 0 && anchor.offset <= length;
+    }
+    return !!this.locate(anchor);
+  }
   private onScroll = (): void => {
     if (this.restoring || !this.source || this.frame) return;
     this.frame = requestAnimationFrame(() => { this.frame = 0; this.save(); });
@@ -420,6 +435,12 @@ export class ImageReading implements NativeContent {
     this.layout();
     if (state.reading?.source === source) this.restore(state.reading);
     else this.save();
+  }
+  catalogTargets() { return this.source ? [{id: 'image', label: this.image.alt, anchor: {source: this.source, target: 'image', offset: 0, x: 0, y: 0}}] : []; }
+  acceptsAnchor(anchor: ContentAnchor): boolean { return anchor.source === this.source && anchor.target === 'image' && anchor.x >= 0 && anchor.x <= 1 && anchor.y >= 0 && anchor.y <= 1; }
+  fit(): void {
+    if (!this.source) return;
+    this.zoom(Math.min(this.scroll.clientWidth / this.image.naturalWidth, this.scroll.clientHeight / this.image.naturalHeight) / this.scale);
   }
   private layout(): void {
     const width = this.image.naturalWidth * this.scale, height = this.image.naturalHeight * this.scale;

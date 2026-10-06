@@ -39,6 +39,7 @@ pub(super) fn renderer_metadata_bytes(
                         .iter()
                         .chain(&definition.frame_origins)
                         .chain(&definition.capabilities.presentations)
+                        .chain(&definition.capabilities.operations)
                         .map(String::len)
                         .sum::<usize>()
             })
@@ -94,6 +95,19 @@ pub(super) fn validate_definitions(
         ensure!(
             valid_id(&c.name) && names.insert(&c.name),
             "invalid or repeated component name"
+        );
+        ensure!(
+            c.capabilities.operations.len() <= crate::scene::component::OPERATION_GRANTS.len()
+                && c.capabilities.operations.iter().all(|grant| {
+                    crate::scene::component::OPERATION_GRANTS.contains(&grant.as_str())
+                })
+                && c.capabilities
+                    .operations
+                    .iter()
+                    .collect::<HashSet<_>>()
+                    .len()
+                    == c.capabilities.operations.len(),
+            "invalid or repeated operation grant"
         );
         ensure!(
             c.capabilities

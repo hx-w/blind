@@ -6,6 +6,10 @@ import type { ReadingTarget } from './content-reading';
 import type {ContentAnchor} from './content-surface';
 import { renderMarkdown, markdownReady } from './markdown';
 import { graphTargets } from './graph';
+import type {OperationHost} from './operations/core';
+import {OperationError} from './operations/core';
+import {servePortOperations} from './operations/transport';
+import type {OperationActor} from './operations/core';
 
 export interface SurfaceContent {
   element: HTMLElement;
@@ -14,7 +18,8 @@ export interface SurfaceContent {
   present?(mode: Presentation): void;
   dispose(): void;
 }
-export type ContentFactory = (url: string, label: string, spec: SceneEntity) => SurfaceContent;
+export interface ContentFactoryContext { operations?: OperationHost }
+export type ContentFactory = (url: string, label: string, spec: SceneEntity, context?: ContentFactoryContext) => SurfaceContent;
 function container(): HTMLDivElement { const e = document.createElement('div'); e.className = 'component-content'; return e; }
 class OversizedResourceError extends Error {}
 async function bytes(url: string, signal: AbortSignal, maxBytes = 64 * 1024 * 1024): Promise<ArrayBuffer> {
@@ -117,7 +122,7 @@ export const jsonContent: ContentFactory = (url, _label, spec) => {
     let expanded = new Set<string>(matching && Array.isArray(state.expanded) ? state.expanded.filter(path => typeof path === 'string') : ['']);
     const tree = document.createElement('div'); tree.className = 'json-tree'; tree.setAttribute('role', 'tree');
     const targets: ReadingTarget[] = [];
-    const branches = new Map<string, {details: HTMLDetailsElement; ensure(key: string, reveal: boolean): void}>();
+    const branches = new Map<string, {details: HTMLDetailsElement; ensure(key: string, reveal: boolean): void; page(): void; loaded(): number; total: number}>();
     let installed = false, remaining = 5000;
     const pageSize = 100;
     const register = (target: ReadingTarget): void => { if (installed) native.add(target); else targets.push(target); };
@@ -150,12 +155,12 @@ export const jsonContent: ContentFactory = (url, _label, spec) => {
           }
           if (next < entries && remaining > 0) {
             more = document.createElement('button'); more.type = 'button'; more.className = 'json-more'; more.textContent = `显示更多（剩余 ${entries - next} 项）`;
-            more.addEventListener('click', fill); children.append(more);
+            more.addEventListener('click', () => native.json?.page(path)); children.append(more);
           } else if (next < entries) {
             const cut = document.createElement('span'); cut.className = 'json-muted'; cut.textContent = '… 其余内容已折叠'; children.append(cut);
           }
         };
-        branches.set(path, {details, ensure(childKey, reveal) {
+        branches.set(path, {details, page: fill, loaded: () => next, total: entries, ensure(childKey, reveal) {
           if (reveal) details.open = true;
           const index = array ? Number(childKey) : keys!.indexOf(childKey);
           while (next <= index && next < entries && remaining > 0) fill();
@@ -166,17 +171,11 @@ export const jsonContent: ContentFactory = (url, _label, spec) => {
           // Initial disclosure notifications and rollback notifications are not
           // user mutations; in particular, do not erase a visible rejection.
           if (details.open === wasOpen) return;
-          const nextExpanded = new Set(expanded);
-          if (details.open) nextExpanded.add(path); else nextExpanded.delete(path);
-          const nextState = {...state, expanded:[...nextExpanded]};
-          if (!acceptsContentState(nextState, element)) { details.open = wasOpen; return; }
-          if (details.open && next === 0) fill();
-          if (installed) {
-            const anchor = native.capture(); if (anchor) nextState.reading = anchor;
+          try { native.json?.setExpanded(path, details.open); }
+          catch (error) {
+            details.open = wasOpen; status.hidden = false;
+            status.textContent = error instanceof Error ? error.message : String(error);
           }
-          if (!acceptsContentState(nextState, element)) { details.open = wasOpen; return; }
-          expanded = nextExpanded; Object.assign(state, nextState);
-          contentStateChanged(element);
         });
         details.append(children); parent.append(details);
         if (details.open) fill();
@@ -219,6 +218,47 @@ export const jsonContent: ContentFactory = (url, _label, spec) => {
     abort.signal.throwIfAborted();
     installed = true;
     native.install(source, targets, (target, anchor) => ensurePath(target, true, anchor));
+    const resolveValue = (path: string): unknown => {
+      let current = value;
+      if (path !== '' && !path.startsWith('/')) throw new OperationError('INVALID_ARGUMENT', 'JSON path must be a JSON Pointer', {field: 'path'});
+      for (const segment of path.split('/').slice(1)) {
+        if (/~(?![01])/u.test(segment)) throw new OperationError('INVALID_ARGUMENT', 'Invalid JSON Pointer escape', {field: 'path'});
+        const key = segment.replace(/~1/g, '/').replace(/~0/g, '~');
+        if (!current || typeof current !== 'object' || !Object.hasOwn(current, key)) throw new OperationError('INVALID_ARGUMENT', 'Unknown JSON path', {field: 'path', target: path});
+        current = (current as Record<string, unknown>)[key];
+      }
+      return current;
+    };
+    const accepts = native.acceptsAnchor.bind(native);
+    native.acceptsAnchor = anchor => {
+      if (accepts(anchor)) return true;
+      if (anchor.source !== source || !anchor.target.startsWith('json:')) return false;
+      try { resolveValue(anchor.target.slice(5)); return anchor.offset === 0; } catch { return false; }
+    };
+    native.json = {
+      branches: () => [...branches].map(([path, branch]) => ({path, expanded: expanded.has(path), loaded: branch.loaded(), total: branch.total})),
+      setExpanded(path, open) {
+        const item = resolveValue(path);
+        if (!item || typeof item !== 'object') throw new OperationError('UNSUPPORTED', 'JSON leaf cannot be expanded', {target: path});
+        const next = new Set(expanded);
+        if (open) next.add(path); else next.delete(path);
+        if (!acceptsContentState({...state, expanded: [...next]}, element)) throw new OperationError('INVALID_ARGUMENT', 'Content state exceeds 64 KiB');
+        ensurePath(`json:${path}`, false);
+        const branch = branches.get(path);
+        if (!branch) throw new OperationError('RESOURCE_UNAVAILABLE', 'JSON branch exceeds the preview limit', {target: path});
+        expanded = next; state.expanded = [...next]; branch.details.open = open;
+        if (open && !branch.loaded()) branch.page();
+        contentStateChanged(element);
+      },
+      page(path) {
+        resolveValue(path);
+        const branch = branches.get(path);
+        if (!branch) throw new OperationError('INVALID_ARGUMENT', 'Expand parent branches before paging', {target: path});
+        if (branch.loaded() >= branch.total) throw new OperationError('CONFLICT', 'No more JSON entries', {target: path});
+        if (remaining <= 0) throw new OperationError('RESOURCE_UNAVAILABLE', 'JSON preview has reached its materialization limit', {target: path});
+        branch.page(); contentStateChanged(element);
+      },
+    };
   }).catch(error => {
     if (!(error instanceof OversizedResourceError)) throw error;
     const message = document.createElement('p'); message.className = 'json-status'; message.textContent = 'JSON 文件较大，无法在预览中展开。';
@@ -275,12 +315,16 @@ export function validateComponentState(state: unknown): unknown {
   return JSON.parse(json);
 }
 /** Opaque-origin iframe and a private MessagePort; renderer code never runs in the Viewer. */
-export const pluginContent: ContentFactory = (url, label, spec) => {
+export const pluginContent: ContentFactory = (url, label, spec, context) => {
   const element = container(); const abort = new AbortController(); const iframe = document.createElement('iframe');
   iframe.title = label; iframe.sandbox.add('allow-scripts'); iframe.referrerPolicy = 'no-referrer';
+  const exporting = new URLSearchParams(location.search).has('render');
   let mode: Presentation = 'spatial'; let port: MessagePort | undefined; let disposed = false;
-  let complete!: () => void; let fail!: (error: Error) => void;
-  const ready = report(element, new Promise<void>((resolve, reject) => {complete = resolve; fail = reject;}));
+  let disconnectOperations: (() => void) | undefined;
+  const completion = Promise.withResolvers<void>();
+  const complete = completion.resolve;
+  const fail = completion.reject;
+  const ready = report(element, completion.promise);
   const timeout = window.setTimeout(() => fail(new Error(`${label}：组件加载超时`)), 45000);
   let external: HTMLIFrameElement | undefined; let externalOrigin: string | undefined;
   const closeExternal = () => {external?.remove(); external = undefined; externalOrigin = undefined; iframe.style.visibility = ''; port?.postMessage({version:1,type:'frame:closed'});};
@@ -306,22 +350,32 @@ export const pluginContent: ContentFactory = (url, label, spec) => {
   iframe.onload = async () => {
     try {
       const buffer = await data; if (disposed) return;
-      port?.close(); const channel = new MessageChannel(); port = channel.port1;
+      disconnectOperations?.(); port?.close();
+      const channel = new MessageChannel(); port = channel.port1;
+      const actor: OperationActor = {kind: 'component', entityId: spec.id, grants: spec.renderer?.capabilities.operations ?? []};
+      if (context?.operations) disconnectOperations = servePortOperations(context.operations, port, actor);
       port.onmessage = event => {
         if (event.data?.version !== 1) return;
         if (event.data.type === 'frame:open') openExternal(event.data.url);
         if (event.data.type === 'frame:close') closeExternal();
         if (event.data.type === 'frame:post' && external && externalOrigin) external.contentWindow?.postMessage(event.data.data,externalOrigin);
         if (event.data.type === 'state') {
-          try { spec.state = validateComponentState(event.data.state); }
-          catch { /* Keep the last valid state so one renderer cannot break sharing. */ }
+          try {
+            if (exporting) throw new OperationError('FORBIDDEN', 'Export component state is read-only');
+            spec.state = validateComponentState(event.data.state);
+            context?.operations?.notify('component', {entityId: spec.id});
+            port?.postMessage({version: 1, type: 'state:result', ok: true});
+          } catch (error) {
+            port?.postMessage({version: 1, type: 'state:result', ok: false, error: {code: error instanceof OperationError ? error.code : 'INVALID_ARGUMENT', message: error instanceof Error ? error.message : 'Invalid component state'}});
+          }
         }
         if (event.data.type === 'ready') { clearTimeout(timeout); complete(); }
         if (event.data.type === 'error') {clearTimeout(timeout); fail(new Error(`${label}：${String(event.data.message ?? '渲染失败').slice(0,256)}`));}
       };
-      iframe.contentWindow?.postMessage({type: 'blind:init', version: 1, label, state:spec.state, buffer: buffer.slice(0), presentation: mode, exporting: new URLSearchParams(location.search).has('render')}, '*', [channel.port2]);
+      const contentBuffer = buffer.slice(0);
+      iframe.contentWindow?.postMessage({type: 'blind:init', version: 1, entityId: spec.id, label, state: spec.state, buffer: contentBuffer, presentation: mode, exporting, operations: context?.operations ? {version: 1, sceneId: context.operations.sceneId, catalog: context.operations.catalog(actor)} : undefined}, '*', [channel.port2, contentBuffer]);
     } catch (error) { fail(error instanceof Error ? error : new Error('组件加载失败')); }
   };
   iframe.src = url.replace(/attachments\/\d+(?=\?|$)/, `renderers/${encodeURIComponent(spec.id)}`); element.append(iframe);
-  return {element, ready, present(presentation) {mode = presentation; if (mode === 'spatial') closeExternal(); port?.postMessage({type:'presentation',version:1,presentation});}, dispose() {disposed = true; closeExternal(); window.removeEventListener('message',externalMessage); abort.abort(); clearTimeout(timeout); port?.close(); iframe.src = 'about:blank';}};
+  return {element, ready, present(presentation) {mode = presentation; if (mode === 'spatial') closeExternal(); port?.postMessage({type:'presentation',version:1,presentation});}, dispose() {disposed = true; disconnectOperations?.(); closeExternal(); window.removeEventListener('message',externalMessage); abort.abort(); clearTimeout(timeout); port?.close(); iframe.src = 'about:blank';}};
 };

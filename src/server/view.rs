@@ -383,6 +383,7 @@ pub(super) async fn reshare(
             collection.layout = Some(layout);
         }
         collection.active_scene_id = active;
+        scene.schema = 8;
     } else {
         let request: ReshareRequest =
             serde_json::from_value(body).map_err(|e| AppError::unprocessable(&e.to_string()))?;
@@ -515,7 +516,11 @@ async fn render_single_image(
     if source_bytes > crate::storage::sources::MAX_SOURCE_BYTES {
         return Err(AppError::unprocessable("image sources exceed 512 MiB"));
     }
-    if !scene.entities.is_empty() || scene.state.section.is_some() {
+    if !scene.entities.is_empty()
+        || scene.state.section.is_some()
+        || scene.state.viewport.mode == crate::scene::ViewportMode::Board
+        || scene.state.viewport.board.is_some()
+    {
         let url = format!(
             "http://{}{}/s/{}?render=1{}",
             control_address(&state.config)?,

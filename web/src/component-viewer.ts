@@ -2,20 +2,37 @@ import * as THREE from 'three';
 import { packGroups } from './component-layout';
 import { CSS3DObject, CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer.js';
 import type { PublicScene, Vec3 } from './api';
-import { MeshViewer } from './viewer';
+import type { SceneViewport } from './viewport/types';
 import { ComponentRegistry, componentGroups, entityUpdate, effectiveVisibility, sceneEntities, type ComponentCapabilities, type ComponentRuntime, type Presentation, type SceneEntity } from './scene-components';
 import { textContent, markdownContent, jsonContent, pluginContent, htmlContent, imageContent, type ContentFactory } from './component-content';
 import {diagramContent} from './diagram-content';
 import {ContentAnnotations} from './content-annotations';
-import {updateContentState} from './content-reading';
-import type {ContentAnchor, ContentState} from './content-surface';
+import {updateContentState, validateContentState} from './content-reading';
+import type {ContentAnchor, ContentState, ContentTarget, JsonBranch, NativeContent} from './content-surface';
 import type {SurfaceContent} from './component-content';
 import {installIcons} from './icons';
 import {compactLabel} from './compact-label';
+import {OperationError, type OperationHost} from './operations/core';
+import type {ContentFactoryContext} from './component-content';
+import {readView} from './operations/view';
+import type {ViewMutation} from './operations/view';
 import './components.css';
 
-interface Context { viewer: MeshViewer; host: ComponentViewer; scene: PublicScene }
+interface Context extends ContentFactoryContext { viewer: SceneViewport; host: ComponentViewer; scene: PublicScene }
 interface Entry { spec: SceneEntity; runtime: ComponentRuntime; capabilities: ComponentCapabilities }
+export interface EntitySnapshot {
+  id: string; component: string; label: string; group: string | null; placement: 'world' | 'panel';
+  visible: boolean; opacity: number; selected: boolean; position: Vec3 | null; size: [number, number] | null;
+  capabilities: ComponentCapabilities; color?: string; quality?: 'raw' | 'lod'; loading?: boolean; unavailable?: string;
+}
+export interface ContentSnapshot {
+  id: string; native: boolean; ready: boolean; presentation: Presentation; menu: boolean; unavailable?: string;
+  state?: ContentState; capabilities: {reading: boolean; selection: boolean; zoom: boolean; fit: boolean; json: boolean; annotations: boolean};
+  targets: readonly ContentTarget[]; layers: readonly {id: string; label: string}[]; branches: readonly JsonBranch[];
+  targetRange?: {prefix: string; count: number};
+  annotation?: {active: boolean; kind: 'point' | 'line'; selected: string | null; label: string; color: string; canUndo: boolean; canRedo: boolean};
+}
+export interface SceneListState { open: boolean; tab: 'elements' | 'info' }
 interface TreeRow { button: HTMLButtonElement; edit: HTMLButtonElement; editor: HTMLFormElement; input: HTMLTextAreaElement; label: string; opacity: HTMLInputElement; visibility: HTMLButtonElement; color?: HTMLButtonElement; palette?: HTMLElement; choices?: HTMLButtonElement[] }
 const geometryPalette = ['#8fa9c9', '#8ca49c', '#b2a4ad', '#bf8078', '#8f8bb2', '#b7b3aa'];
 const sceneInput = {spatial: 'scene', focus: 'scene', fullscreen: 'scene'} as const;
@@ -24,7 +41,8 @@ export function builtInComponents(): ComponentRegistry<Context> {
   const registry = new ComponentRegistry<Context>();
   for (const type of ['mesh', 'points']) registry.register({type,
     capabilities: {presentations: ['spatial', 'focus', 'fullscreen'], movable: false, resizable: false, input: sceneInput, geometry: type as 'mesh' | 'points'},
-    create(spec, {viewer}) {
+    create(spec, {viewer, host}) {
+      if (viewer.kind !== 'spatial') throw new OperationError('UNSUPPORTED', 'Geometry requires a spatial viewport', {target: spec.id});
       const index = spec.source.index;
       return {
         get bounds() { return viewer.meshBounds(index); },
@@ -33,7 +51,7 @@ export function builtInComponents(): ComponentRegistry<Context> {
         setOpacity: v => viewer.setMeshOpacity(index, v),
         setLabel: label => viewer.setLabelAt(index, label),
         setPresentation: () => {}, select: () => viewer.select(index),
-        focus: () => viewer.focusLabelGroup([index], false), dispose: () => {},
+        focus: () => host.focusEntities([spec.id]), dispose: () => {},
       };
     },
   });
@@ -47,11 +65,15 @@ export function builtInComponents(): ComponentRegistry<Context> {
 export class ComponentViewer {
   readonly layer = new THREE.Scene();
   private readonly compositor = document.createElement('div');
+  readonly panelRoot = document.createElement('aside');
+  private operations?: OperationHost;
+  private panelResize?: ResizeObserver;
   private readonly planes = new Map<number, {scene: THREE.Scene; renderer: CSS3DRenderer}>();
   private readonly bands: HTMLCanvasElement[] = [];
   private readonly entries: Entry[] = [];
   private readonly tree = document.createElement('aside');
   private readonly treeViews = new Map<'elements' | 'info', {button: HTMLButtonElement; content: HTMLElement}>();
+  private treeTab: 'elements' | 'info' = 'elements';
   private treeResize?: ResizeObserver;
   private readonly rows = new Map<string, TreeRow>();
   private openColorPicker?: {trigger: HTMLButtonElement; palette: HTMLElement; item: HTMLElement};
@@ -69,7 +91,10 @@ export class ComponentViewer {
   private returnFocus?: HTMLElement;
   private selected?: Entry;
   private opened = this.viewport.matches;
+  get entityMutationActive(): boolean { return this.syncing; }
   private syncing = false;
+  private contentCommitDepth = 0;
+  private readonly pendingContentEvents = new Set<string>();
   private readonly touches = new Map<number, {event: PointerEvent; runtime?: SurfaceRuntime}>();
   private cameraTouch = false;
   onSelect?: (entity: SceneEntity) => void;
@@ -78,7 +103,16 @@ export class ComponentViewer {
   onContentViewChange?: () => void;
   get selectedEntity(): SceneEntity | undefined { return this.selected?.spec; }
   get selectedGeometry(): 'mesh' | 'points' | undefined { return this.selected?.capabilities.geometry; }
-  openInfo(): void { this.showTreeView('info'); this.setOpen(true); }
+  openInfo(): void { this.setSceneList({open: true, tab: 'info'}); }
+  get sceneListState(): SceneListState { return {open: this.opened, tab: this.treeTab}; }
+  setSceneList(changes: {open?: boolean; tab?: 'elements' | 'info'}): SceneListState {
+    const previous = this.sceneListState;
+    if (changes.tab !== undefined) this.showTreeView(changes.tab);
+    if (changes.open !== undefined) this.setOpen(changes.open);
+    const state = this.sceneListState;
+    if (state.open !== previous.open || state.tab !== previous.tab) this.operations?.notify('scene-list', {sceneList: state});
+    return state;
+  }
   annotateContent(): boolean {
     const runtime = this.selected?.runtime;
     if (!(runtime instanceof SurfaceRuntime)) return false;
@@ -89,6 +123,138 @@ export class ComponentViewer {
   }
   returnToScene(): void { this.close(); }
   get entities(): readonly SceneEntity[] { return this.entries.map(e => e.spec); }
+  bindOperations(host: OperationHost): void { this.operations = host; }
+  private changed(): void { this.onChange?.(); this.operations?.notify('entity', {entities: this.listEntities(), selected: this.selected?.spec.id ?? null}); }
+  private updatePanelSpace(): void {
+    const visible = this.entries.some(entry => entry.spec.placement === 'panel' && effectiveVisibility(entry.spec));
+    this.panelRoot.hidden = !visible; this.root.classList.toggle('has-fixed-panels', visible);
+    const width = visible ? this.panelRoot.getBoundingClientRect().width : 0;
+    this.viewer.setReservedSpace(width);
+    this.root.closest<HTMLElement>('.app-shell')?.style.setProperty('--fixed-panel-space', `${width}px`);
+  }
+  private requireEntry(id: string): Entry {
+    const entry = this.entries.find(entry => entry.spec.id === id);
+    if (!entry) throw new OperationError('UNKNOWN_ENTITY', 'Unknown entity', {target: id});
+    return entry;
+  }
+  listEntities(): EntitySnapshot[] { return this.entries.map(entry => this.entitySnapshot(entry)); }
+  getEntity(id: string): EntitySnapshot { return this.entitySnapshot(this.requireEntry(id)); }
+  private entitySnapshot(entry: Entry): EntitySnapshot {
+    const {spec, capabilities} = entry;
+    const info = this.viewer.kind === 'spatial' && spec.source.kind === 'mesh' ? this.viewer.modelInfos[spec.source.index] : undefined;
+    return {id: spec.id, component: spec.component, label: spec.label, group: spec.group, placement: spec.placement,
+      visible: spec.visible, opacity: spec.opacity, selected: this.selected === entry, position: spec.position ? [...spec.position] : null,
+      size: spec.size ? [...spec.size] : null, capabilities: structuredClone(capabilities),
+      ...(info ? {color: info.color, quality: info.quality, loading: info.loading, ...(info.lod_error ? {unavailable: 'Geometry resource is unavailable'} : {})} : {})};
+  }
+  selectEntity(id: string): EntitySnapshot { this.select(this.requireEntry(id).spec); return this.getEntity(id); }
+  labelEntity(id: string, label: string): EntitySnapshot {
+    let length = 0; for (let index = 0; index < label.length; length++) index += label.codePointAt(index)! > 0xffff ? 2 : 1;
+    if (!label.trim() || length > 120) throw new OperationError('INVALID_ARGUMENT', 'Name must contain 1–120 characters', {field: 'label'});
+    this.setLabel(this.requireEntry(id), label); return this.getEntity(id);
+  }
+  styleEntity(id: string, style: {visible?: boolean; opacity?: number; color?: string}): EntitySnapshot {
+    const entry = this.requireEntry(id);
+    if (style.opacity !== undefined && (!Number.isFinite(style.opacity) || style.opacity < 0 || style.opacity > 1)) throw new OperationError('INVALID_ARGUMENT', 'Opacity must be between zero and one', {field: 'opacity'});
+    if (style.color !== undefined && (!entry.capabilities.geometry || this.viewer.kind !== 'spatial')) throw new OperationError('UNSUPPORTED', 'Only geometry has a color', {target: id});
+    if (style.color !== undefined && !/^#[0-9a-f]{6}$/i.test(style.color)) throw new OperationError('INVALID_ARGUMENT', 'Expected hex color', {field: 'color'});
+    const visible = style.visible ?? entry.spec.visible;
+    const opacity = style.opacity ?? (visible && entry.spec.opacity === 0 ? 1 : entry.spec.opacity);
+    this.syncing = true;
+    const commit = () => {
+      if (style.color !== undefined && this.viewer.kind === 'spatial') this.viewer.setMeshColor(entry.spec.source.index, style.color);
+      entry.spec.visible = visible; entry.spec.opacity = opacity;
+      entry.runtime.setOpacity(opacity); entry.runtime.setVisible(effectiveVisibility(entry.spec)); this.refreshBounds();
+    };
+    try { if (this.viewer.kind === 'spatial') this.viewer.batchStyles(commit); else commit(); }
+    finally { this.syncing = false; }
+    this.sync(); this.changed(); return this.getEntity(id);
+  }
+  showEntities(ids: readonly string[], opacity?: number, fit = false): EntitySnapshot[] {
+    const chosen = ids.map(id => this.requireEntry(id));
+    if (ids.length > 256 || new Set(ids).size !== ids.length) throw new OperationError('INVALID_ARGUMENT', 'Expected at most 256 unique entity IDs', {field: 'ids'});
+    if (opacity !== undefined && (!Number.isFinite(opacity) || opacity < 0 || opacity > 1)) throw new OperationError('INVALID_ARGUMENT', 'Opacity must be between zero and one', {field: 'opacity'});
+    const selected = new Set(chosen);
+    this.syncing = true;
+    const commit = () => {
+      for (const entry of this.entries) {
+        entry.spec.visible = selected.has(entry);
+        if (entry.spec.visible) entry.spec.opacity = opacity ?? (entry.spec.opacity || 1);
+        entry.runtime.setOpacity(entry.spec.opacity); entry.runtime.setVisible(effectiveVisibility(entry.spec));
+      }
+      this.refreshBounds();
+    };
+    try { if (this.viewer.kind === 'spatial') this.viewer.batchStyles(commit); else commit(); }
+    finally { this.syncing = false; }
+    this.sync();
+    if (fit) {
+      const bounds = new THREE.Box3();
+      for (const entry of chosen) if (entry.spec.placement === 'world' && effectiveVisibility(entry.spec)) bounds.union(entry.runtime.bounds);
+      if (!bounds.isEmpty()) this.viewer.focusBounds(bounds);
+    }
+    this.changed(); return this.listEntities();
+  }
+  isolateEntity(id: string, fit = false): EntitySnapshot[] {
+    const entry = this.requireEntry(id);
+    this.syncing = true;
+    try { this.select(entry.spec); } finally { this.syncing = false; }
+    return this.showEntities([id], undefined, fit);
+  }
+  async focusEntities(ids: readonly string[], animate = false): Promise<ViewMutation> {
+    const entries = ids.map(id => this.requireEntry(id));
+    if (!entries.length || ids.length > 256 || new Set(ids).size !== ids.length) throw new OperationError('INVALID_ARGUMENT', 'Focus requires 1–256 unique entity IDs', {field: 'ids'});
+    const bounds = new THREE.Box3();
+    for (const entry of entries) if (entry.spec.placement === 'world' && effectiveVisibility(entry.spec)) bounds.union(entry.runtime.bounds);
+    if (entries.length === 1 && entries[0].spec.placement === 'panel' && effectiveVisibility(entries[0].spec) && entries[0].runtime instanceof SurfaceRuntime) {
+      entries[0].runtime.focusPanel();
+    } else {
+      if (bounds.isEmpty()) throw new OperationError('RESOURCE_UNAVAILABLE', 'No visible world entities to focus');
+      this.viewer.focusBounds(bounds, animate);
+    }
+    const status = await this.viewer.waitForViewTransition(), view = readView(this.viewer);
+    this.operations?.notify('view', view); return {status, view};
+  }
+  async qualityEntity(id: string, quality: 'raw' | 'lod'): Promise<EntitySnapshot> {
+    const entry = this.requireEntry(id);
+    if (!entry.capabilities.geometry || this.viewer.kind !== 'spatial') throw new OperationError('UNSUPPORTED', 'Only geometry has mesh quality', {target: id});
+    if (quality === 'lod' && this.viewer.annotations.some(mark => mark.mesh === entry.spec.source.index)) throw new OperationError('CONFLICT', 'Surface-marked geometry must retain raw quality', {target: id});
+    try { await this.viewer.setQuality(entry.spec.source.index, quality); }
+    catch { throw new OperationError('RESOURCE_UNAVAILABLE', 'Requested geometry quality could not be loaded', {target: id, retryable: true}); }
+    this.sync(); this.changed(); return this.getEntity(id);
+  }
+  placementEntity(id: string, placement: 'world' | 'panel'): EntitySnapshot {
+    const entry = this.requireEntry(id);
+    if (!(entry.runtime instanceof SurfaceRuntime)) throw new OperationError('UNSUPPORTED', 'Geometry cannot be placed in a panel', {target: id});
+    if (placement === entry.spec.placement) return this.getEntity(id);
+    const existingWorld = this.entries.find(candidate => candidate.spec.placement === 'world' && candidate !== entry);
+    const worldZ = existingWorld ? existingWorld.spec.position?.[2] ?? 0 : entry.spec.position?.[2] ?? 0;
+    if (placement === 'world' && this.viewer.kind === 'board' && (entry.spec.renderer?.capabilities.host_space === 'spatial' || Math.abs((entry.spec.position?.[2] ?? 0) - worldZ) > 1e-6)) throw new OperationError('UNSUPPORTED', 'Spatial content cannot enter a board world', {target: id});
+    entry.runtime.setPlacement(placement); this.refreshBounds(); this.render(); this.changed(); return this.getEntity(id);
+  }
+  contentRuntime(id: string): SurfaceRuntime {
+    const runtime = this.requireEntry(id).runtime;
+    if (!(runtime instanceof SurfaceRuntime)) throw new OperationError('UNSUPPORTED', 'Entity has no content surface', {target: id});
+    return runtime;
+  }
+  getContent(id: string): ContentSnapshot { return this.contentRuntime(id).snapshot(); }
+  async whenSettled(): Promise<void> {
+    await Promise.all(this.entries.flatMap(entry => entry.runtime instanceof SurfaceRuntime ? [entry.runtime.whenSettled()] : []));
+  }
+  contentChanged(id: string): void {
+    if (!this.entries.some(entry => entry.spec.id === id)) return;
+    if (this.contentCommitDepth) { this.pendingContentEvents.add(id); return; }
+    this.onChange?.(); this.operations?.notify('content', {entityId: id, content: this.getContent(id)});
+  }
+  commitContent<T>(mutation: () => T): T {
+    this.contentCommitDepth++;
+    try { return mutation(); }
+    finally {
+      if (--this.contentCommitDepth === 0) {
+        const ids = [...this.pendingContentEvents]; this.pendingContentEvents.clear();
+        for (const id of ids) this.contentChanged(id);
+      }
+    }
+  }
   private setLabel(entry: Entry, value: string): void {
     const spec = entry.spec;
     const fallback = spec.source.kind === 'mesh'
@@ -96,20 +262,19 @@ export class ComponentViewer {
       : this.scene.attachments?.[spec.source.index]?.label;
     const label = value.replace(/\s+/g, ' ').trim() || fallback || spec.label;
     if (label === spec.label) return;
-    spec.label = label;
-    entry.runtime.setLabel(label);
-    if (this.expanded === entry) this.dialogTitle.textContent = label;
-    this.sync(); this.onChange?.();
-  }
-  private applyStyle(entry: Entry, visible: boolean, opacity: number): void {
     this.syncing = true;
-    entry.spec.visible = visible; entry.spec.opacity = opacity;
-    entry.runtime.setOpacity(opacity); entry.runtime.setVisible(visible && opacity > 0);
-    this.syncing = false; this.sync(); this.onChange?.();
+    try {
+      spec.label = label; entry.runtime.setLabel(label);
+      if (this.expanded === entry) this.dialogTitle.textContent = label;
+    } finally { this.syncing = false; }
+    this.sync(); this.changed();
   }
 
-  constructor(readonly root: HTMLElement, private readonly viewer: MeshViewer, readonly scene: PublicScene, registry = builtInComponents()) {
-    this.compositor.className = 'component-compositor'; root.append(this.compositor);
+  constructor(readonly root: HTMLElement, private readonly viewer: SceneViewport, readonly scene: PublicScene, registry = builtInComponents(), factoryContext: ContentFactoryContext = {}) {
+    this.operations = factoryContext.operations;
+    this.compositor.className = 'component-compositor'; if (viewer.kind === 'spatial') root.append(this.compositor);
+    this.panelRoot.className = 'component-fixed-panels'; this.panelRoot.setAttribute('aria-label', '固定内容面板'); root.append(this.panelRoot);
+    this.panelResize = new ResizeObserver(() => this.updatePanelSpace()); this.panelResize.observe(this.panelRoot);
     this.groupLabels.className = 'component-group-labels'; root.append(this.groupLabels);
     const customTypes = new Set<string>();
     for (const spec of sceneEntities(scene)) {
@@ -118,7 +283,7 @@ export class ComponentViewer {
         customTypes.add(spec.component);
       }
       const definition = registry.get(spec.component);
-      this.entries.push({spec, capabilities: definition.capabilities, runtime: definition.create(spec, {viewer, host: this, scene})});
+      this.entries.push({spec, capabilities: definition.capabilities, runtime: definition.create(spec, {viewer, host: this, scene, ...factoryContext})});
     }
     if (this.entries.some(e => e.runtime.element)) {
       root.classList.add('has-spatial-content');
@@ -132,8 +297,8 @@ export class ComponentViewer {
     viewer.renderListeners.add(this.render); this.viewport.addEventListener('change', this.viewportChanged);
     viewer.entityUpdates = () => this.entries.map(e => entityUpdate(e.spec));
     this.refreshBounds();
-    if (!scene.state.camera && scene.entities.length) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
-    if (this.entries[0]) this.select(this.entries.find(e => e.spec.id === viewer.focusedComponentId)?.spec ?? this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec ?? this.entries[0].spec, false);
+    if (viewer.kind === 'spatial' && !scene.state.camera && scene.entities.length) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
+    if (this.entries[0]) this.select(this.entries.find(e => e.spec.id === viewer.focusedComponentId)?.spec ?? (viewer.kind === 'spatial' ? this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec : undefined) ?? this.entries[0].spec, false);
     this.render();
   }
   async ready(): Promise<void> {
@@ -145,6 +310,7 @@ export class ComponentViewer {
       this.present(expanded.spec, (expanded.spec.state as ContentState).presentation!);
     }
     this.render();
+    await this.whenSettled();
     const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failure) throw failure.reason;
   }
@@ -198,7 +364,7 @@ export class ComponentViewer {
       if (entry.spec.position) entry.runtime.setPosition(entry.spec.position);
     }
     const originals = new Map(sceneEntities(this.scene).map(c => [c.id, c]));
-    const groups = [...componentGroups(this.entries.map(e => e.spec)).entries()];
+    const groups = [...componentGroups(this.entries.filter(e => e.spec.placement === 'world').map(e => e.spec)).entries()];
     const plans = groups.map(([label, specs]) => {
       const entries = specs.map(s => this.entries.find(e => e.spec === s)!);
       const geometry = entries.filter(e => !e.runtime.element);
@@ -206,7 +372,10 @@ export class ComponentViewer {
       const center = geometryBounds.getCenter(new THREE.Vector3());
       const size = geometryBounds.getSize(new THREE.Vector3());
       const automaticGeometry = geometry.filter(e => !e.spec.position);
-      automaticGeometry.forEach(e => this.position(e, new THREE.Vector3().fromArray(this.viewer.modelInfos[e.spec.source.index].translation ?? [0, 0, 0]).sub(center).toArray() as Vec3));
+      if (this.viewer.kind === 'spatial') {
+        const viewer = this.viewer;
+        automaticGeometry.forEach(e => this.position(e, new THREE.Vector3().fromArray(viewer.modelInfos[e.spec.source.index].translation ?? [0, 0, 0]).sub(center).toArray() as Vec3));
+      }
       let x = geometry.length ? Math.max(size.x / 2, 30) + 18 : 0;
       for (const entry of entries.filter(e => e.runtime.element && !e.spec.position)) {
         const [w] = entry.spec.size ?? [110, 70];
@@ -235,14 +404,15 @@ export class ComponentViewer {
   private position(entry: Entry, position: Vec3): void { entry.spec.position = position; entry.runtime.setPosition(position); }
   refreshBounds(): void {
     const box = new THREE.Box3();
-    this.entries.filter(e => e.runtime.element && effectiveVisibility(e.spec)).forEach(e => box.union(e.runtime.bounds));
+    this.entries.filter(e => e.spec.placement === 'world' && e.runtime.element && effectiveVisibility(e.spec)).forEach(e => box.union(e.runtime.bounds));
+    this.updatePanelSpace();
     this.viewer.setComponentBounds(box);
   }
   select(spec: SceneEntity, notify = true): void {
     const entry = this.entries.find(e => e.spec === spec); if (!entry) return;
     this.selected = entry;
     this.viewer.setFocusedComponent(spec.id);
-    if (notify) { entry.runtime.select(); this.onSelect?.(spec); }
+    if (notify) { entry.runtime.select(); this.onSelect?.(spec); if (!this.syncing) this.operations?.notify('entity', {selected: spec.id}); }
     for (const e of this.entries) { const selected = e === entry; this.rows.get(e.spec.id)?.button.setAttribute('aria-pressed', String(selected)); e.runtime.element?.classList.toggle('selected', selected); }
     this.scheduleNameLayout();
   }
@@ -251,7 +421,7 @@ export class ComponentViewer {
     if (this.syncing) return; this.syncing = true;
     for (const entry of this.entries) {
       const {spec, runtime} = entry;
-      if (spec.source.kind === 'mesh') {
+      if (spec.source.kind === 'mesh' && this.viewer.kind === 'spatial') {
         const info = this.viewer.modelInfos[spec.source.index]; if (info) { spec.visible = info.visible; spec.opacity = info.opacity; spec.label = info.label?.text ?? info.name; }
       }
       runtime.setVisible(effectiveVisibility(spec));
@@ -275,7 +445,7 @@ export class ComponentViewer {
         row.visibility.setAttribute('aria-label', `${visible ? '隐藏' : '显示'} ${spec.label}`);
         row.visibility.title = `${visible ? '隐藏' : '显示'} ${spec.label}`;
         if (row.color && spec.source.kind === 'mesh') {
-          const color = this.viewer.modelInfos[spec.source.index]?.color ?? '#8fa9c9';
+          const color = this.viewer.kind === 'spatial' ? this.viewer.modelInfos[spec.source.index]?.color ?? '#8fa9c9' : '#8fa9c9';
           row.color.style.setProperty('--swatch', color);
           row.color.setAttribute('aria-label', `修改 ${spec.label} 的颜色`);
           row.color.title = `${spec.label} · ${color}`;
@@ -288,23 +458,6 @@ export class ComponentViewer {
       }
     }
     this.syncing = false; this.refreshBounds(); this.scheduleNameLayout();
-  }
-  private setVisible(entry: Entry, visible: boolean): void {
-    this.applyStyle(entry, visible, visible && entry.spec.opacity === 0 ? 1 : entry.spec.opacity);
-  }
-  private setVisibility(visible: (entry: Entry) => boolean): void {
-    this.syncing = true;
-    try {
-      for (const entry of this.entries) {
-        entry.spec.visible = visible(entry);
-        if (entry.spec.visible && entry.spec.opacity === 0) {
-          entry.spec.opacity = 1;
-          entry.runtime.setOpacity(1);
-        }
-        entry.runtime.setVisible(effectiveVisibility(entry.spec));
-      }
-    } finally { this.syncing = false; }
-    this.sync(); this.onChange?.();
   }
   private scheduleNameLayout(): void {
     if (this.nameLayoutQueued) return;
@@ -327,7 +480,7 @@ export class ComponentViewer {
     const current = this.activeRename; if (!current) return;
     this.activeRename = undefined;
     current.editor.hidden = true; current.item.classList.remove('rename-open');
-    if (save) this.setLabel(current.entry, current.input.value);
+    if (save) this.labelEntity(current.entry.spec.id, current.input.value.trim() || current.entry.spec.label);
     this.scheduleNameLayout();
     if (restoreFocus) current.trigger.focus({preventScroll: true});
   }
@@ -369,32 +522,48 @@ export class ComponentViewer {
       : entry.capabilities.presentations.includes('fullscreen') ? 'fullscreen' : null;
     if (mode) this.present(spec, mode);
   }
-  present(spec: SceneEntity, mode: Presentation): void {
-    const entry = this.entries.find(e => e.spec === spec); if (!entry || !entry.capabilities.presentations.includes(mode)) return;
-    this.select(spec);
+  presentEntity(id: string, mode: Presentation): void { this.present(this.requireEntry(id).spec, mode); }
+  present(spec: SceneEntity, mode: Presentation): void { this.commitContent(() => this.applyPresentation(spec, mode)); }
+  private applyPresentation(spec: SceneEntity, mode: Presentation): void {
+    const entry = this.requireEntry(spec.id);
+    if (!entry.capabilities.presentations.includes(mode)) throw new OperationError('UNSUPPORTED', 'Unsupported entity presentation', {target: spec.id});
+    if (entry.runtime instanceof SurfaceRuntime) entry.runtime.validatePresentation(mode);
+    if (this.expanded?.runtime instanceof SurfaceRuntime && this.expanded !== entry) this.expanded.runtime.validatePresentation('spatial');
+    if (mode === 'spatial') {
+      if (this.expanded === entry) this.close();
+      else entry.runtime.setPresentation(mode);
+      return;
+    }
     if (!entry.runtime.element) {
       entry.runtime.focus();
       return;
     }
     if (entry.runtime instanceof SurfaceRuntime && !entry.runtime.preparePresentation(mode)) return;
-    if (this.expanded && this.expanded !== entry) { this.close(); if (this.expanded) return; }
+    if (this.expanded && this.expanded !== entry) {
+      const previous = this.expanded;
+      if (previous.runtime instanceof SurfaceRuntime && !previous.runtime.preparePresentation('spatial')) return;
+      previous.runtime.setPresentation('spatial'); this.expanded = undefined;
+    }
+    this.select(spec);
     if (!this.expanded) {
-      this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+      if (!this.dialog.open) this.returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
       this.expanded = entry; this.dialogTitle.textContent = spec.label;
       moveElement(this.expandedContent, entry.runtime.element);
       this.dialog.classList.toggle('native-dialog', entry.runtime instanceof SurfaceRuntime && entry.runtime.hasNative);
-      this.viewer.setInteractionEnabled(false); this.dialog.showModal();
+      this.viewer.setInteractionEnabled(false); if (!this.dialog.open) this.dialog.showModal();
     }
     this.dialog.classList.toggle('fullscreen-dialog', mode === 'fullscreen');
     entry.runtime.setPresentation(mode);
   }
   private close = (): void => {
-    if (!this.expanded) return;
-    const entry = this.expanded;
-    if (entry.runtime instanceof SurfaceRuntime && !entry.runtime.preparePresentation('spatial')) return;
-    this.expanded = undefined;
-    entry.runtime.setPresentation('spatial'); this.dialog.close(); this.viewer.setInteractionEnabled(true);
-    this.returnFocus?.focus({preventScroll: true}); this.viewer.invalidate();
+    this.commitContent(() => {
+      if (!this.expanded) return;
+      const entry = this.expanded;
+      if (entry.runtime instanceof SurfaceRuntime && !entry.runtime.preparePresentation('spatial')) return;
+      this.expanded = undefined;
+      entry.runtime.setPresentation('spatial'); this.dialog.close(); this.viewer.setInteractionEnabled(true);
+      this.returnFocus?.focus({preventScroll: true}); this.viewer.invalidate();
+    });
   };
   private buildDialog(): void {
     this.dialog.className = 'component-dialog'; this.dialog.setAttribute('aria-labelledby', 'component-dialog-title');
@@ -404,23 +573,23 @@ export class ComponentViewer {
     document.querySelector('#app-shell')!.append(this.dialog);
     this.dialog.addEventListener('cancel', event => { event.preventDefault(); this.close(); });
     this.dialog.addEventListener('click', event => { if (event.target === this.dialog) this.close(); });
-    this.dialog.addEventListener('close', this.close);
+    this.dialog.addEventListener('close', () => { if (!this.dialog.open) this.close(); });
   }
   private buildTree(): void {
     this.tree.className = 'scene-tree'; this.tree.id = 'scene-tree'; this.tree.setAttribute('aria-label', '场景元素'); this.tree.dataset.labelObstacle = '';
     const heading = document.createElement('header'); const title = document.createElement('h2'); title.textContent = '场景';
     heading.append(title); this.tree.append(heading);
     const tabs = document.createElement('div'); tabs.className = 'scene-tree-tabs'; tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '场景内容');
-    const elementsTab = button('', () => this.showTreeView('elements')); elementsTab.innerHTML = '<i data-lucide="layers-3" aria-hidden="true"></i>'; elementsTab.setAttribute('aria-label', '元素'); elementsTab.title = '元素';
-    const infoTab = button('', () => this.showTreeView('info')); infoTab.innerHTML = '<i data-lucide="info" aria-hidden="true"></i>'; infoTab.setAttribute('aria-label', '信息'); infoTab.title = '信息';
+    const elementsTab = button('', () => this.setSceneList({tab: 'elements'})); elementsTab.innerHTML = '<i data-lucide="layers-3" aria-hidden="true"></i>'; elementsTab.setAttribute('aria-label', '元素'); elementsTab.title = '元素';
+    const infoTab = button('', () => this.setSceneList({tab: 'info'})); infoTab.innerHTML = '<i data-lucide="info" aria-hidden="true"></i>'; infoTab.setAttribute('aria-label', '信息'); infoTab.title = '信息';
     for (const [name, tab] of [['elements', elementsTab], ['info', infoTab]] as const) {
       tab.type = 'button'; tab.setAttribute('role', 'tab'); tab.id = `scene-tree-${name}-tab`; tabs.append(tab);
     }
     heading.append(tabs);
     const elements = document.createElement('div'); elements.className = 'scene-tree-elements';
     const actions = document.createElement('div'); actions.className = 'scene-tree-actions'; actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', '场景显示');
-    const showAll = button('全部显示', () => this.setVisibility(() => true));
-    const hideAll = button('全部隐藏', () => this.setVisibility(() => false));
+    const showAll = button('全部显示', () => this.showEntities(this.entries.map(entry => entry.spec.id)));
+    const hideAll = button('全部隐藏', () => this.showEntities([]));
     for (const [action, icon] of [[showAll, 'eye'], [hideAll, 'eye-off']] as const) {
       const marker = document.createElement('i'); marker.dataset.lucide = icon; marker.setAttribute('aria-hidden', 'true'); action.prepend(marker);
     }
@@ -446,7 +615,7 @@ export class ComponentViewer {
         const item = document.createElement('div'); item.className = 'scene-tree-item';
         const row = document.createElement('div'); row.className = 'scene-tree-row';
         const select = button(spec.label, () => this.select(spec)); select.className = 'scene-tree-select'; select.setAttribute('aria-pressed', 'false'); select.title = `${spec.label} · 双击仅显示此元素`;
-        select.addEventListener('dblclick', () => { this.setVisibility(candidate => candidate === entry); entry.runtime.focus(); });
+        select.addEventListener('dblclick', () => this.isolateEntity(spec.id, true));
         const name = document.createElement('div'); name.className = 'scene-tree-name';
         const editor = document.createElement('form'); editor.className = 'scene-tree-rename'; editor.hidden = true;
         const input = document.createElement('textarea'); input.rows = 2; input.maxLength = 120; input.spellcheck = false;
@@ -462,8 +631,8 @@ export class ComponentViewer {
         const edit = button('', () => this.startRename(entry, edit, editor, input, item)); edit.className = 'scene-tree-edit'; edit.innerHTML = '<i data-lucide="pencil" aria-hidden="true"></i>';
         name.append(select, edit);
         const opacity = document.createElement('input'); opacity.className = 'scene-tree-opacity'; opacity.type = 'range'; opacity.min = '0'; opacity.max = '100'; opacity.step = '1';
-        opacity.addEventListener('input', () => this.applyStyle(entry, Number(opacity.value) > 0, Number(opacity.value) / 100));
-        const visibility = button('', () => this.setVisible(entry, !effectiveVisibility(spec))); visibility.className = 'scene-tree-visibility';
+        opacity.addEventListener('input', () => this.styleEntity(spec.id, {visible: Number(opacity.value) > 0, opacity: Number(opacity.value) / 100}));
+        const visibility = button('', () => this.styleEntity(spec.id, {visible: !effectiveVisibility(spec)})); visibility.className = 'scene-tree-visibility';
         visibility.innerHTML = '<i data-lucide="eye" aria-hidden="true"></i><i data-lucide="eye-off" aria-hidden="true"></i>';
         const view: TreeRow = {button: select, edit, editor, input, label: spec.label, opacity, visibility};
         if (entry.capabilities.geometry && spec.source.kind === 'mesh') {
@@ -474,8 +643,8 @@ export class ComponentViewer {
           color.setAttribute('aria-controls', palette.id); color.setAttribute('aria-expanded', 'false');
           view.color = color; view.palette = palette; view.choices = geometryPalette.map(value => {
             const choice = button('', () => {
-              this.viewer.setMeshColor(spec.source.index, value);
-              this.sync(); this.onChange?.(); this.closeColorPicker(); color.focus({preventScroll: true});
+              this.styleEntity(spec.id, {color: value});
+              this.closeColorPicker(); color.focus({preventScroll: true});
             });
             choice.className = 'scene-tree-color-choice'; choice.dataset.color = value; choice.style.setProperty('--swatch', value);
             palette.append(choice); return choice;
@@ -487,7 +656,7 @@ export class ComponentViewer {
     }
     this.toggle.className = 'icon-button'; this.toggle.type = 'button'; this.toggle.id = 'scene-tree-toggle'; this.toggle.setAttribute('aria-label', '场景元素'); this.toggle.setAttribute('aria-controls', this.tree.id);
     this.toggle.innerHTML = '<i data-lucide="layers-3" aria-hidden="true"></i>';
-    this.toggle.onclick = () => this.setOpen(!this.opened);
+    this.toggle.onclick = () => this.setSceneList({open: !this.opened});
     document.querySelector('.top-actions')!.prepend(this.toggle); document.querySelector('#scene-panels')!.prepend(this.tree); this.setOpen(this.opened);
     installIcons(document);
     document.addEventListener('click', this.dismissColorPicker);
@@ -495,10 +664,11 @@ export class ComponentViewer {
       if (event.key !== 'Escape') return;
       if (this.activeRename) { event.preventDefault(); event.stopPropagation(); this.finishRename(false); }
       else if (this.openColorPicker) { event.preventDefault(); event.stopPropagation(); const trigger = this.openColorPicker.trigger; this.closeColorPicker(); trigger.focus(); }
-      else this.setOpen(false);
+      else this.setSceneList({open: false});
     });
   }
   private showTreeView(view: 'elements' | 'info'): void {
+    this.treeTab = view;
     if (view !== 'elements') this.finishRename(true, false);
     if (view !== 'elements') this.closeColorPicker();
     for (const [name, {button, content}] of this.treeViews) {
@@ -508,10 +678,11 @@ export class ComponentViewer {
     }
   }
   private setOpen(open: boolean): void { if (!open) {this.finishRename(true, false); this.closeColorPicker();} this.opened = open; this.tree.hidden = !open; this.toggle.setAttribute('aria-expanded', String(open)); document.querySelector('#app-shell')!.classList.toggle('tree-open', open); if (!open && this.tree.contains(document.activeElement)) this.toggle.focus(); if (open) this.scheduleNameLayout(); }
-  private viewportChanged = (): void => this.setOpen(this.viewport.matches);
+  private viewportChanged = (): void => { this.setSceneList({open: this.viewport.matches}); };
   private renderLayers(): void {
+    if (this.viewer.kind !== 'spatial') return;
     const runtimes = this.entries.flatMap(entry => entry.runtime instanceof SurfaceRuntime ? [entry.runtime] : []);
-    const objects = runtimes.map(runtime => runtime.object);
+    const objects = runtimes.flatMap(runtime => runtime.object ? [runtime.object] : []);
     const surfaces = runtimes.flatMap(runtime => runtime.spatialObject ? [runtime.spatialObject] : []);
     const allDepths = [...new Set(objects.map(object => object.position.z))];
     const depths = [...new Set(surfaces.map(object => object.position.z))].sort((a,b) => a-b);
@@ -535,7 +706,7 @@ export class ComponentViewer {
       // plugin frames or discard content state.
       plane.renderer.domElement.hidden = !depths.includes(z);
       for (const object of objects.filter(object => object.position.z === z)) if (object.parent !== plane.scene) plane.scene.add(object);
-      plane.renderer.setSize(this.root.clientWidth, this.root.clientHeight);
+      plane.renderer.setSize(this.viewer.viewportWidth, this.root.clientHeight);
       plane.renderer.render(plane.scene, this.viewer.activeCamera);
     }
     if (!depths.length) return;
@@ -546,8 +717,8 @@ export class ComponentViewer {
     while (this.bands.length > depths.length + 1) this.bands.pop()!.remove();
     let order = 0;
     const band = (index: number) => {
-      const canvas = this.bands[index]; canvas.style.zIndex = String(order++);
-      this.viewer.renderGeometryBand(canvas, depths[index-1] ?? -Infinity, depths[index] ?? Infinity);
+      const canvas = this.bands[index]; canvas.style.zIndex = String(order++); canvas.style.width = `${this.viewer.viewportWidth}px`;
+      if (this.viewer.kind === 'spatial') this.viewer.renderGeometryBand(canvas, depths[index-1] ?? -Infinity, depths[index] ?? Infinity);
     };
     const plane = (index: number) => { this.planes.get(depths[index])!.renderer.domElement.style.zIndex = String(order++); };
     const camera = this.viewer.activeCamera;
@@ -568,27 +739,35 @@ export class ComponentViewer {
     }
   }
   private render = (): void => {
-    for (const entry of this.entries) if (entry.runtime instanceof SurfaceRuntime) entry.runtime.updateScreenScale(this.viewer.activeCamera, this.root.clientWidth, this.root.clientHeight);
+    if (this.viewer.kind === 'spatial') for (const entry of this.entries) if (entry.runtime instanceof SurfaceRuntime) entry.runtime.updateScreenScale(this.viewer.activeCamera, this.viewer.viewportWidth, this.root.clientHeight);
+    if (this.viewer.kind === 'board') for (const entry of this.entries) if (entry.runtime instanceof SurfaceRuntime) entry.runtime.updateBoardScale(this.viewer.scale);
     this.renderLayers();
     for (const caption of this.captions) {
-      const box = new THREE.Box3(); caption.entries.filter(e => effectiveVisibility(e.spec)).forEach(e => box.union(e.runtime.bounds));
+      const box = new THREE.Box3(); caption.entries.filter(e => e.spec.placement === 'world' && effectiveVisibility(e.spec)).forEach(e => box.union(e.runtime.bounds));
       caption.element.hidden = box.isEmpty(); if (box.isEmpty()) continue;
-      const p = new THREE.Vector3(box.min.x, box.max.y + 5, box.max.z).project(this.viewer.activeCamera);
-      caption.element.hidden = p.z < -1 || p.z > 1;
-      // Reserve a screen-space header above geometry assembly captions.
-      caption.element.style.transform = `translate(${(p.x + 1) * this.root.clientWidth / 2}px,${(1 - p.y) * this.root.clientHeight / 2 - 32}px)`;
+      if (this.viewer.kind === 'board') {
+        const point = this.viewer.worldToScreen(box.min.x, box.max.y + 5), rect = this.root.getBoundingClientRect();
+        caption.element.style.transform = `translate(${point.x - rect.left}px,${point.y - rect.top - 32}px)`;
+      } else {
+        const p = new THREE.Vector3(box.min.x, box.max.y + 5, box.max.z).project(this.viewer.activeCamera);
+        caption.element.hidden = p.z < -1 || p.z > 1;
+        caption.element.style.transform = `translate(${(p.x + 1) * this.viewer.viewportWidth / 2}px,${(1 - p.y) * this.root.clientHeight / 2 - 32}px)`;
+      }
     }
   };
-  dispose(): void { document.removeEventListener('click', this.dismissColorPicker); window.removeEventListener('pointerup', this.releaseTouch, true); window.removeEventListener('pointercancel', this.releaseTouch, true); this.root.classList.remove('has-spatial-content'); this.root.removeEventListener('pointerdown', this.routePointer, true); this.root.removeEventListener('click', this.routeClick, true); this.root.removeEventListener('wheel', this.routeWheel, true); this.close(); this.treeResize?.disconnect(); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.entityUpdates = undefined; this.root.classList.remove('composited-content'); this.compositor.remove(); this.planes.clear(); this.bands.length = 0; this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
+  dispose(): void { document.removeEventListener('click', this.dismissColorPicker); window.removeEventListener('pointerup', this.releaseTouch, true); window.removeEventListener('pointercancel', this.releaseTouch, true); this.root.classList.remove('has-spatial-content', 'has-fixed-panels'); this.root.removeEventListener('pointerdown', this.routePointer, true); this.root.removeEventListener('click', this.routeClick, true); this.root.removeEventListener('wheel', this.routeWheel, true); this.close(); this.treeResize?.disconnect(); this.panelResize?.disconnect(); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.entityUpdates = undefined; this.viewer.setReservedSpace(0); this.root.closest<HTMLElement>('.app-shell')?.style.removeProperty('--fixed-panel-space'); this.root.classList.remove('composited-content'); this.compositor.remove(); this.panelRoot.remove(); this.planes.clear(); this.bands.length = 0; this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
 }
 
-class SurfaceRuntime implements ComponentRuntime {
+export class SurfaceRuntime implements ComponentRuntime {
   readonly element = document.createElement('section');
   private readonly wrapper = document.createElement('div');
-  readonly object = new CSS3DObject(this.wrapper);
-  get spatialObject(): CSS3DObject | undefined { return this.mode === 'spatial' && this.object.visible ? this.object : undefined; }
+  private readonly panelWrapper = document.createElement('div');
+  readonly object?: CSS3DObject;
+  private readonly worldPosition = new THREE.Vector3();
+  private visible = true;
+  get spatialObject(): CSS3DObject | undefined { return this.mode === 'spatial' && this.spec.placement === 'world' && this.visible ? this.object : undefined; }
   get hasNative(): boolean { return !!this.content.native; }
-  get isNativeSpatial(): boolean { return this.hasNative && this.mode === 'spatial'; }
+  get isNativeSpatial(): boolean { return this.hasNative && this.mode === 'spatial' && this.spec.placement === 'world'; }
   private readonly content: SurfaceContent;
   private readonly body = document.createElement('div');
   private readonly header = document.createElement('header');
@@ -603,10 +782,14 @@ class SurfaceRuntime implements ComponentRuntime {
   private pendingReading?: ContentAnchor;
   private resize?: ResizeObserver;
   private settleFrame = 0;
+  private settlement?: Promise<void>;
+  private resolveSettlement?: () => void;
   private nativeWidth = 0;
   private nativeHeight = 0;
+  private selectionButton?: HTMLButtonElement;
   private viewKey?: string;
   private contentReady = false;
+  private loadError?: string;
   private initializingContent = true;
   private readonly ray = new THREE.Raycaster();
   private readonly rayPointer = new THREE.Vector2();
@@ -621,9 +804,12 @@ class SurfaceRuntime implements ComponentRuntime {
     this.header.className = 'component-handle'; this.header.title = spec.label;
     const label = document.createElement('span'); label.textContent = spec.label; this.header.append(label);
     const source = scene.attachments?.[spec.source.index];
-    this.content = source?.url ? factory(source.url, spec.label, spec) : {element: document.createElement('p'), ready: Promise.reject(new Error('资源不可用')), dispose() {}};
+    this.content = source?.url ? factory(source.url, spec.label, spec, context) : {element: document.createElement('p'), ready: Promise.reject(new Error('资源不可用')), dispose() {}};
     this.state = (spec.state ?? {}) as ContentState;
-    void this.content.ready.catch(() => {});
+    void this.content.ready.then(async () => {
+      if (this.hasNative) { this.settle(); await this.whenSettled(); }
+      this.contentReady = true; this.initializingContent = false; host.contentChanged(spec.id);
+    }, error => { this.loadError = error instanceof Error ? error.message : String(error); host.contentChanged(spec.id); });
     if (!source?.url) this.content.element.textContent = source?.unavailable ?? '资源不可用';
     this.body.className = 'component-body'; this.body.append(this.content.element);
     this.expand = button('全屏', () => {
@@ -634,8 +820,16 @@ class SurfaceRuntime implements ComponentRuntime {
     this.expand.setAttribute('aria-label', `全屏 ${spec.label}`);
     this.menu.className = 'component-overflow'; this.menu.hidden = true; this.menu.setAttribute('aria-label', `${spec.label} 内容操作`);
     this.overflow = button('更多', () => this.showMenu(this.menu.hidden)); this.overflow.setAttribute('aria-expanded', 'false');
+    const placement = button(spec.placement === 'panel' ? '放回场景' : '固定面板', () => {
+      host.placementEntity(spec.id, spec.placement === 'panel' ? 'world' : 'panel');
+      placement.textContent = spec.placement === 'panel' ? '放回场景' : '固定面板';
+    });
+    placement.className = 'content-placement'; this.menu.append(placement);
     this.header.append(this.expand, this.overflow); this.element.append(this.header, this.body, this.menu);
-    this.wrapper.append(this.element); host.layer.add(this.object);
+    this.wrapper.className = 'component-world-wrapper'; this.wrapper.append(this.element);
+    if (context.viewer.kind === 'spatial') { this.object = new CSS3DObject(this.wrapper); host.layer.add(this.object); }
+    this.mount();
+    this.header.style.touchAction = 'none';
     this.setPosition(spec.position ?? [0, 0, 0]); this.setOpacity(spec.opacity); this.size();
     // Opaque frames retain scene-owned preview input; native bodies never get this overlay.
     if (!this.content.native) {
@@ -652,18 +846,18 @@ class SurfaceRuntime implements ComponentRuntime {
           window.addEventListener('pointerup', () => previewGesture?.abort(), {once: true, signal: previewGesture.signal});
           window.addEventListener('pointercancel', () => { navigating = true; previewGesture?.abort(); }, {once: true, signal: previewGesture.signal});
         } else navigating = true;
-        host.select(spec); context.viewer.navigatePointer(event);
+        host.select(spec); if (spec.placement === 'world') context.viewer.navigatePointer(event);
       });
-      enter.addEventListener('wheel', event => { event.preventDefault(); context.viewer.navigateWheel(event); }, {passive: false});
-      this.content.element.inert = true;
+      enter.addEventListener('wheel', event => { if (spec.placement === 'world') { event.preventDefault(); context.viewer.navigateWheel(event); } }, {passive: false});
+      this.content.element.inert = spec.placement === 'world';
     }
     this.header.addEventListener('dblclick', event => { if (!(event.target as Element).closest('button')) { event.preventDefault(); host.open(spec); } });
     this.header.addEventListener('pointerdown', event => {
       host.select(spec);
-      if (!(event.target as Element).closest('button') && this.mode === 'spatial') context.viewer.navigatePointer(event);
+      if (!(event.target as Element).closest('button') && this.mode === 'spatial' && spec.placement === 'world') context.viewer.navigatePointer(event);
       else event.stopPropagation();
     });
-    this.header.addEventListener('wheel', event => { event.preventDefault(); event.stopPropagation(); if (this.mode === 'spatial') context.viewer.navigateWheel(event); }, {passive: false});
+    this.header.addEventListener('wheel', event => { event.preventDefault(); event.stopPropagation(); if (this.mode === 'spatial' && spec.placement === 'world') context.viewer.navigateWheel(event); }, {passive: false});
     this.menu.addEventListener('pointerdown', event => event.stopPropagation());
     this.menu.addEventListener('wheel', event => event.stopPropagation(), {passive: true});
     this.element.addEventListener('keydown', event => {
@@ -671,6 +865,91 @@ class SurfaceRuntime implements ComponentRuntime {
     });
     document.addEventListener('pointerdown', this.dismissMenu);
     this.bindNative();
+  }
+  snapshot(): ContentSnapshot {
+    const native = this.content.native;
+    return {id: this.spec.id, native: !!native, ready: this.contentReady, presentation: this.mode, menu: !this.menu.hidden,
+      ...(this.loadError ? {unavailable: 'Content resource is unavailable'} : {}),
+      ...(native ? {state: structuredClone(this.state)} : {}),
+      capabilities: {reading: !!native, selection: !!native, zoom: !!native?.zoom, fit: !!native?.fit, json: !!native?.json, annotations: !!this.annotations},
+      targets: native?.catalogTargets?.() ?? [], layers: native?.layers ?? [], branches: native?.json?.branches() ?? [],
+      ...(native?.targetRange ? {targetRange: native.targetRange} : {}),
+      ...(this.annotations ? {annotation: this.annotations.toolbarState} : {})};
+  }
+  private requireNative(): NativeContent {
+    if (!this.content.native) throw new OperationError('UNSUPPORTED', 'Opaque content has no native reading capabilities', {target: this.spec.id});
+    if (this.loadError) throw new OperationError('RESOURCE_UNAVAILABLE', this.loadError, {target: this.spec.id});
+    if (!this.contentReady) throw new OperationError('NOT_READY', 'Content is still loading', {target: this.spec.id, retryable: true});
+    return this.content.native;
+  }
+  setReading(anchor: ContentAnchor): void {
+    const native = this.requireNative();
+    if (!(native.acceptsAnchor?.(anchor) ?? !!native.locate(anchor))) throw new OperationError('INVALID_ARGUMENT', 'Anchor does not belong to available source content', {field: 'anchor', target: this.spec.id});
+    if (!updateContentState(this.state, {reading: anchor}, this.content.element)) throw new OperationError('INVALID_ARGUMENT', 'Content reading cannot be persisted');
+    this.context.host.commitContent(() => { this.cancelContentGesture(); this.pendingReading = undefined; native.restore(anchor); this.changed(); });
+  }
+  async scrollContent(x: number, y: number, relative = false): Promise<void> {
+    const native = this.requireNative();
+    if (!Number.isFinite(x) || !Number.isFinite(y)) throw new OperationError('INVALID_ARGUMENT', 'Scroll offsets must be finite CSS pixels');
+    // Explicit offsets belong to the final native layout, not transient chrome.
+    this.cancelContentGesture(); this.pendingReading = undefined;
+    await this.whenSettled();
+    this.context.host.commitContent(() => {
+      this.pendingReading = undefined;
+      native.scroll.scrollLeft = relative ? native.scroll.scrollLeft + x : x;
+      native.scroll.scrollTop = relative ? native.scroll.scrollTop + y : y;
+      this.readingChanged();
+      this.settle();
+    });
+    await this.whenSettled();
+  }
+  setSelection(enabled: boolean): void {
+    const native = this.content.native;
+    if (!native) throw new OperationError('UNSUPPORTED', 'Content cannot select native text', {target: this.spec.id});
+    if (!updateContentState(this.state, {selection: enabled}, this.content.element)) throw new OperationError('INVALID_ARGUMENT', 'Content selection cannot be persisted');
+    this.context.host.commitContent(() => {
+      this.annotations?.close(); native.setSelection(enabled);
+      this.element.classList.toggle('content-selecting', enabled); this.selectionButton?.setAttribute('aria-pressed', String(enabled));
+    });
+  }
+  jsonExpand(path: string, expanded: boolean): void {
+    const native = this.requireNative();
+    if (!native.json) throw new OperationError('UNSUPPORTED', 'Content has no JSON tree', {target: this.spec.id});
+    native.json.setExpanded(path, expanded);
+    this.settle();
+  }
+  jsonPage(path: string): void {
+    const native = this.requireNative();
+    if (!native.json) throw new OperationError('UNSUPPORTED', 'Content has no JSON tree', {target: this.spec.id});
+    native.json.page(path);
+    this.settle();
+  }
+  zoom(factor: number): void {
+    const native = this.requireNative();
+    if (!native.zoom) throw new OperationError('UNSUPPORTED', 'Content cannot zoom', {target: this.spec.id});
+    if (!Number.isFinite(factor) || factor <= 0) throw new OperationError('INVALID_ARGUMENT', 'Zoom factor must be positive', {field: 'factor'});
+    this.context.host.commitContent(() => native.zoom!(factor));
+    this.settle();
+  }
+  fit(): void {
+    const native = this.requireNative();
+    if (!native.fit) throw new OperationError('UNSUPPORTED', 'Content cannot fit', {target: this.spec.id});
+    this.context.host.commitContent(() => native.fit!());
+    this.settle();
+  }
+  setLayer(id: string): void {
+    const native = this.requireNative();
+    if (!native.layers?.some(layer => layer.id === id) || !native.setLayer) throw new OperationError('INVALID_ARGUMENT', 'Unknown content layer', {target: id});
+    this.context.host.commitContent(() => {
+      this.cancelContentGesture(); native.setLayer!(id); this.pendingReading = this.state.reading;
+      const select = this.menu.querySelector<HTMLSelectElement>('.content-layer-select select'); if (select) select.value = id;
+      this.settle(); this.annotations?.refresh();
+    });
+  }
+  annotationEditor(): ContentAnnotations {
+    this.requireNative();
+    if (!this.annotations) throw new OperationError('UNSUPPORTED', 'Content has no annotations', {target: this.spec.id});
+    return this.annotations;
   }
   private bindNative(): void {
     const native = this.content.native; if (!native) return;
@@ -680,20 +959,20 @@ class SurfaceRuntime implements ComponentRuntime {
     native.scroll.addEventListener('dblclick', this.contentDoubleClick);
     native.setSelection(this.state.selection === true); this.element.classList.toggle('content-selecting', this.state.selection === true);
     const selection = button('选择文字', () => {
-      if (!updateContentState(this.state, {selection: !this.state.selection}, this.content.element)) return;
-      this.closeAnnotation(); native.setSelection(this.state.selection === true);
-      this.element.classList.toggle('content-selecting', this.state.selection); selection.setAttribute('aria-pressed', String(this.state.selection)); this.changed(); this.showMenu(false);
+      this.setSelection(!this.state.selection); selection.setAttribute('aria-pressed', String(this.state.selection)); this.showMenu(false);
     });
     selection.setAttribute('aria-pressed', String(this.state.selection)); this.menu.append(selection);
+    this.selectionButton = selection;
     this.menu.append(button('聚焦内容', () => { this.focus(); this.showMenu(false); }), button('添加内容标注', () => this.annotate()), button('屏幕画笔', () => { this.closeAnnotation(); this.showMenu(false); this.context.host.onScreenAnnotation?.(); }));
     if (native.zoom) {
       const zoom = document.createElement('div'); zoom.className = 'content-tool-row';
       for (const [label, factor] of [['缩小', .8], ['放大', 1.25]] as const) zoom.append(button(label, () => {
-        native.zoom!(factor); this.changed();
+        this.zoom(factor);
       }));
       this.menu.append(zoom);
+      if (native.fit) this.menu.append(button('适应内容', () => this.fit()));
     }
-    this.annotations = new ContentAnnotations(native, this.state, this.body, this.changed); this.menu.append(this.annotations.tools);
+    this.annotations = new ContentAnnotations(native, this.state, this.body, this.changed, mutation => this.context.host.commitContent(mutation)); this.menu.append(this.annotations.tools);
     const addLayers = () => {
       if (!native.layers?.length || this.menu.querySelector('.content-layer-select')) return;
       const label = document.createElement('label'); label.className = 'content-layer-select'; label.textContent = '图层';
@@ -701,13 +980,11 @@ class SurfaceRuntime implements ComponentRuntime {
       for (const layer of native.layers) { const option = document.createElement('option'); option.value = layer.id; option.textContent = layer.label; select.append(option); }
       select.value = this.state.layer ?? native.layers[0].id;
       select.addEventListener('change', () => {
-        if (!updateContentState(this.state, {layer: select.value}, this.content.element)) { select.value = this.state.layer ?? native.layers![0].id; return; }
-        this.cancelContentGesture(); native.setLayer?.(select.value); this.pendingReading = this.state.reading;
-        this.settle(); this.changed(); this.annotations?.refresh();
+        this.setLayer(select.value);
       }); label.append(select); this.menu.prepend(label);
     };
     addLayers(); void this.content.ready.then(() => {
-      this.contentReady = true; addLayers(); this.annotations?.refresh(); this.settle();
+      addLayers(); this.annotations?.refresh(); this.settle();
     }, () => {});
     native.scroll.addEventListener('pointerdown', this.contentPointer);
     native.scroll.addEventListener('wheel', this.contentWheel, {passive: false});
@@ -729,7 +1006,7 @@ class SurfaceRuntime implements ComponentRuntime {
     const viewKey = JSON.stringify([this.state.reading, this.state.zoom, this.state.expanded, this.state.layer, this.state.presentation]);
     if (!this.initializingContent && this.viewKey !== undefined && this.viewKey !== viewKey) this.context.host.onContentViewChange?.();
     this.viewKey = viewKey;
-    this.annotations?.refresh(); this.context.host.onChange?.();
+    this.annotations?.refresh(); this.context.host.contentChanged(this.spec.id);
   };
   private contentDoubleClick = (event: MouseEvent): void => {
     if (this.mode !== 'spatial' || this.state.selection || this.annotations?.active || event.target instanceof Element && event.target.closest('a, button, input, select, textarea, summary')) return;
@@ -738,16 +1015,21 @@ class SurfaceRuntime implements ComponentRuntime {
   private readingChanged = (): void => {
     if (!this.pendingReading) { const reading = this.content.native?.capture(); if (reading && !updateContentState(this.state, {reading}, this.content.element)) return; this.changed(); }
   };
-  private showMenu(open: boolean): void { this.menu.hidden = !open; this.overflow.setAttribute('aria-expanded', String(open)); }
+  showMenu(open: boolean): void {
+    if (this.menu.hidden === !open) return;
+    this.menu.hidden = !open; this.overflow.setAttribute('aria-expanded', String(open)); this.context.host.contentChanged(this.spec.id);
+  }
   private dismissMenu = (event: PointerEvent): void => { if (event.target instanceof Node && !this.element.contains(event.target)) this.showMenu(false); };
   annotate(): boolean {
     if (!this.annotations) return false;
-    if (!updateContentState(this.state, {selection: false}, this.content.element)) return true;
-    this.context.host.select(this.spec); this.element.classList.remove('content-selecting');
-    this.menu.querySelector<HTMLButtonElement>('button[aria-pressed]')?.setAttribute('aria-pressed', 'false');
-    this.showMenu(true); this.annotations.open(); this.changed(); this.content.native!.scroll.focus({preventScroll: true}); return true;
+    if (!updateContentState(this.state, {selection: false}, this.content.element)) throw new OperationError('INVALID_ARGUMENT', 'Content annotation state cannot be persisted');
+    return this.context.host.commitContent(() => {
+      this.context.host.select(this.spec); this.element.classList.remove('content-selecting');
+      this.menu.querySelector<HTMLButtonElement>('button[aria-pressed]')?.setAttribute('aria-pressed', 'false');
+      this.showMenu(true); this.annotations!.open(); this.changed(); this.content.native!.scroll.focus({preventScroll: true}); return true;
+    });
   }
-  closeAnnotation(): void { this.annotations?.close(); this.content.native?.setSelection(this.state.selection === true); }
+  closeAnnotation(): void { this.context.host.commitContent(() => { this.annotations?.close(); this.content.native?.setSelection(this.state.selection === true); }); }
   cancelContentGesture(): void {
     const pointer = this.pointer; this.pointer = undefined;
     this.gesture?.abort(); this.gesture = undefined;
@@ -788,9 +1070,14 @@ class SurfaceRuntime implements ComponentRuntime {
   };
   private local(x: number, y: number): {x: number; y: number} | undefined {
     const scroll = this.content.native!.scroll;
-    if (this.mode !== 'spatial') { const rect = scroll.getBoundingClientRect(); return {x: x - rect.left, y: y - rect.top}; }
+    if (this.mode !== 'spatial' || this.spec.placement === 'panel' || this.context.viewer.kind === 'board') {
+      const rect = scroll.getBoundingClientRect();
+      const scale = this.mode === 'spatial' && this.spec.placement === 'world' && this.context.viewer.kind === 'board' ? this.context.viewer.scale * (this.spec.size?.[0] ?? 110) / 800 : 1;
+      return {x: (x - rect.left) / scale, y: (y - rect.top) / scale};
+    }
+    if (!this.object) return;
     const rect = this.context.host.root.getBoundingClientRect();
-    this.ray.setFromCamera(this.rayPointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2), this.context.viewer.activeCamera);
+    this.ray.setFromCamera(this.rayPointer.set((x - rect.left) / this.context.viewer.viewportWidth * 2 - 1, 1 - (y - rect.top) / rect.height * 2), this.context.viewer.activeCamera);
     this.object.updateWorldMatrix(true, false);
     this.surfacePlane.setComponents(0, 0, 1, 0).applyMatrix4(this.object.matrixWorld);
     const point = this.ray.ray.intersectPlane(this.surfacePlane, this.surfacePoint); if (!point) return;
@@ -799,13 +1086,25 @@ class SurfaceRuntime implements ComponentRuntime {
     while (element && element !== this.wrapper) { left += element.offsetLeft; top += element.offsetTop; element = element.offsetParent as HTMLElement | null; }
     return {x: point.x + this.wrapper.clientWidth / 2 - left, y: -point.y + this.wrapper.clientHeight / 2 - top};
   }
-  get ready(): Promise<void> { return this.content.ready; }
+  get ready(): Promise<void> { return this.content.ready.then(() => this.whenSettled()); }
   get bounds(): THREE.Box3 {
-    const [w, h] = this.spec.size ?? [110,70]; const p = this.object.position;
+    const [w, h] = this.spec.size ?? [110,70]; const p = this.worldPosition;
     return new THREE.Box3(new THREE.Vector3(p.x - w / 2, p.y - h / 2, p.z - .1), new THREE.Vector3(p.x + w / 2, p.y + h / 2, p.z + .1));
   }
-  setPosition(position: Vec3): void { this.object.position.fromArray(position); }
-  setVisible(visible: boolean): void { this.object.visible = visible; }
+  setPosition(position: Vec3): void {
+    this.worldPosition.fromArray(position); this.object?.position.fromArray(position);
+    if (this.context.viewer.kind === 'board') this.size();
+  }
+  setVisible(visible: boolean): void {
+    // CSS3DRenderer skips disconnected invisible objects; DOM owns hiding so
+    // even initially hidden plugin frames mount once and retain their state.
+    const changed = visible !== this.visible;
+    this.visible = visible;
+    this.wrapper.hidden = this.spec.placement === 'panel' || !visible;
+    this.panelWrapper.hidden = this.spec.placement !== 'panel' || !visible;
+    this.element.hidden = this.mode === 'spatial' && !visible;
+    if (changed && this.hasNative) this.settle();
+  }
   setOpacity(opacity: number): void { this.element.style.opacity = String(opacity); }
   setLabel(label: string): void {
     this.header.querySelector<HTMLElement>('span')!.textContent = label; this.header.title = label;
@@ -813,16 +1112,30 @@ class SurfaceRuntime implements ComponentRuntime {
     this.expand.setAttribute('aria-label', this.mode === 'spatial' ? `全屏 ${label}` : '返回场景');
   }
   occludedAt(x: number, y: number): boolean {
-    if (this.mode !== 'spatial') return false;
+    if (this.mode !== 'spatial' || this.spec.placement === 'panel' || this.context.viewer.kind !== 'spatial' || !this.object) return false;
     const rect = this.context.host.root.getBoundingClientRect();
-    this.ray.setFromCamera(this.rayPointer.set((x-rect.left)/rect.width*2-1, 1-(y-rect.top)/rect.height*2), this.context.viewer.activeCamera);
+    this.ray.setFromCamera(this.rayPointer.set((x-rect.left)/this.context.viewer.viewportWidth*2-1, 1-(y-rect.top)/rect.height*2), this.context.viewer.activeCamera);
     this.object.updateWorldMatrix(true, false);
     this.surfacePlane.setComponents(0, 0, 1, 0).applyMatrix4(this.object.matrixWorld);
     const point = this.ray.ray.intersectPlane(this.surfacePlane, this.surfacePoint);
     return !!point && this.context.viewer.geometryOccludes(x, y, point.toArray() as Vec3);
   }
   select(): void { this.element.classList.add('selected'); }
-  focus(): void { this.context.viewer.focusBounds(this.bounds); }
+  async focus(): Promise<ViewMutation> {
+    const mutation = await this.context.host.focusEntities([this.spec.id]);
+    await this.context.host.whenSettled();
+    return mutation;
+  }
+  focusPanel(): void {
+    if (this.content.native) this.content.native.scroll.focus({preventScroll: true});
+    else { this.element.tabIndex = -1; this.element.focus({preventScroll: true}); }
+  }
+  validatePresentation(mode: Presentation): void {
+    if (!this.hasNative) return;
+    const reading = this.pendingReading ?? this.content.native?.capture();
+    try { validateContentState({...this.state, ...(reading ? {reading} : {}), presentation: mode}); }
+    catch (error) { throw new OperationError('INVALID_ARGUMENT', error instanceof Error ? error.message : String(error)); }
+  }
   preparePresentation(mode?: Presentation): boolean {
     this.cancelContentGesture();
     const reading = this.pendingReading ?? this.content.native?.capture();
@@ -835,28 +1148,45 @@ class SurfaceRuntime implements ComponentRuntime {
     this.mode = mode;
     this.context.viewer.invalidate(); this.element.classList.toggle('expanded', mode !== 'spatial');
     this.expand.textContent = mode === 'spatial' ? '全屏' : '返回'; this.expand.setAttribute('aria-label', mode === 'spatial' ? `全屏 ${this.spec.label}` : '返回场景');
-    this.content.element.inert = !this.hasNative && mode === 'spatial';
-    if (mode === 'spatial') moveElement(this.wrapper, this.element);
-    this.content.present?.(mode); this.settle(); this.changed();
+    this.content.element.inert = !this.hasNative && mode === 'spatial' && this.spec.placement === 'world';
+    if (mode === 'spatial') moveElement(this.spec.placement === 'panel' ? this.panelWrapper : this.wrapper, this.element);
+    this.element.hidden = mode === 'spatial' && !this.visible;
+    this.content.present?.(mode); this.settle(); this.changed(); if (!this.hasNative) this.context.host.contentChanged(this.spec.id);
   }
+  async whenSettled(): Promise<void> { while (this.settlement) await this.settlement; }
   private settle(): void {
+    if (!this.settlement) {
+      const {promise, resolve} = Promise.withResolvers<void>();
+      this.settlement = promise; this.resolveSettlement = resolve;
+    }
     if (this.settleFrame) cancelAnimationFrame(this.settleFrame);
-    // Wait for the final ResizeObserver delivery and one stable painted layout.
+    // Resize delivery may restart this sequence; only the final layout can commit.
     this.settleFrame = requestAnimationFrame(() => {
       this.settleFrame = requestAnimationFrame(() => {
-        this.settleFrame = 0; const native = this.content.native;
+        const native = this.content.native;
         if (native && this.pendingReading && native.scroll.clientWidth && native.scroll.clientHeight) {
           native.restore(this.pendingReading); this.pendingReading = undefined;
         }
-        this.annotations?.refresh();
-        if (this.contentReady) this.initializingContent = false;
+        // Native restore consumes its own scroll events in the following frame.
+        this.settleFrame = requestAnimationFrame(() => {
+          this.settleFrame = 0; this.annotations?.refresh();
+          const resolve = this.resolveSettlement; this.resolveSettlement = undefined; this.settlement = undefined;
+          resolve?.();
+        });
       });
     });
+  }
+  updateBoardScale(viewportScale: number): void {
+    const scale = this.mode === 'spatial' && this.spec.placement === 'world' ? Math.min(8, Math.max(.5, 800 / ((this.spec.size?.[0] ?? 110) * viewportScale))) : 1;
+    if (Math.abs(scale - this.screenScale) < .01) return;
+    // Board framing is affine. Only screen-sized chrome changes; native source
+    // dimensions and reading anchors must not be recaptured or restored.
+    this.screenScale = scale; this.element.style.setProperty('--content-ui-scale', String(scale));
   }
   updateScreenScale(camera: THREE.Camera, width: number, height: number): void {
     if (!this.hasNative) return;
     let scale = 1;
-    if (this.mode === 'spatial') {
+    if (this.mode === 'spatial' && this.spec.placement === 'world' && this.object) {
       this.object.updateWorldMatrix(true, false);
       this.object.localToWorld(this.projectedOrigin.set(0, 0, 0)).project(camera);
       this.object.localToWorld(this.projectedX.set(1, 0, 0)).project(camera);
@@ -870,12 +1200,40 @@ class SurfaceRuntime implements ComponentRuntime {
     this.screenScale = scale; this.element.style.setProperty('--content-ui-scale', String(scale));
     this.settle();
   }
-  private size(): void { const [w,h] = this.spec.size ?? [110,70]; this.wrapper.style.width = '800px'; this.wrapper.style.height = `${800 * h / w}px`; this.object.scale.setScalar(w / 800); this.context.viewer.invalidate(); }
+  private mount(): void {
+    this.panelWrapper.className = 'panel-wrapper'; this.panelWrapper.hidden = this.spec.placement !== 'panel' || !this.visible;
+    if (!this.panelWrapper.parentElement) this.context.host.panelRoot.append(this.panelWrapper);
+    if (this.context.viewer.kind === 'board' && !this.wrapper.parentElement) this.context.viewer.stage.append(this.wrapper);
+    if (this.spec.placement === 'panel') {
+      if (this.mode === 'spatial') moveElement(this.panelWrapper, this.element);
+      this.wrapper.hidden = true;
+    } else {
+      if (this.mode === 'spatial') moveElement(this.wrapper, this.element);
+      this.wrapper.hidden = !this.visible;
+    }
+    this.element.classList.toggle('panel-surface', this.spec.placement === 'panel');
+  }
+  setPlacement(placement: 'world' | 'panel'): void {
+    if (!this.preparePresentation()) throw new OperationError('INVALID_ARGUMENT', 'Content state cannot be persisted');
+    this.spec.placement = placement; this.mount(); this.size(); this.setVisible(this.visible);
+    this.content.element.inert = !this.hasNative && this.mode === 'spatial' && placement === 'world';
+    const button = this.menu.querySelector<HTMLButtonElement>('.content-placement'); if (button) button.textContent = placement === 'panel' ? '放回场景' : '固定面板';
+    this.settle();
+  }
+  private size(): void {
+    const [w,h] = this.spec.size ?? [110,70], p = this.worldPosition;
+    this.wrapper.style.width = '800px'; this.wrapper.style.height = `${800 * h / w}px`;
+    this.panelWrapper.style.height = 'min(65vh, 520px)';
+    this.wrapper.style.transform = this.context.viewer.kind === 'board' && this.spec.placement === 'world'
+      ? `translate(${p.x - w / 2}px,${p.y + h / 2}px) scale(${w / 800},${-w / 800})` : '';
+    this.object?.scale.setScalar(w / 800); this.context.viewer.invalidate();
+  }
   dispose(): void {
     this.cancelContentGesture(); if (this.settleFrame) cancelAnimationFrame(this.settleFrame); this.resize?.disconnect(); this.annotations?.dispose();
+    this.resolveSettlement?.(); this.resolveSettlement = undefined; this.settlement = undefined;
     const native = this.content.native; native?.scroll.removeEventListener('pointerdown', this.contentPointer); native?.scroll.removeEventListener('wheel', this.contentWheel);
     native?.scroll.removeEventListener('dblclick', this.contentDoubleClick); this.content.element.removeEventListener('contentstatechange', this.nativeStateChanged);
-    document.removeEventListener('pointerdown', this.dismissMenu); this.content.dispose(); this.object.removeFromParent(); this.wrapper.remove(); this.element.remove();
+    document.removeEventListener('pointerdown', this.dismissMenu); this.content.dispose(); this.object?.removeFromParent(); this.wrapper.remove(); this.panelWrapper.remove(); this.element.remove();
   }
 }
 function button(text: string, action: () => void): HTMLButtonElement { const button = document.createElement('button'); button.type = 'button'; button.textContent = text; button.onclick = action; return button; }

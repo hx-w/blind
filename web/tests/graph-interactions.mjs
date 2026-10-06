@@ -7,7 +7,7 @@ import {chromium} from 'playwright';
 
 const web = fileURLToPath(new URL('../', import.meta.url));
 
-test('shared graph consumer uses real same-origin workers, rejects expansion, stays responsive and indexes labels once', {timeout:180000}, async () => {
+test('shared graph consumer uses real same-origin workers, rejects expansion, stays responsive and associates labels', {timeout:180000}, async () => {
   const listener = createServer();
   await new Promise(resolve => listener.listen(0,'127.0.0.1',resolve));
   const port = listener.address().port;
@@ -33,8 +33,9 @@ test('shared graph consumer uses real same-origin workers, rejects expansion, st
         constructor(url, options) { super(url, options); this.record = {url:String(url),terminated:false}; workers.push(this.record); }
         terminate() { this.record.terminated = true; super.terminate(); }
       };
-      let ticks = 0;
-      const heartbeat = setInterval(() => ticks++, 1);
+      let pendingLayout = false;
+      let layoutTicks = 0;
+      const heartbeat = setInterval(() => { if (pendingLayout) layoutTicks++; }, 1);
       try {
         const valid = [];
         for (const source of [
@@ -44,7 +45,10 @@ test('shared graph consumer uses real same-origin workers, rejects expansion, st
           'digraph {a [label=<<TABLE><TR><TD>HTML</TD></TR></TABLE>>]; a -> b}',
           'graph {a -- b}',
         ]) {
-          const svg = await renderDiagram('dot',source);
+          pendingLayout = true;
+          let svg;
+          try { svg = await renderDiagram('dot',source); }
+          finally { pendingLayout = false; }
           valid.push(svg.querySelectorAll('g.node').length);
         }
         const names = (prefix,count) => Array.from({length:count},(_,i)=>`${prefix}${i}`).join(' ');
@@ -66,22 +70,19 @@ test('shared graph consumer uses real same-origin workers, rejects expansion, st
         svg.id = 'labels'; svg.setAttribute('viewBox','0 0 200 200');
         svg.innerHTML = Array.from({length:100},(_,i)=>`<path id="edge${i}" class="flowchart-link" d="M 0 ${i} L 100 ${i}"/><g class="edgeLabel"><text data-id="edge${i}" x="50" y="${i}">label ${i}</text></g>`).join('');
         document.body.append(svg);
-        const query = svg.querySelectorAll.bind(svg);
-        let labelScans = 0;
-        svg.querySelectorAll = selector => {if(selector==='g.edgeLabel') labelScans++; return query(selector);};
         const targets = graphTargets(svg,'mermaid').targets;
-        return {valid,expansion,cancelled,recovered:recovered.querySelectorAll('g.node').length,ticks,workers,labelScans,labels:targets.map(target=>target.related.length)};
+        return {valid,expansion,cancelled,recovered:recovered.querySelectorAll('g.node').length,layoutTicks,workers,labels:targets.map(target=>({edge:target.element.id,labels:target.related.map(label=>label.textContent)}))};
       } finally {clearInterval(heartbeat); window.Worker = NativeWorker;}
     });
     assert.deepEqual(result.valid,[2,2,2,2,2]);
     for (const error of result.expansion) assert.match(error,/10000/);
     assert.equal(result.cancelled,'AbortError');
     assert.equal(result.recovered,2);
-    assert.ok(result.ticks>0,'main-thread heartbeat continues while Viz runs');
+    assert.ok(result.layoutTicks>0,'main-thread heartbeat continues during an outstanding layout job');
+    assert.ok(result.workers.length>0,'layout uses real workers');
     assert.ok(result.workers.every(worker=>worker.terminated),'all success, rejected and cancelled workers are disposed');
     assert.ok(result.workers.every(worker=>new URL(worker.url).origin===origin),'no CDN or blob worker');
-    assert.equal(result.labelScans,1);
-    assert.deepEqual(result.labels,Array(100).fill(1));
+    assert.deepEqual(result.labels,Array.from({length:100},(_,i)=>({edge:`edge${i}`,labels:[`label ${i}`]})));
   } finally {
     await browser?.close();
     if (server.exitCode === null && server.signalCode === null) {

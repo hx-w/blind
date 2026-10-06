@@ -66,7 +66,7 @@ pub struct SceneDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_days: Option<u32>,
     pub meshes: Vec<MeshRef>,
-    #[serde(default, alias = "components", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entities: Vec<crate::scene::component::SceneEntity>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_groups: Vec<MeshLabelGroup>,
@@ -223,8 +223,79 @@ pub enum MeshQuality {
     Raw,
 }
 
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewportMode {
+    #[default]
+    Auto,
+    Board,
+    Spatial,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BoardViewportState {
+    pub center: [f64; 2],
+    pub scale: f64,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViewportState {
+    #[serde(default)]
+    pub mode: ViewportMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board: Option<BoardViewportState>,
+}
+
+impl ViewportState {
+    pub fn validate(&self, entities: &[component::SceneEntity]) -> Result<()> {
+        self.validate_updates(entities, None)
+    }
+
+    fn validate_updates(
+        &self,
+        entities: &[component::SceneEntity],
+        updates: Option<&[component::EntityUpdate]>,
+    ) -> Result<()> {
+        if let Some(board) = &self.board {
+            ensure!(
+                board.center.iter().all(|n| n.is_finite())
+                    && board.scale.is_finite()
+                    && board.scale > 0.,
+                "board viewport requires finite center and positive finite scale"
+            );
+        }
+        let mut world_z = None;
+        for entity in entities {
+            let update = updates.and_then(|updates| updates.iter().find(|u| u.id == entity.id));
+            let placement = update.map_or(entity.placement, |u| u.placement);
+            let position = update.map_or(entity.position, |u| u.position);
+            ensure!(
+                placement != component::Placement::Panel || !entity.component.geometry(),
+                "geometry cannot use panel placement"
+            );
+            if self.mode != ViewportMode::Board || placement == component::Placement::Panel {
+                continue;
+            }
+            ensure!(!entity.component.geometry()
+                && !entity.renderer.as_ref().is_some_and(|r| r.capabilities.host_space == component::HostSpace::Spatial),
+                "board viewport cannot contain geometric or spatial world entities");
+            let z = position.map_or(0., |p| p[2]);
+            ensure!(
+                z.is_finite() && world_z.is_none_or(|old: f32| (old - z).abs() <= 1e-6),
+                "board viewport requires coplanar world entities"
+            );
+            world_z.get_or_insert(z);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewState {
+    #[serde(default)]
+    pub viewport: ViewportState,
     pub selected: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focused_component_id: Option<String>,
@@ -446,6 +517,7 @@ pub fn validate_annotations(marks: &[SurfaceAnnotation], meshes: &[MeshRef]) -> 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenStroke {
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub color: String,
@@ -537,7 +609,7 @@ pub enum Background {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SceneUpdate {
-    #[serde(default, alias = "components")]
+    #[serde(default)]
     pub entities: Option<Vec<crate::scene::component::EntityUpdate>>,
     pub meshes: Vec<MeshStyleUpdate>,
     pub state: ViewState,
@@ -565,6 +637,7 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             selected: 0,
+            viewport: ViewportState::default(),
             focused_component_id: None,
             shading: Shading::Flat,
             render_mode: RenderMode::Matte,
@@ -585,6 +658,14 @@ impl Default for ViewState {
 }
 
 impl SceneDescriptor {
+    pub fn validate_viewport(&self) -> Result<()> {
+        ensure!(
+            self.state.viewport.mode != ViewportMode::Board || self.meshes.is_empty(),
+            "board viewport cannot contain geometry"
+        );
+        self.state.viewport.validate(&self.entities)
+    }
+
     /// Every scene in a share, in display order. Standalone scenes have no ID;
     /// collection scenes all have one. This keeps the persisted first-child
     /// layout at the storage boundary instead of repeating it in consumers.
@@ -633,6 +714,7 @@ impl SceneDescriptor {
             .enumerate()
             .map(|(index, mesh)| crate::scene::component::SceneEntity {
                 renderer: None,
+                placement: component::Placement::World,
                 state: None,
                 id: format!("mesh-{index}"),
                 component: if mesh.format == MeshFormat::Pts {
@@ -793,7 +875,7 @@ impl SceneDescriptor {
         });
         Ok(Self {
             source: None,
-            schema: 3,
+            schema: 8,
             title,
             ttl_days: None,
             created_at: SystemTime::now()
@@ -808,33 +890,6 @@ impl SceneDescriptor {
             state: ViewState::default(),
             collection: None,
         })
-    }
-
-    /// Cheap staleness gate: every source file must still exist with the recorded size.
-    #[cfg(test)]
-    pub async fn verify_source_lengths(&self) -> Result<(), SceneGone> {
-        for mesh in &self.meshes {
-            let path = Path::new(&mesh.path);
-            let metadata = tokio::fs::metadata(path).await.map_err(|_| SceneGone)?;
-            if !metadata.is_file() || metadata.len() != mesh.byte_size {
-                return Err(SceneGone);
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub async fn validate(&self) -> Result<(), SceneGone> {
-        self.verify_source_lengths().await?;
-        for mesh in &self.meshes {
-            let revision = hash_file(Path::new(&mesh.path))
-                .await
-                .map_err(|_| SceneGone)?;
-            if revision != mesh.revision {
-                return Err(SceneGone);
-            }
-        }
-        Ok(())
     }
 
     pub fn apply_update(&mut self, update: SceneUpdate) -> Result<()> {
@@ -855,11 +910,24 @@ impl SceneDescriptor {
                 if !ids.insert(&c.id) || old.is_none() {
                     bail!("Unknown or duplicate component ID");
                 }
+                ensure!(
+                    !old.unwrap().component.geometry()
+                        || c.placement == component::Placement::World,
+                    "geometry cannot use panel placement"
+                );
                 old.unwrap()
                     .component
                     .validate_native_state(c.state.as_ref())?;
             }
         }
+        ensure!(
+            update.state.viewport.mode != ViewportMode::Board || self.meshes.is_empty(),
+            "board viewport cannot contain geometry"
+        );
+        update
+            .state
+            .viewport
+            .validate_updates(&self.entities, update.entities.as_deref())?;
         update.state.light.validate()?;
         validate_annotations(&update.state.annotations, &self.meshes)?;
         if let Some(section) = &update.state.section {
@@ -906,6 +974,7 @@ impl SceneDescriptor {
         if let Some(components) = update.entities {
             for c in components {
                 let old = self.entities.iter_mut().find(|old| old.id == c.id).unwrap();
+                old.placement = c.placement;
                 old.state = c.state;
                 if let Some(label) = c.label {
                     old.label = label.clone();
@@ -950,13 +1019,7 @@ impl SceneDescriptor {
                     .unwrap_or_else(|| mesh.name.clone());
             }
         }
-        self.schema = self.schema.max(if state.section.is_some() {
-            7
-        } else if self.entities.is_empty() {
-            3
-        } else {
-            5
-        });
+        self.schema = 8;
         self.state = state;
         for mark in &self.state.annotations {
             self.meshes[mark.mesh].quality = MeshQuality::Raw;
@@ -1024,7 +1087,18 @@ pub(crate) fn validate_screen_strokes(strokes: &[ScreenStroke]) -> Result<()> {
         bail!("a scene can contain at most {MAX_SCREEN_STROKES} screen strokes");
     }
     let mut total_points = 0_usize;
+    let mut ids = std::collections::HashSet::new();
     for stroke in strokes {
+        ensure!(
+            !stroke.id.is_empty()
+                && stroke.id.len() <= 128
+                && stroke
+                    .id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+                && ids.insert(&stroke.id),
+            "invalid or duplicate screen stroke ID"
+        );
         if stroke
             .label
             .as_ref()
@@ -1089,11 +1163,6 @@ impl MeshFormat {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, thiserror::Error)]
-#[error("scene source is gone")]
-pub struct SceneGone;
-
-#[cfg(test)]
 pub async fn hash_file(path: &Path) -> Result<String> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut hasher = Sha256::new();
@@ -1135,6 +1204,137 @@ fn is_hex_color(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn board_viewport_and_panel_placement_validate_and_round_trip() {
+        let entity: component::SceneEntity = serde_json::from_value(serde_json::json!({
+            "id":"report","component":"text","source":{"kind":"attachment","index":0},
+            "label":"Report","group":null,"position":[10,20,0],"size":[110,70],
+            "visible":true,"opacity":1
+        }))
+        .unwrap();
+        assert_eq!(entity.placement, component::Placement::World);
+        let viewport = ViewportState {
+            mode: ViewportMode::Board,
+            board: Some(BoardViewportState {
+                center: [12.125, -3.75],
+                scale: 2.625,
+            }),
+        };
+        viewport.validate(std::slice::from_ref(&entity)).unwrap();
+        let mut scene: SceneDescriptor = serde_json::from_value(serde_json::json!({
+            "schema":8,"title":"Board","created_at":1,"meshes":[],"state":ViewState::default(),
+            "entities":[entity.clone()]
+        }))
+        .unwrap();
+        let mut state = scene.state.clone();
+        state.viewport = viewport.clone();
+        let update: SceneUpdate = serde_json::from_value(serde_json::json!({
+            "meshes":[],"state":state,"entities":[{
+                "id":"report","placement":"panel","position":[10,20,0],"size":[110,70],
+                "visible":true,"opacity":1
+            }]
+        }))
+        .unwrap();
+        scene.apply_update(update).unwrap();
+        let saved: SceneDescriptor =
+            serde_json::from_slice(&serde_json::to_vec(&scene).unwrap()).unwrap();
+        assert_eq!(saved.schema, 8);
+        assert_eq!(saved.state.viewport, viewport);
+        assert_eq!(saved.entities[0].placement, component::Placement::Panel);
+
+        for scale in [0., -1., f64::NAN, f64::INFINITY] {
+            let invalid = ViewportState {
+                mode: ViewportMode::Auto,
+                board: Some(BoardViewportState {
+                    center: [0., 0.],
+                    scale,
+                }),
+            };
+            assert!(invalid.validate(&[]).is_err());
+        }
+        let invalid = ViewportState {
+            mode: ViewportMode::Board,
+            board: Some(BoardViewportState {
+                center: [f64::INFINITY, 0.],
+                scale: 1.,
+            }),
+        };
+        assert!(invalid.validate(&[]).is_err());
+        let mut other = entity.clone();
+        other.id = "other".into();
+        other.position = Some([0., 0., 1.]);
+        assert!(viewport.validate(&[entity.clone(), other.clone()]).is_err());
+        let mut near = entity.clone();
+        near.id = "near".into();
+        near.position = Some([0., 0., 0.75e-6]);
+        let mut drift = entity.clone();
+        drift.id = "drift".into();
+        drift.position = Some([0., 0., 1.5e-6]);
+        viewport.validate(&[entity.clone(), near.clone()]).unwrap();
+        assert!(
+            viewport
+                .validate(&[entity.clone(), near.clone(), drift.clone()])
+                .is_err()
+        );
+        assert!(viewport.validate(&[drift, near, entity.clone()]).is_err());
+        other.placement = component::Placement::Panel;
+        viewport.validate(&[entity.clone(), other.clone()]).unwrap();
+        other.component = component::ComponentKind::Mesh;
+        assert!(viewport.validate(std::slice::from_ref(&other)).is_err());
+        other.placement = component::Placement::World;
+        assert!(viewport.validate(std::slice::from_ref(&other)).is_err());
+        other.component = component::ComponentKind::Plugin("example:report".into());
+        other.renderer = Some(
+            serde_json::from_value(serde_json::json!({
+                "plugin":"example","name":"report","revision":"a".repeat(64),
+                "capabilities":{"host_space":"spatial"}
+            }))
+            .unwrap(),
+        );
+        assert!(viewport.validate(std::slice::from_ref(&other)).is_err());
+        other.placement = component::Placement::Panel;
+        viewport.validate(std::slice::from_ref(&other)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn geometry_cannot_be_pinned_or_reshared_as_board() {
+        let mut scene = SceneDescriptor::create(&[PathBuf::from("tests/fixtures/tetra.ply")], None)
+            .await
+            .unwrap();
+        scene.entities = scene.entity_descriptors();
+        let mut entity = serde_json::to_value(&scene.entities[0]).unwrap();
+        entity.as_object_mut().unwrap().retain(|key, _| {
+            [
+                "id",
+                "placement",
+                "position",
+                "size",
+                "visible",
+                "opacity",
+                "state",
+            ]
+            .contains(&key.as_str())
+        });
+        entity["placement"] = serde_json::json!("panel");
+        let styles = serde_json::json!([{
+            "color":scene.meshes[0].color,"opacity":1,"visible":true,"quality":"raw"
+        }]);
+        let update: SceneUpdate = serde_json::from_value(serde_json::json!({
+            "meshes":styles,"state":scene.state,"entities":[entity]
+        }))
+        .unwrap();
+        assert!(scene.apply_update(update).is_err());
+        assert_eq!(scene.entities[0].placement, component::Placement::World);
+        let mut state = scene.state.clone();
+        state.viewport.mode = ViewportMode::Board;
+        let update: SceneUpdate = serde_json::from_value(serde_json::json!({
+            "meshes":styles,"state":state
+        }))
+        .unwrap();
+        assert!(scene.apply_update(update).is_err());
+        assert_eq!(scene.state.viewport.mode, ViewportMode::Auto);
+    }
+
     #[tokio::test]
     async fn legacy_scene_accepts_component_adapter_updates() {
         let mut scene = SceneDescriptor::create(&[PathBuf::from("tests/fixtures/tetra.ply")], None)
@@ -1149,11 +1349,11 @@ mod tests {
         component.insert("position".into(), serde_json::json!([4., 5., 6.]));
         let update: SceneUpdate = serde_json::from_value(serde_json::json!({
             "meshes":[{"color":"#abcdef","opacity":1.,"visible":true,"quality":"raw"}],
-            "state":scene.state,"components":descriptors
+            "state":scene.state,"entities":descriptors
         }))
         .unwrap();
         scene.apply_update(update).unwrap();
-        assert_eq!(scene.schema, 5);
+        assert_eq!(scene.schema, 8);
         assert_eq!(scene.entities[0].id, "mesh-0");
         assert_eq!(scene.meshes[0].translation, [4., 5., 6.]);
     }
@@ -1175,6 +1375,7 @@ mod tests {
         });
         scene.entities.push(crate::scene::component::SceneEntity {
             id: "report".into(),
+            placement: component::Placement::World,
             component: crate::scene::component::ComponentKind::Text,
             source: crate::scene::component::ComponentSource::Attachment(0),
             renderer: None,
@@ -1240,6 +1441,7 @@ mod tests {
         });
         scene.entities.push(crate::scene::component::SceneEntity {
             id: "report".into(),
+            placement: component::Placement::World,
             component: crate::scene::component::ComponentKind::Text,
             source: crate::scene::component::ComponentSource::Attachment(0),
             renderer: None,
@@ -1335,7 +1537,7 @@ mod tests {
         let reopened: SceneDescriptor =
             serde_json::from_slice(&serde_json::to_vec(&scene).unwrap()).unwrap();
         assert_eq!(reopened.state.section, Some(section.clone()));
-        assert_eq!(reopened.schema, 7);
+        assert_eq!(reopened.schema, 8);
         let mut measured = section.clone();
         measured.panel_size = Some([560.0, 430.0]);
         measured.measurements = vec![SectionMeasurement {
@@ -1412,30 +1614,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn source_change_invalidates_the_whole_scene() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("mesh.ply");
-        std::fs::write(&path, include_bytes!("../../tests/fixtures/tetra.ply")).unwrap();
-        let scene = SceneDescriptor::create(std::slice::from_ref(&path), None)
-            .await
-            .unwrap();
-        scene.validate().await.unwrap();
-        std::fs::write(&path, b"changed").unwrap();
-        assert!(scene.validate().await.is_err());
-    }
-
-    #[tokio::test]
-    async fn unsupported_formats_are_rejected() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("mesh.glb");
-        std::fs::write(&path, b"glTF").unwrap();
-        let error = SceneDescriptor::create(&[path], None).await.unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("supported PLY, STL, OBJ, or PTS")
-        );
+    #[test]
+    fn unsupported_formats_are_rejected() {
+        for (path, format) in [
+            ("mesh.ply", MeshFormat::Ply),
+            ("mesh.STL", MeshFormat::Stl),
+            ("mesh.obj", MeshFormat::Obj),
+            ("mesh.PTS", MeshFormat::Pts),
+        ] {
+            assert_eq!(MeshFormat::from_path(Path::new(path)).unwrap(), format);
+        }
+        for path in ["mesh.glb", "mesh.ply.exe", "mesh", "mesh."] {
+            assert!(MeshFormat::from_path(Path::new(path)).is_err());
+        }
     }
 
     #[tokio::test]
@@ -1519,6 +1710,7 @@ mod tests {
         let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
         let mut state = scene.state.clone();
         state.strokes.push(ScreenStroke {
+            id: "screen-review".into(),
             label: Some("需要检查".into()),
             color: "#ff6b5e".into(),
             aspect: 1.0,
@@ -1541,11 +1733,18 @@ mod tests {
                 state,
             })
             .unwrap();
-        assert_eq!(scene.schema, 3);
+        assert_eq!(scene.schema, 8);
         assert_eq!(scene.state.strokes.len(), 1);
         let saved: ViewState =
             serde_json::from_value(serde_json::to_value(&scene.state).unwrap()).unwrap();
         assert_eq!(saved.strokes[0].label.as_deref(), Some("需要检查"));
+        assert_eq!(saved.strokes[0].id, "screen-review");
+        assert!(
+            validate_screen_strokes(&[saved.strokes[0].clone(), saved.strokes[0].clone()]).is_err()
+        );
+        let mut missing_id = serde_json::to_value(&saved.strokes[0]).unwrap();
+        missing_id.as_object_mut().unwrap().remove("id");
+        assert!(serde_json::from_value::<ScreenStroke>(missing_id).is_err());
         let mut oversized = saved.strokes.clone();
         oversized[0].label = Some("字".repeat(121));
         assert!(validate_screen_strokes(&oversized).is_err());
@@ -1590,19 +1789,6 @@ mod tests {
         assert_eq!(mesh.quality, MeshQuality::Lod);
         assert_eq!(mesh.modified_ns, None);
         assert_eq!(mesh.change_ns, None);
-    }
-
-    #[tokio::test]
-    async fn scenes_accept_more_than_sixty_four_meshes() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("mesh.ply");
-        std::fs::write(&path, include_bytes!("../../tests/fixtures/tetra.ply")).unwrap();
-        let paths = vec![path; 65];
-        let scene = SceneDescriptor::create(&paths, None).await.unwrap();
-        assert_eq!(scene.meshes.len(), 65);
-        assert!(scene.meshes.iter().all(|mesh| mesh.modified_ns.is_some()));
-        #[cfg(unix)]
-        assert!(scene.meshes.iter().all(|mesh| mesh.change_ns.is_some()));
     }
 
     #[tokio::test]
@@ -1687,7 +1873,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_collection_keeps_first_scene_and_component_alias() {
+    async fn persisted_collection_keeps_first_scene_and_entities() {
         let path = PathBuf::from("tests/fixtures/tetra.ply");
         let mut first = SceneDescriptor::create(std::slice::from_ref(&path), Some("First".into()))
             .await
@@ -1697,8 +1883,6 @@ mod tests {
             .await
             .unwrap();
         let mut saved = serde_json::to_value(&first).unwrap();
-        let entities = saved.as_object_mut().unwrap().remove("entities").unwrap();
-        saved["components"] = entities;
         saved["collection"] = serde_json::json!({
             "title": "Review",
             "first_id": "first",

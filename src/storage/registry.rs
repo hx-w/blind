@@ -1242,6 +1242,7 @@ mod tests {
             meshes: Vec::new(),
             entities: vec![crate::scene::component::SceneEntity {
                 id: "document".into(),
+                placement: crate::scene::component::Placement::World,
                 renderer: crate::plugin::bind_renderer(&kind, std::slice::from_ref(bundle))
                     .unwrap(),
                 component: kind,

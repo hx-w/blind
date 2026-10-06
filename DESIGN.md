@@ -175,6 +175,24 @@ Component positions are fixed during review, including meshes, images, text and 
 
 Spatial content keeps its native DOM opacity. Parallel XY content planes interleave with GPU-clipped geometry bands, copied through one WebGL renderer into canvas layers. Empty bands allocate no bitmap; hidden content stays connected to preserve plugin state. Pointer routing tests painted geometry coverage, including wireframe gaps, and preserves the full pointer lifecycle for mesh selection.
 
+Planar-only scenes use an affine DOM board, not a camera-locked 3D view. Structural
+mode selection includes hidden world entities and excludes fixed panels. Board
+navigation never creates WebGL, Arcball or CSS3D objects. Zoom counter-scales only
+screen-sized chrome; it does not reflow native source content or recapture reading
+anchors. Layout-changing operations settle reading before returning or admitting
+new screen ink.
+
+Fixed `panel` placement is separate from world layout and focus/fullscreen
+presentation. Panels retain input ownership during navigation. Their measured
+width reserves usable viewport and scene-control space; scene trees and observation
+panels must not cover a controller.
+
+UI, plugins and Collection share typed semantic operations and domain state,
+with render adapters below and transports above. Catalogs expose concrete schemas,
+permission and availability. Private ports bind identity/grants; content inspection
+is own-entity by default. Queries stay pure, IDs remain stable, unavailable actions
+fail explicitly, and disposal removes subscriptions and pending calls.
+
 Native content uses one DOM/SVG reading surface across spatial, focus and fullscreen.
 A 42px name row carries only fullscreen and overflow actions; selection, source-bound
 marks, zoom and actual diagram groups are contextual. Reading uses source-versioned

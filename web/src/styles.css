@@ -298,6 +298,15 @@ svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round
 .surface-selection button { flex: none; }
 .scene-panels { --panels-top: calc(66px + env(safe-area-inset-top)); --panels-height: max(0px, calc(var(--annotation-viewport-height, 100dvh) - var(--panels-top) - max(14px, env(safe-area-inset-bottom)) - var(--annotation-toolbar-height, 64px) - 12px)); position: fixed; z-index: 41; top: var(--panels-top); right: max(16px, env(safe-area-inset-right)); width: min(280px, calc(100vw - 32px)); max-height: var(--panels-height); display: flex; flex-direction: column; gap: 12px; pointer-events: none; }
 .scene-panels > * { pointer-events: auto; }
+/* Host-owned fixed panels keep their full input area, separate from scene chrome. */
+.app-shell:has(.has-fixed-panels) .topbar { right: var(--fixed-panel-space, 0px); }
+.app-shell:has(.has-fixed-panels) .scene-panels { right: calc(max(16px, env(safe-area-inset-right)) + var(--fixed-panel-space, 0px)); width: min(280px, calc(100vw - var(--fixed-panel-space, 0px) - 32px)); }
+.embedded-scene .app-shell:has(.has-fixed-panels) .topbar { right: calc(max(58px, env(safe-area-inset-right)) + var(--fixed-panel-space, 0px)); }
+.app-shell:has(.has-fixed-panels) .section-panel { right: calc(18px + var(--fixed-panel-space, 0px)); max-width: calc(100vw - var(--fixed-panel-space, 0px) - 36px); }
+@media (min-width:760px) {
+ .app-shell.tree-open:has(.has-fixed-panels) .section-panel { right: calc(314px + var(--fixed-panel-space, 0px)); }
+ .export-mode .app-shell.tree-open:has(.has-fixed-panels) .section-panel { right: calc(18px + var(--fixed-panel-space, 0px)); }
+}
 .surface-list { display: flex; flex-direction: column; overflow: hidden; flex: 0 0 auto; min-height: 0; width: 100%; max-height: calc(var(--panels-height) * .45); padding: 8px; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-md); box-shadow: 0 10px 30px oklch(0.08 0.006 255 / .2); }
 .surface-list-heading { display: flex; flex: none; align-items: center; gap: 10px; padding-left: 10px; }
 .surface-list-heading strong { font-size: 13px; font-weight: 600; }

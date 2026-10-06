@@ -4,6 +4,15 @@ import type { MeshViewer } from './viewer';
 import { intersectSection, sectionCaps, type SectionSegment } from './section-geometry';
 import {buildContourGraph, fitContours, oppositeContour, snapContour, type ContourGraph, type ContourHit, type OppositeHit, type PlanePoint, type PlaneSegment} from './section-plot';
 import {installIcons} from './icons';
+import {OperationError,type OperationHost} from './operations/core';
+
+export interface SectionSnapshot {
+  active:boolean;drawing:boolean;measuring:boolean;state:SectionState|null;
+  plot:{radius:number;pan:PlanePoint}|null;
+  targets:Array<{entityId:string;revision:string;name:string;visible:boolean}>;
+  contours:Array<{entityId:string;color:string;segments:PlaneSegment[]}>;
+  measurements:Array<{a:PlanePoint;b:PlanePoint;opposite?:PlanePoint;distance:number;oppositeDistance?:number}>;
+}
 
 const vec = (value: Vec3): THREE.Vector3 => new THREE.Vector3(...value);
 const array = (value: THREE.Vector3): Vec3 => value.toArray() as Vec3;
@@ -34,13 +43,14 @@ export class SectionViewer {
   private hoverFrame = 0;
   private hoverPosition?: {x: number; y: number};
   private start?: {id: number; x: number; y: number};
-  private pendingFrame = 0;
   private plotDrag?: {id: number; x: number; y: number; pan: [number, number]; scale: number};
   private measurePress?: {id: number; x: number; y: number; moved: boolean};
   private readonly plotPointers = new Map<number, {x: number; y: number}>();
   private pinch?: {ids: [number, number]; distance: number; radius: number; anchor: PlanePoint};
   private resizing?: {id: number; x: number; y: number; width: number; height: number};
   private lastPanelSize?: [number, number];
+  private operations?:OperationHost;
+  onShow?: () => void;
 
   constructor(private readonly viewer: MeshViewer, private readonly notify: (message: string) => void) {
     this.trigger = document.querySelector<HTMLButtonElement>('#section-trigger')!;
@@ -64,7 +74,7 @@ export class SectionViewer {
     this.scopeButton.addEventListener('click', () => { this.scopeList.hidden = !this.scopeList.hidden; this.scopeButton.setAttribute('aria-expanded', String(!this.scopeList.hidden)); });
     this.scopeList.className = 'section-scope'; this.scopeList.hidden = true; this.scopeList.setAttribute('role', 'group'); this.scopeList.setAttribute('aria-label', '剖面中的 Mesh');
     const redraw = document.createElement('button'); redraw.type = 'button'; redraw.innerHTML = '<i data-lucide="rotate-ccw" aria-hidden="true"></i>'; redraw.setAttribute('aria-label', '重新划线');
-    redraw.addEventListener('click', () => this.startDraw());
+    redraw.addEventListener('click', () => {try{this.startDraw();}catch(error){this.notify(error instanceof Error?error.message:String(error));}});
     this.ruler.type = 'button'; this.ruler.innerHTML = '<i data-lucide="ruler" aria-hidden="true"></i>';
     this.ruler.setAttribute('aria-label', '测量剖面距离，单位为模型坐标单位'); this.ruler.setAttribute('aria-pressed', 'false');
     this.ruler.addEventListener('click', () => {
@@ -78,7 +88,7 @@ export class SectionViewer {
     const tool = (label: string, icon: string, action: () => void) => { const item = document.createElement('button'); item.type = 'button'; item.innerHTML = `<i data-lucide="${icon}" aria-hidden="true"></i>`; item.setAttribute('aria-label', label); item.addEventListener('click', action); zoom.append(item); };
     tool('放大剖面', 'plus', () => this.zoom(.75));
     tool('缩小剖面', 'minus', () => this.zoom(1.25));
-    tool('全幅显示剖面', 'maximize-2', () => { if (this.state) { this.state.fit = true; this.state.pan = [0,0]; this.viewer.setSection(this.state); this.drawPlot(); } });
+    tool('全幅显示剖面', 'maximize-2', () => this.setPlot({fit:true}));
     plotWrap.append(this.plot, zoom);
     this.plot.addEventListener('wheel', event => { event.preventDefault(); this.zoom(event.deltaY < 0 ? .88 : 1.12, event.clientX, event.clientY); }, {passive:false});
     this.plot.addEventListener('pointerdown', event => this.plotPointerDown(event));
@@ -101,13 +111,10 @@ export class SectionViewer {
     this.overlay.addEventListener('pointercancel', () => this.cancelDraw());
     this.offset.addEventListener('input', () => {
       if (!this.state) return;
-      this.clearMeasurements();
-      const extent = this.viewer.sectionTarget(this.state.mesh)?.bounds.getSize(new THREE.Vector3()).length() ?? this.state.radius * 2;
-      this.state.offset = Number(this.offset.value) / 100 * extent / 2;
-      cancelAnimationFrame(this.pendingFrame);
-      this.pendingFrame = requestAnimationFrame(() => this.recompute());
+      const extent=this.viewer.sectionTarget(this.state.mesh)?.bounds.getSize(new THREE.Vector3()).length()??this.state.radius*2;
+      this.setOffset(Number(this.offset.value)/100*extent/2);
     });
-    this.trigger.addEventListener('click', () => this.open());
+    this.trigger.addEventListener('click', () => {try{if(this.drawing||this.state&&!this.panel.hidden)this.close();else this.open();}catch(error){this.notify(error instanceof Error?error.message:String(error));}});
     new ResizeObserver(() => this.drawPlot()).observe(this.plot);
     window.addEventListener('resize', () => this.applyPanelSize());
     window.addEventListener('keydown', event => {
@@ -120,8 +127,8 @@ export class SectionViewer {
 
   load(): void {
     const saved = this.viewer.currentState.section;
-    if (!saved || !this.valid(saved)) { this.viewer.setSection(null); return; }
-    this.state = saved; this.lastPanelSize = saved.panel_size; this.show(); this.recompute();
+    if (!saved || !this.valid(saved)) { this.close();this.viewer.setSection(null); return; }
+    this.close();this.state=saved;this.lastPanelSize=saved.panel_size;this.viewer.setSection(saved);this.show();this.recompute();
   }
   refresh(): void {
     if (!this.state) return;
@@ -135,14 +142,13 @@ export class SectionViewer {
       && Number.isFinite(state.radius) && state.radius > 0;
   }
   open(): void {
-    if (this.drawing || this.state && !this.panel.hidden) { this.close(); return; }
+    if (this.drawing || this.state && !this.panel.hidden) return;
     const selected = this.viewer.selectedIndex;
-    if (!this.viewer.sectionTarget(selected)) { this.notify('请先选中可见的 Mesh，再观察剖面'); return; }
+    if (!this.viewer.sectionTarget(selected)) throw new OperationError('CONFLICT','Select a visible surface Mesh before opening a section');
     this.startDraw();
   }
   private show(): void {
-    if (document.querySelector('#app-shell')?.classList.contains('tree-open'))
-      document.querySelector<HTMLButtonElement>('#scene-tree-toggle')?.click();
+    this.onShow?.();
     this.panel.hidden = false;
     this.trigger.classList.add('active'); this.trigger.setAttribute('aria-expanded', 'true');
     if (this.state) {
@@ -154,6 +160,7 @@ export class SectionViewer {
     this.drawPlot();
   }
   close(): void {
+    if(!this.state&&!this.drawing&&this.panel.hidden)return;
     this.lastPanelSize = this.state?.panel_size ?? this.lastPanelSize;
     this.cancelDraw(); this.state = null; this.segments = []; this.sections = []; this.planeSections = [];
     this.contourGraph = buildContourGraph([]); this.clearHover();
@@ -162,12 +169,15 @@ export class SectionViewer {
     this.scopeList.hidden = true; this.scopeButton.setAttribute('aria-expanded', 'false');
     this.viewer.setSection(null); this.panel.hidden = true;
     this.trigger.classList.remove('active'); this.trigger.setAttribute('aria-expanded', 'false');
+    this.operations?.notify('section',this.snapshot());
   }
-  deactivate(): void { this.cancelDraw(); }
-  private startDraw(): void {
-    if (!this.viewer.sectionTarget(this.viewer.selectedIndex)) { this.notify('请先选中可见的 Mesh'); return; }
+  deactivate(): void { if(this.drawing)this.cancel(); }
+  startDraw(): void {
+    if(this.drawing)return;
+    if (!this.viewer.sectionTarget(this.viewer.selectedIndex)) throw new OperationError('CONFLICT','Select a visible surface Mesh before drawing a section');
     this.drawing = true; this.panel.hidden = true; this.overlay.hidden = false;
     this.trigger.classList.add('active'); this.trigger.setAttribute('aria-expanded', 'true');
+    this.operations?.notify('section',this.snapshot());
   }
   private cancelDraw(): void {
     if (this.drawing) this.panel.hidden = !this.state;
@@ -204,18 +214,16 @@ export class SectionViewer {
       if (anchor) break;
     }
     if (!anchor) { this.notify('线段需要经过选中的 Mesh'); return; }
-    this.cancelDraw();
     const basis = this.viewer.sectionCameraBasis();
     const axis = basis.right.multiplyScalar(dx).addScaledVector(basis.up, -dy).normalize();
     const normal = basis.forward.cross(axis).normalize();
     const radius = Math.max(Math.hypot(dx, dy) * this.viewer.sectionWorldPerPixel(anchor) / 2, target.bounds.getSize(new THREE.Vector3()).length() * .01);
     const targets = this.viewer.modelInfos.flatMap((_, index) => {
       const visible = this.viewer.sectionTarget(index);
-      return visible ? [{entity_id:visible.entityId, mesh:index, revision:visible.revision}] : [];
+      return visible ? [{entityId:visible.entityId,revision:visible.revision}] : [];
     });
-    this.state = {entity_id:target.entityId, mesh, revision:target.revision, origin:array(anchor), normal:array(normal), axis:array(axis), radius, offset:0, fit:true, pan:[0,0], targets, panel_size:this.state?.panel_size ?? this.lastPanelSize};
+    this.setPlane({entityId:target.entityId,revision:target.revision,origin:array(anchor),normal:array(normal),axis:array(axis),radius,targets});
     this.viewer.revealSection(normal, axis);
-    this.viewer.setSection(this.state); this.show(); this.recompute();
   }
   private recompute(): void {
     if (!this.state || !this.valid(this.state)) return;
@@ -271,8 +279,7 @@ export class SectionViewer {
           if (item) targets.push({entity_id:item.entityId, mesh:index, revision:item.revision});
         }
         if (!targets.length) { check.checked = true; this.notify('至少保留一个 Mesh'); return; }
-        this.clearMeasurements();
-        this.state.targets = targets; this.state.fit = true; this.state.pan = [0,0]; this.viewer.setSection(this.state); this.recompute();
+        this.setTargets(targets.map(target=>({entityId:target.entity_id,revision:target.revision})));
       });
     });
     this.syncScopeSummary();
@@ -291,11 +298,14 @@ export class SectionViewer {
     if (!this.state) return;
     this.state.measurements = []; this.measureAnchor = undefined; this.clearHover();
   }
-  private setMeasuring(active: boolean): void {
+  setMeasuring(active: boolean): void {
+    if(active===this.measuring)return;
+    if(!this.state)throw new OperationError('CONFLICT','Define a section plane first');
     this.measuring = active; this.measureAnchor = undefined; this.measurePress = undefined; this.clearHover();
     if (!active && this.state) { this.state.measurements = []; this.viewer.setSection(this.state); }
     this.ruler.classList.toggle('active', active); this.ruler.setAttribute('aria-pressed', String(active));
     this.plot.classList.toggle('measuring', active); this.drawPlot();
+    this.operations?.notify('section',this.snapshot());
   }
   private clearHover(): void {
     if (this.hoverFrame) cancelAnimationFrame(this.hoverFrame);
@@ -365,8 +375,7 @@ export class SectionViewer {
     }
     const drag = this.plotDrag;
     if (this.state && drag?.id === event.pointerId) {
-      this.state.pan = [drag.pan[0]-(event.clientX-drag.x)/drag.scale,drag.pan[1]+(event.clientY-drag.y)/drag.scale];
-      this.viewer.setSection(this.state); this.drawPlot(); return;
+      this.setPlot({fit:false,pan:[drag.pan[0]-(event.clientX-drag.x)/drag.scale,drag.pan[1]+(event.clientY-drag.y)/drag.scale]});return;
     }
     if (this.measuring && event.pointerType !== 'touch') this.scheduleHover(event.clientX,event.clientY);
   }
@@ -384,9 +393,7 @@ export class SectionViewer {
         if (hit) {
           if (this.measureAnchor) {
             if (Math.hypot(hit.point[0]-this.measureAnchor[0],hit.point[1]-this.measureAnchor[1]) > 1e-9) {
-              this.state.measurements = [...(this.state.measurements ?? []).slice(-1),
-                {a:this.measureAnchor,b:hit.point,...(hit.opposite ? {opposite:hit.opposite.point} : {})}];
-              this.viewer.setSection(this.state);
+              this.setMeasurements([...(this.state.measurements??[]).slice(-1),{a:this.measureAnchor,b:hit.point,...(hit.opposite?{opposite:hit.opposite.point}:{})}]);
             }
             this.measureAnchor = undefined;
           } else this.measureAnchor = hit.point;
@@ -416,9 +423,7 @@ export class SectionViewer {
     const radius = Math.max(1e-8,Math.min(1e9,this.pinch.radius*this.pinch.distance/distance));
     const rect = this.plot.getBoundingClientRect(), scale = this.plotScale(radius,rect);
     const cx = (a.x+b.x)/2-rect.left-rect.width/2, cy = (a.y+b.y)/2-rect.top-rect.height/2;
-    this.state.radius = radius;
-    this.state.pan = [this.pinch.anchor[0]-cx/scale,this.pinch.anchor[1]+cy/scale];
-    this.viewer.setSection(this.state); this.drawPlot();
+    this.setPlot({fit:false,radius,pan:[this.pinch.anchor[0]-cx/scale,this.pinch.anchor[1]+cy/scale]});
   }
   private drawPlot(): void {
     if (this.panel.hidden) return;
@@ -495,11 +500,10 @@ export class SectionViewer {
     const rect = this.plot.getBoundingClientRect();
     clientX ??= rect.left+rect.width/2; clientY ??= rect.top+rect.height/2;
     const anchor = this.plotPoint(clientX,clientY); if (!anchor) return;
-    this.state.radius = Math.max(1e-8,Math.min(1e9,this.state.radius*factor));
-    const scale = this.plotScale(this.state.radius,rect);
-    this.state.pan = [anchor[0]-(clientX-rect.left-rect.width/2)/scale,
-      anchor[1]+(clientY-rect.top-rect.height/2)/scale];
-    this.viewer.setSection(this.state); this.drawPlot();
+    const radius=Math.max(1e-8,Math.min(1e9,this.state.radius*factor));
+    const scale = this.plotScale(radius,rect);
+    this.setPlot({fit:false,radius,pan:[anchor[0]-(clientX-rect.left-rect.width/2)/scale,
+      anchor[1]+(clientY-rect.top-rect.height/2)/scale]});
   }
   private ensurePlotWindow(): void {
     if (!this.state?.fit) return;
@@ -533,9 +537,71 @@ export class SectionViewer {
     if (!this.resizing || event.pointerId !== this.resizing.id) return;
     this.resizing = undefined; this.panel.classList.remove('resizing');
     if (this.state) {
-      this.state.panel_size = [this.panel.getBoundingClientRect().width, this.plot.getBoundingClientRect().height];
-      this.lastPanelSize = this.state.panel_size;
-      this.viewer.setSection(this.state);
+      this.setPanelSize([this.panel.getBoundingClientRect().width,this.plot.getBoundingClientRect().height]);
     }
+  }
+  bindOperations(host:OperationHost):void {this.operations=host;}
+  snapshot():SectionSnapshot {
+    return {active:!!this.state&&!this.panel.hidden,drawing:this.drawing,measuring:this.measuring,state:structuredClone(this.state),plot:this.state?this.plotWindow():null,
+      targets:this.viewer.modelInfos.flatMap((info,mesh)=>{const target=this.viewer.sectionSource(mesh);return target?[{entityId:target.entityId,revision:target.revision,name:target.name,visible:info.visible&&info.opacity>0}]:[];}),
+      contours:this.sections.flatMap((section,index)=>{const source=this.viewer.sectionSource(section.mesh);return source?[{entityId:source.entityId,color:section.color,segments:structuredClone(this.planeSections[index].segments)}]:[];}),
+      measurements:(this.state?.measurements??[]).map(line=>({...structuredClone(line),distance:Math.hypot(line.b[0]-line.a[0],line.b[1]-line.a[1]),...(line.opposite?{oppositeDistance:Math.hypot(line.opposite[0]-line.b[0],line.opposite[1]-line.b[1])}:{})}))};
+  }
+  setPlane(input:{entityId:string;revision:string;origin:Vec3;normal:Vec3;axis:Vec3;radius:number;offset?:number;targets?:Array<{entityId:string;revision:string}>}):void {
+    const source=this.resolveTarget(input.entityId,input.revision);
+    const targets=(input.targets??[{entityId:input.entityId,revision:input.revision}]).map(target=>this.resolveTarget(target.entityId,target.revision));
+    if(!targets.length||new Set(targets.map(t=>t.mesh)).size!==targets.length)throw new OperationError('INVALID_ARGUMENT','Section targets must be nonempty and unique',{field:'targets'});
+    if([input.origin,input.normal,input.axis].some(p=>p.length!==3||p.some(v=>!Number.isFinite(v))))throw new OperationError('INVALID_ARGUMENT','Plane coordinates must be finite triples',{field:'origin'});
+    const normal=vec(input.normal),axis=vec(input.axis);
+    if(Math.abs(normal.length()-1)>=.01||Math.abs(axis.length()-1)>=.01||Math.abs(normal.dot(axis))>=.01)throw new OperationError('INVALID_ARGUMENT','Plane normal and axis must be unit and perpendicular',{field:'normal'});
+    if(!Number.isFinite(input.radius)||input.radius<=0||!Number.isFinite(input.offset??0))throw new OperationError('INVALID_ARGUMENT','Plane radius must be positive and offset finite',{field:'radius'});
+    const next:SectionState={entity_id:source.entity_id,mesh:source.mesh,revision:source.revision,origin:[...input.origin],normal:[...input.normal],axis:[...input.axis],radius:input.radius,offset:input.offset??0,fit:true,pan:[0,0],targets,panel_size:this.state?.panel_size??this.lastPanelSize,measurements:[]};
+    if(this.state&&this.state.entity_id===next.entity_id&&this.state.revision===next.revision&&this.state.radius===next.radius&&this.state.offset===next.offset&&JSON.stringify(this.state.origin)===JSON.stringify(next.origin)&&JSON.stringify(this.state.normal)===JSON.stringify(next.normal)&&JSON.stringify(this.state.axis)===JSON.stringify(next.axis)&&JSON.stringify(this.state.targets)===JSON.stringify(next.targets))return;
+    this.cancelDraw();this.state=next;this.measureAnchor=undefined;this.viewer.setSection(next);this.show();this.recompute();this.operations?.notify('section',this.snapshot());
+  }
+  private resolveTarget(entityId:string,revision:string):{entity_id:string;mesh:number;revision:string} {
+    const mesh=this.viewer.getMeshIndex(entityId);
+    if(mesh===undefined)throw new OperationError('UNKNOWN_ENTITY','Mesh entity does not exist',{target:entityId});
+    const info=this.viewer.modelInfos[mesh];
+    if(!info||info.loading)throw new OperationError('NOT_READY','Mesh surface is loading',{target:entityId,retryable:true});
+    if(info.revision!==revision)throw new OperationError('CONFLICT','Section source revision changed',{field:'revision',target:entityId});
+    if(info.format==='pts')throw new OperationError('UNSUPPORTED','Point clouds have no section surface',{target:entityId});
+    if(!this.viewer.hasSurface(mesh))throw new OperationError('RESOURCE_UNAVAILABLE','Mesh surface geometry is unavailable',{target:entityId,retryable:true});
+    if(!this.viewer.sectionTarget(mesh))throw new OperationError('CONFLICT','Section target must be visible with nonzero opacity',{target:entityId});
+    return {entity_id:entityId,mesh,revision};
+  }
+  setTargets(input:Array<{entityId:string;revision:string}>):void {
+    if(!this.state)throw new OperationError('CONFLICT','Define a section plane first');
+    const targets=input.map(t=>this.resolveTarget(t.entityId,t.revision));
+    if(!targets.length||new Set(targets.map(t=>t.mesh)).size!==targets.length)throw new OperationError('INVALID_ARGUMENT','Section targets must be nonempty and unique',{field:'targets'});
+    if(JSON.stringify(this.state.targets)===JSON.stringify(targets))return;
+    this.state.targets=targets;this.state.fit=true;this.state.pan=[0,0];this.clearMeasurements();this.viewer.setSection(this.state);this.renderScope();this.recompute();this.operations?.notify('section',this.snapshot());
+  }
+  setOffset(offset:number):void {
+    if(!this.state)throw new OperationError('CONFLICT','Define a section plane first');
+    if(!Number.isFinite(offset))throw new OperationError('INVALID_ARGUMENT','Offset must be finite',{field:'offset'});
+    if(this.state.offset===offset)return;this.state.offset=offset;this.clearMeasurements();this.viewer.setSection(this.state);this.recompute();this.operations?.notify('section',this.snapshot());
+  }
+  setPlot(input:{fit?:boolean;radius?:number;pan?:PlanePoint}):void {
+    if(!this.state)throw new OperationError('CONFLICT','Define a section plane first');
+    if(input.radius!==undefined&&(!Number.isFinite(input.radius)||input.radius<=0))throw new OperationError('INVALID_ARGUMENT','Plot radius must be positive',{field:'radius'});
+    if(input.pan&&(input.pan.length!==2||input.pan.some(v=>!Number.isFinite(v))))throw new OperationError('INVALID_ARGUMENT','Plot pan must be finite plane coordinates',{field:'pan'});
+    if(input.fit===false&&this.state.fit){const current=this.plotWindow();this.state.radius=current.radius;this.state.pan=current.pan;}
+    if(input.fit!==undefined)this.state.fit=input.fit;if(input.radius!==undefined)this.state.radius=input.radius;if(input.pan)this.state.pan=[...input.pan];this.viewer.setSection(this.state);this.drawPlot();this.operations?.notify('section',this.snapshot());
+  }
+  setMeasurements(lines:NonNullable<SectionState['measurements']>):void {
+    if(!this.state)throw new OperationError('CONFLICT','Define a section plane first');
+    if(lines.length>2||lines.some(line=>[line.a,line.b,...(line.opposite?[line.opposite]:[])].some(p=>p.length!==2||p.some(v=>!Number.isFinite(v)||Math.abs(v)>1e9))))throw new OperationError('INVALID_ARGUMENT','At most two rulers with finite plane endpoints within ±1e9 are allowed',{field:'measurements'});
+    this.state.measurements=structuredClone(lines);this.viewer.setSection(this.state);this.drawPlot();this.operations?.notify('section',this.snapshot());
+  }
+  setPanelSize(size:[number,number]):void {
+    if(!this.state)throw new OperationError('CONFLICT','Define a section plane first');
+    if(size.some(v=>!Number.isFinite(v)||v<160||v>1200))throw new OperationError('INVALID_ARGUMENT','Panel size must be 160–1200 CSS pixels',{field:'size'});
+    this.state.panel_size=[...size];this.lastPanelSize=[...size];this.applyPanelSize(size);this.viewer.setSection(this.state);this.operations?.notify('section',this.snapshot());
+  }
+  cancel():void {this.cancelDraw();this.measureAnchor=undefined;this.clearHover();this.operations?.notify('section',this.snapshot());}
+  snap(point:PlanePoint,tolerance:number):{point:PlanePoint;index:number;opposite:OppositeHit|null} {
+    if(!this.state)throw new OperationError('CONFLICT','Define a section plane first');
+    const hit=snapContour(point,this.contourGraph.segments,tolerance);return {...hit,opposite:hit.index<0?null:oppositeContour(this.contourGraph,hit.point,hit.index)};
   }
 }

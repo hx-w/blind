@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {spawn, spawnSync} from 'node:child_process';
 import {createServer} from 'node:net';
-import {mkdtemp, rm} from 'node:fs/promises';
+import {mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -11,6 +11,92 @@ import {chromium} from 'playwright';
 async function clickDisplay(page) {
   if (await page.locator('.dock-observe').getAttribute('aria-hidden') === 'true') await page.locator('#observe-trigger').click();
   if (await page.locator('[data-observe-category="light"]').getAttribute('aria-expanded') === 'false') await page.locator('[data-observe-category="light"]').click();
+}
+
+async function operation(page, name, params = {}) {
+  const result = await page.evaluate(({name, params}) => window.blind.execute(name, params), {name, params});
+  assert.equal(result.ok, true, `${name}: ${JSON.stringify(result.error)}`);
+  assert.equal(typeof result.revision, 'number');
+  return result.value;
+}
+
+async function sceneOperation(page, sceneId, name, params = {}) {
+  return await operation(page, 'collection:scene-execute', {sceneId, operation: name, params});
+}
+
+async function waitForCollectionInkCleared(page) {
+  return await page.evaluate(() => new Promise((resolve, reject) => {
+    const api = window.blind;
+    let finished = false;
+    const unsubscribe = api.subscribe(event => {
+      if (event.domain === 'annotation' || event.domain === 'collection:scene') void check();
+    });
+    const timeout = setTimeout(() => finish(new Error('Collection framing did not clear ink and history')), 10000);
+    function finish(error, state) {
+      if (finished) return;
+      finished = true; clearTimeout(timeout); unsubscribe();
+      if (error) reject(error); else resolve(state);
+    }
+    async function check() {
+      const result = await api.execute('collection:get', {});
+      if (!result.ok) return finish(new Error(JSON.stringify(result.error)));
+      const state = result.value;
+      if (!state.strokes.length && !state.canUndo && !state.canRedo) finish(undefined, state);
+    }
+    void check();
+  }));
+}
+
+async function waitForCollectionReady(page, sceneIds) {
+  assert.ok(sceneIds.length, 'collection readiness requires explicit scene IDs');
+  return await page.evaluate(sceneIds => new Promise((resolve, reject) => {
+    const api = window.blind;
+    let finished = false;
+    const unsubscribe = api.subscribe(event => {
+      if (event.domain === 'collection' || event.domain === 'collection:scene') void check();
+    });
+    const timeout = setTimeout(() => finish(new Error(`Collection scenes did not become ready: ${sceneIds.join(', ')}`)), 30000);
+    function finish(error, state) {
+      if (finished) return;
+      finished = true; clearTimeout(timeout); unsubscribe();
+      if (error) reject(error); else resolve(state);
+    }
+    async function check() {
+      try {
+        const result = await api.execute('collection:get', {});
+        if (!result.ok) throw new Error(`collection:get: ${JSON.stringify(result.error)}`);
+        const state = result.value;
+        if (state.scenes.length === sceneIds.length && sceneIds.every(id => state.scenes.some(scene => scene.id === id && scene.ready)))
+          finish(undefined, state);
+      } catch (error) { finish(error); }
+    }
+    void check();
+  }), sceneIds);
+}
+
+async function waitForContentReady(page, sceneId, id) {
+  return await page.evaluate(({sceneId, id}) => new Promise((resolve, reject) => {
+    const api = window.blind;
+    let finished = false;
+    const unsubscribe = api.subscribe(event => {
+      if (event.domain === 'collection:scene' && event.data.sceneId === sceneId) void check();
+    });
+    const timeout = setTimeout(() => finish(new Error(`Content did not become ready: ${sceneId}/${id}`)), 30000);
+    function finish(error, content) {
+      if (finished) return;
+      finished = true; clearTimeout(timeout); unsubscribe();
+      if (error) reject(error); else resolve(content);
+    }
+    async function check() {
+      try {
+        const result = await api.execute('collection:scene-execute', {sceneId, operation: 'content:get', params: {id}});
+        if (!result.ok) throw new Error(`content:get: ${JSON.stringify(result.error)}`);
+        if (result.value.unavailable) throw new Error(result.value.unavailable);
+        if (result.value.ready) finish(undefined, result.value);
+      } catch (error) { finish(error); }
+    }
+    void check();
+  }), {sceneId, id});
 }
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
@@ -79,6 +165,29 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     const design = page.frameLocator('.collection-card[data-scene="design"] iframe');
     await scan.locator('#loading-state').waitFor({state:'hidden'});
     await design.locator('#loading-state').waitFor({state:'hidden'});
+    await waitForCollectionReady(page, ['design', 'scan']);
+    const initialScanView = await sceneOperation(page, 'scan', 'view:get');
+    const initialDesignView = await sceneOperation(page, 'design', 'view:get');
+    assert.equal(await page.evaluate(() => window.blind.version), 1);
+    const rootCatalog = await page.evaluate(() => window.blind.catalog());
+    const stateDescriptor = rootCatalog.find(entry => entry.name === 'collection:get');
+    assert.equal(stateDescriptor.outputSchema.properties.activeSceneId.type, 'string');
+    assert.equal(stateDescriptor.outputSchema.properties.scenes.items.properties.parked.type, 'boolean');
+    const snapshotDescriptor = rootCatalog.find(entry => entry.name === 'collection:scene-snapshot');
+    assert.deepEqual(snapshotDescriptor.outputSchema.properties.state.properties.viewport.properties.mode.enum, ['auto', 'board', 'spatial']);
+    assert.equal(snapshotDescriptor.outputSchema.properties.state.properties.strokes.items.properties.id.type, 'string');
+    const catalog = await operation(page, 'collection:scene-catalog', {sceneId: 'scan'});
+    assert.ok(catalog.some(entry => entry.name === 'view:get' && entry.readOnly));
+    await operation(page, 'collection:select', {sceneId: 'scan'});
+    const routed = await page.evaluate(async axes => {
+      const request = window.blind.execute('collection:scene-execute', {sceneId: 'scan', operation: 'view:settings', params: {axes}});
+      await window.blind.execute('collection:select', {sceneId: 'design'});
+      return await request;
+    }, !initialScanView.settings.axes);
+    assert.equal(routed.ok, true);
+    assert.equal((await sceneOperation(page, 'scan', 'view:get')).settings.axes, !initialScanView.settings.axes);
+    assert.equal((await sceneOperation(page, 'design', 'view:get')).settings.axes, initialDesignView.settings.axes,
+      'an in-flight command must retain its explicit scene ID after active scene selection changes');
     await scan.locator('#viewer').focus();
     await page.waitForFunction(() => document.querySelector('.collection-card.active')?.getAttribute('data-scene') === 'scan');
     await design.locator('#viewer').focus();
@@ -103,8 +212,17 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     await scan.locator('button[aria-label="关闭剖面观察"]').click();
     await page.locator('[data-observe-category="shading"]').click();
     await page.locator('.collection-shell [data-shading="wire"]').click();
-    await page.waitForFunction(() => document.querySelector('.collection-card[data-scene="scan"] iframe')?.contentDocument?.querySelector('[data-shading="wire"]')?.classList.contains('active'));
+    assert.equal((await sceneOperation(page, 'scan', 'view:get')).settings.shading, 'wire');
     await clickDisplay(page);
+    await page.locator('.collection-shell .review-dock [data-observe-mode="raking"]').click();
+    await sceneOperation(page, 'scan', 'view:settings', {light: {azimuth: 0, elevation: 45, intensity: .6}});
+    await page.locator('#light-intensity').fill('100');
+    assert.equal((await sceneOperation(page, 'scan', 'view:get')).settings.light.intensity, 1,
+      'the collection percent slider must convert 100 percent to unit scene intensity');
+    await sceneOperation(page, 'scan', 'view:settings', {light: {azimuth: -40, elevation: 25, intensity: 1.4}});
+    assert.equal(await page.locator('#light-intensity').inputValue(), '140');
+    assert.equal(await page.locator('#light-intensity-value').textContent(), '140%',
+      'scene intensity must be displayed in percent after semantic changes');
     await page.locator('.collection-shell .review-dock [data-observe-mode="normals"]').click();
     await page.locator('.collection-card[data-scene="design"] .collection-scene-label').click();
     await clickDisplay(page);
@@ -151,8 +269,7 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
       window.clipboardWriteStarted = false;
       navigator.clipboard.write = async () => { window.clipboardWriteStarted = true; };
     });
-    let releaseShare;
-    const sharePaused = new Promise(resolve => { releaseShare = resolve; });
+    const {promise: sharePaused, resolve: releaseShare} = Promise.withResolvers();
     const sharePattern = '**/api/v1/scenes/*/share';
     await page.route(sharePattern, async route => {
       await sharePaused;
@@ -182,14 +299,24 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     const inkY = inkBounds.y + inkBounds.height * .4;
     await page.mouse.move(inkBounds.x + inkBounds.width * .25, inkY);
     await page.mouse.down();
-    await page.mouse.move(inkBounds.x + inkBounds.width * .75, inkY, {steps:24});
+    await page.mouse.move(inkBounds.x + inkBounds.width * .4, inkY, {steps:8});
+    assert.deepEqual((await operation(page, 'collection:get')).strokes, [],
+      'a held collection pointer draft must not be committed by child tool settlement or a pure query');
+    await page.mouse.move(inkBounds.x + inkBounds.width * .75, inkY, {steps:16});
     await page.mouse.up();
     const inkShare = page.waitForResponse(response => response.url().endsWith('/share') && response.request().method() === 'POST');
     await page.locator('.collection-shell > #surface-toolbar #share-view').click();
     const inkResponse = await inkShare;
     const inkPayload = inkResponse.request().postDataJSON();
     assert.equal(inkPayload.strokes.length, 1);
+    assert.match(inkPayload.strokes[0].id, /^[0-9a-f-]{36}$/i, 'shared collection strokes carry stable IDs');
     assert.ok(inkPayload.strokes[0].points[0][0] < .5 && inkPayload.strokes[0].points.at(-1)[0] > .5);
+    assert.ok(Math.abs(inkPayload.strokes[0].points[0][0] - .25) < .01);
+    assert.ok(Math.abs(inkPayload.strokes[0].points.at(-1)[0] - .75) < .01,
+      'physical split ink uses the entire collection viewport, not a child pane or a prematurely finished gesture');
+    assert.deepEqual(inkPayload.updates.design.state.strokes, [],
+      'collection screen ink must not be duplicated in the focused child snapshot');
+    assert.deepEqual(inkPayload.updates.scan.state.strokes, []);
     assert.equal(inkPayload.layout.columns, 2);
     const inkLinks = await inkResponse.json();
     const inkToken = inkLinks.viewer_url.split('/').at(-1);
@@ -250,12 +377,33 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
       'unchanged view toggles must retain the collection undo history');
     await page.locator('.collection-shell > #surface-toolbar #surface-redo').click();
     assert.equal(await page.locator('.collection-ink-badges button').count(), 1);
+    assert.deepEqual((await operation(page, 'collection:get')).strokes, inkPayload.strokes,
+      'global undo and redo restore the same stable stroke ID and combined coordinates');
+    const displayView = await sceneOperation(page, 'design', 'view:get');
+    await sceneOperation(page, 'design', 'view:settings', {
+      background: displayView.settings.background === 'dark' ? 'light' : 'dark',
+      shading: 'wire', light: {azimuth: 30, elevation: 20, intensity: 1},
+    });
+    await sceneOperation(page, 'design', 'view:settings', {projection: displayView.settings.projection});
+    await sceneOperation(page, 'design', 'view:settings', {});
+    assert.deepEqual((await operation(page, 'collection:get')).strokes, inkPayload.strokes,
+      'display-only and no-op view notifications must retain global ink');
+    await operation(page, 'annotation:undo');
+    await sceneOperation(page, 'design', 'view:settings', {axes: !displayView.settings.axes});
+    assert.equal((await operation(page, 'collection:get')).canRedo, true,
+      'display changes must also retain ink that exists only in redo history');
+    await operation(page, 'annotation:redo');
     await page.locator('.collection-shell > #surface-toolbar #surface-done').click();
     await page.getByRole('button', {name:'放大 Design', exact:true}).click();
     await page.locator('.collection-shell.collection-maximized').waitFor();
-    await scan.locator('[data-projection="orthographic"]').evaluate(button => button.click());
-    await page.waitForFunction(() => document.querySelector('.collection-card[data-scene="scan"] iframe')
-      ?.contentDocument?.querySelector('[data-projection="orthographic"]')?.classList.contains('active'));
+    const parkedDisplay = await sceneOperation(page, 'scan', 'view:get');
+    await sceneOperation(page, 'scan', 'view:settings', {background: parkedDisplay.settings.background === 'dark' ? 'light' : 'dark'});
+    await sceneOperation(page, 'scan', 'view:settings', {projection: parkedDisplay.settings.projection});
+    await operation(page, 'collection:set-layout', {maximized: false});
+    assert.deepEqual((await operation(page, 'collection:get')).strokes, inkPayload.strokes,
+      'parked display-only events must not mark the captured split ink invalid');
+    await operation(page, 'collection:set-layout', {sceneId: 'design', maximized: true});
+    await sceneOperation(page, 'scan', 'view:settings', {projection: 'orthographic'});
     assert.equal(await page.locator('.collection-ink-badges button').count(), 1,
       'a parked scene change must not immediately delete hidden collection ink');
     await page.getByRole('button', {name:'还原分屏', exact:true}).click();
@@ -276,7 +424,7 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     await page.locator('.collection-shell > #surface-toolbar #surface-redo').click();
     assert.equal(await page.locator('.collection-ink-badges button').count(), 1);
     await page.locator('.collection-shell > #surface-toolbar #surface-undo').click();
-    await design.locator('[data-projection="orthographic"]').evaluate(button => button.click());
+    await sceneOperation(page, 'design', 'view:settings', {projection: 'orthographic'});
     await page.waitForFunction(() => document.querySelector('.collection-shell > #surface-toolbar #surface-redo')?.disabled);
     assert.equal(await page.locator('.collection-ink-badges button').count(), 0,
       'an actual visible camera change invalidates ink even when it exists only in redo history');
@@ -343,15 +491,208 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     await widePage.goto(wide.viewer_url);
     await widePage.locator('.collection-shell.collection-split').waitFor();
     assert.equal(await widePage.locator('.collection-card').count(), 5);
+    await waitForCollectionReady(widePage, wideConfig.scenes.map(scene => scene.id));
+    const wideBounds = await widePage.locator('.collection-card').evaluateAll(cards => cards.map(card => {
+      const bounds = card.getBoundingClientRect();
+      return {left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom, width: bounds.width, height: bounds.height};
+    }));
+    assert.ok(wideBounds.every(bounds => bounds.width >= 160 && bounds.height >= 135 && bounds.left >= 0 && bounds.top >= 0 &&
+      bounds.right <= 2400 && bounds.bottom <= 1300), 'all five ready scene panes must have usable on-screen bounds');
+    for (let index = 0; index < wideBounds.length; index++) for (const other of wideBounds.slice(index + 1)) {
+      const bounds = wideBounds[index];
+      assert.ok(bounds.right <= other.left || other.right <= bounds.left || bounds.bottom <= other.top || other.bottom <= bounds.top,
+        'ready split panes must not overlap');
+    }
     await widePage.close();
     const failedPage = await browser.newPage({viewport:{width:390,height:844}});
     await failedPage.route('**/api/v1/scenes/*?scene=*', route => route.abort());
     await failedPage.goto(shared.viewer_url);
     await failedPage.locator('.collection-shell').waitFor();
+    await failedPage.locator('.collection-frame').first().waitFor();
+    const unavailableSnapshot = await failedPage.evaluate(() => window.blind.execute('collection:scene-snapshot', {sceneId: 'design'}));
+    assert.equal(unavailableSnapshot.ok, false);
+    assert.equal(unavailableSnapshot.error.code, 'NOT_READY');
+    let failedShareRequests = 0;
+    failedPage.on('request', request => {if (request.method() === 'POST' && request.url().endsWith('/share')) failedShareRequests++;});
+    const unavailableShare = await failedPage.evaluate(() => window.blind.execute('share:create', {}));
+    assert.equal(unavailableShare.ok, false, 'unready children must reject sharing rather than reuse stale state');
+    assert.equal(unavailableShare.error.code, 'NOT_READY');
+    assert.equal(failedShareRequests, 0, 'no incomplete collection snapshot should be posted as a successful share');
     await failedPage.locator('#brush-tool').click();
     assert.equal(await failedPage.locator('.collection-shell > .review-dock').isVisible(), true,
       'failed child scenes must not hide the only touch controls');
+    const failedChild = failedPage.frames().find(frame => new URL(frame.url()).searchParams.get('scene') === 'design');
+    await failedChild.waitForFunction(() => !!window.blind);
+    const unavailableLifecycle = await failedChild.evaluate(async () => {
+      const api = window.blind;
+      window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+      window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+      const resumed = await api.execute('ui:get', {});
+      const publishedAfterResume = window.blind === api;
+      window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: false}));
+      return {resumed, publishedAfterResume, publishedAfterExit: !!window.blind, exited: await api.execute('ui:get', {})};
+    });
+    assert.equal(unavailableLifecycle.resumed.error.code, 'NOT_READY',
+      'the unavailable-scene API must retain its unready state after BFcache restoration, not become disposed');
+    assert.equal(unavailableLifecycle.publishedAfterResume, true);
+    assert.equal(unavailableLifecycle.publishedAfterExit, false);
+    assert.equal(unavailableLifecycle.exited.error.code, 'DISPOSED',
+      'a persisted pagehide must not consume the unavailable-scene cleanup for the later real exit');
     await failedPage.close();
+
+    await page.setViewportSize({width: 1280, height: 800});
+    await operation(page, 'collection:set-layout', {sceneId: 'design', maximized: true});
+    const designFrame = page.frames().find(frame => new URL(frame.url()).searchParams.get('scene') === 'design');
+    await sceneOperation(page, 'design', 'annotation:screen-scope', {scope: 'scene'});
+    await sceneOperation(page, 'design', 'annotation:open', {target: 'screen'});
+    await sceneOperation(page, 'design', 'annotation:set-tool', {mode: 'screen'});
+    const draftCanvas = designFrame.locator('#markup-canvas');
+    await draftCanvas.waitFor({state: 'visible'});
+    const draftBounds = await draftCanvas.boundingBox();
+    const beforeDraft = await operation(page, 'collection:scene-snapshot', {sceneId: 'design'});
+    await page.mouse.move(draftBounds.x + draftBounds.width * .2, draftBounds.y + draftBounds.height * .4);
+    await page.mouse.down();
+    await page.mouse.move(draftBounds.x + draftBounds.width * .4, draftBounds.y + draftBounds.height * .4, {steps: 8});
+    const duringDraft = await operation(page, 'collection:scene-snapshot', {sceneId: 'design'});
+    assert.deepEqual(duringDraft.state.strokes, beforeDraft.state.strokes, 'snapshot query must not commit the held pointer draft');
+    await page.mouse.move(draftBounds.x + draftBounds.width * .8, draftBounds.y + draftBounds.height * .4, {steps: 16});
+    await page.mouse.up();
+    const afterDraft = await operation(page, 'collection:scene-snapshot', {sceneId: 'design'});
+    assert.equal(afterDraft.state.strokes.length, beforeDraft.state.strokes.length + 1);
+    const completedStroke = afterDraft.state.strokes.at(-1);
+    assert.ok(completedStroke.points.at(-1)[0] > .7, 'drawing must continue past the snapshot query until pointer release');
+    const prepared = await operation(page, 'collection:scene-prepare-snapshot', {sceneId: 'design'});
+    assert.equal(prepared.state.strokes.at(-1).id, completedStroke.id);
+    await sceneOperation(page, 'design', 'annotation:undo');
+    assert.deepEqual((await operation(page, 'collection:scene-snapshot', {sceneId: 'design'})).state.strokes, beforeDraft.state.strokes);
+    await sceneOperation(page, 'design', 'annotation:redo');
+    assert.deepEqual((await operation(page, 'collection:scene-snapshot', {sceneId: 'design'})).state.strokes.at(-1), completedStroke,
+      'scene undo and redo retain the stable child stroke independently of global collection history');
+
+    await page.route('**/api/v1/scenes/*?scene=design', route => route.abort());
+    await designFrame.goto(designFrame.url());
+    await designFrame.waitForFunction(() => window.blind?.sceneId === 'design');
+    const rejectedSnapshot = await page.evaluate(() => window.blind.execute('collection:scene-snapshot', {sceneId: 'design'}));
+    assert.equal(rejectedSnapshot.ok, false, 'a failed replacement child must not return its previously saved snapshot');
+    assert.equal(rejectedSnapshot.error.code, 'NOT_READY');
+    let replacementShareRequests = 0;
+    const countReplacementShare = request => {if (request.method() === 'POST' && request.url().endsWith('/share')) replacementShareRequests++;};
+    page.on('request', countReplacementShare);
+    const rejectedShare = await page.evaluate(() => window.blind.execute('share:create', {}));
+    assert.equal(rejectedShare.ok, false, 'one failed replacement child prevents sharing a partial collection');
+    assert.equal(rejectedShare.error.code, 'NOT_READY');
+    assert.equal(replacementShareRequests, 0);
+    page.off('request', countReplacementShare);
+
+    const notes = join(directory, 'notes.txt'), panelSource = join(directory, 'reference.txt');
+    await writeFile(notes, 'Board world content\n' + Array.from({length: 80}, (_, index) => `World line ${index + 1}`).join('\n'));
+    await writeFile(panelSource, 'Pinned reference\n' + Array.from({length: 160}, (_, index) => `Panel line ${index + 1}`).join('\n'));
+    const boardConfig = {kind: 'collection', schema_version: 1, title: 'Board with fixed panel', active_scene_id: 'notes', scenes: [
+      {id: 'notes', title: 'Notes', viewport: {mode: 'board', board: {center: [0, 0], scale: 1}}, resources: [{path: notes}, {path: panelSource, placement: 'panel'}]},
+      {id: 'other', title: 'Other notes', viewport: {mode: 'board'}, resources: [{path: notes}]},
+    ]};
+    const boardLinks = JSON.parse(cli(['share', '--config', '-', '--format', 'json'], JSON.stringify(boardConfig)));
+    const boardPage = await browser.newPage({viewport: {width: 1280, height: 800}});
+    const notesRequested = Promise.withResolvers(), releaseNotes = Promise.withResolvers();
+    await boardPage.route(`**/api/v1/scenes/${boardLinks.viewer_url.split('/').at(-1)}?scene=notes`, async route => {
+      notesRequested.resolve();
+      await releaseNotes.promise;
+      await route.continue();
+    });
+    await boardPage.goto(boardLinks.viewer_url);
+    await boardPage.locator('.collection-shell.collection-split').waitFor();
+    await notesRequested.promise;
+    const loadingBoard = await operation(boardPage, 'collection:get');
+    assert.deepEqual(loadingBoard.scenes.map(scene => scene.id), ['notes', 'other']);
+    assert.equal(loadingBoard.scenes.find(scene => scene.id === 'notes').ready, false,
+      'the real board child must remain unready while its scene response is held');
+    const loadingEntities = await boardPage.evaluate(() => window.blind.execute('collection:scene-execute', {sceneId: 'notes', operation: 'entity:list', params: {}}));
+    assert.equal(loadingEntities.ok, false);
+    assert.equal(loadingEntities.error.code, 'NOT_READY');
+    assert.equal(loadingEntities.error.target, 'notes');
+    releaseNotes.resolve();
+    const readyBoard = await waitForCollectionReady(boardPage, ['notes', 'other']);
+    assert.equal(readyBoard.scenes.length, 2, 'readiness must not succeed on an empty scene catalog');
+    assert.equal(readyBoard.scenes.every(scene => scene.ready), true,
+      'readiness waits for the resolved operation value, not the truthiness of an async predicate Promise');
+    const boardScene = boardPage.frames().find(frame => new URL(frame.url()).searchParams.get('scene') === 'notes');
+    const entities = await sceneOperation(boardPage, 'notes', 'entity:list');
+    const pinned = entities.find(entity => entity.placement === 'panel');
+    assert.ok(pinned, 'the board fixture must expose its real fixed panel entity');
+    const world = entities.find(entity => entity.placement === 'world');
+    assert.ok(world);
+    assert.equal((await sceneOperation(boardPage, 'notes', 'view:get')).kind, 'board');
+    await boardScene.locator('.component-fixed-panels .component-content').waitFor({state: 'visible'});
+    const panelNode = await boardScene.$('.component-fixed-panels .component-content');
+    assert.equal((await waitForContentReady(boardPage, 'notes', pinned.id)).ready, true);
+    const globalStroke = {color: '#ff6b5e', aspect: 1.6, points: [[.2, .3], [.7, .4]]};
+    assert.equal((await operation(boardPage, 'annotation:open')).active, true,
+      'collection tools must open scene screen annotations, not the selected native document editor');
+    await operation(boardPage, 'annotation:set-tool', {mode: 'screen'});
+    await operation(boardPage, 'collection:screen-create', globalStroke);
+    const beforeNativeScroll = await sceneOperation(boardPage, 'notes', 'content:get', {id: pinned.id});
+    await sceneOperation(boardPage, 'notes', 'content:scroll', {id: pinned.id, x: 0, y: 80});
+    await waitForCollectionInkCleared(boardPage);
+    assert.notDeepEqual((await sceneOperation(boardPage, 'notes', 'content:get', {id: pinned.id})).state.reading,
+      beforeNativeScroll.state.reading, 'the native reading gesture must actually move source framing');
+    await operation(boardPage, 'collection:screen-create', globalStroke);
+    await operation(boardPage, 'annotation:undo');
+    assert.equal((await operation(boardPage, 'collection:get')).canRedo, true);
+    await sceneOperation(boardPage, 'notes', 'content:scroll', {id: pinned.id, x: 0, y: 120});
+    await waitForCollectionInkCleared(boardPage);
+    await operation(boardPage, 'collection:screen-create', globalStroke);
+    await sceneOperation(boardPage, 'notes', 'entity:set-style', {id: pinned.id, visible: true, opacity: .7});
+    assert.equal((await operation(boardPage, 'collection:get')).strokes.length, 1,
+      'unchanged reserved panel width must not invalidate collection ink');
+    await sceneOperation(boardPage, 'notes', 'entity:set-style', {id: pinned.id, visible: false});
+    await waitForCollectionInkCleared(boardPage);
+    await operation(boardPage, 'collection:screen-create', globalStroke);
+    await sceneOperation(boardPage, 'notes', 'entity:set-style', {id: pinned.id, visible: true, opacity: 1});
+    await waitForCollectionInkCleared(boardPage);
+    await sceneOperation(boardPage, 'notes', 'content:set-selection', {id: pinned.id, enabled: true});
+    await sceneOperation(boardPage, 'notes', 'content:scroll', {id: pinned.id, x: 0, y: 160});
+    await sceneOperation(boardPage, 'notes', 'view:set', {kind: 'board', center: [25, -10], scale: 1.25});
+    const retainedView = await sceneOperation(boardPage, 'notes', 'view:get');
+    const retainedPanel = await sceneOperation(boardPage, 'notes', 'content:get', {id: pinned.id});
+    assert.equal(retainedPanel.state.selection, true, 'native selection is enabled before the board is parked');
+    assert.ok(retainedPanel.state.reading, 'native reading state is available to retain across parking');
+    await operation(boardPage, 'collection:set-layout', {sceneId: 'other', maximized: true});
+    assert.equal((await operation(boardPage, 'collection:get')).scenes.find(scene => scene.id === 'notes').parked, true);
+    assert.deepEqual((await sceneOperation(boardPage, 'notes', 'view:get')).camera, retainedView.camera);
+    assert.deepEqual((await sceneOperation(boardPage, 'notes', 'content:get', {id: pinned.id})).state, retainedPanel.state);
+    assert.equal(await panelNode.evaluate(node => node.isConnected && !!node.closest('.component-fixed-panels')), true,
+      'parking a board retains the same native panel DOM rather than remounting it');
+    await operation(boardPage, 'collection:select', {sceneId: 'notes'});
+    await boardScene.locator('.component-fixed-panels').waitFor({state: 'visible'});
+    assert.deepEqual((await sceneOperation(boardPage, 'notes', 'view:get')).camera, retainedView.camera);
+    assert.deepEqual((await sceneOperation(boardPage, 'notes', 'content:get', {id: pinned.id})).state, retainedPanel.state);
+    await operation(boardPage, 'collection:set-layout', {maximized: false});
+    await operation(boardPage, 'collection:screen-create', globalStroke);
+    await operation(boardPage, 'collection:set-layout', {sceneId: 'other', maximized: true});
+    await sceneOperation(boardPage, 'notes', 'content:scroll', {id: pinned.id, x: 0, y: 200});
+    assert.equal((await operation(boardPage, 'collection:get')).strokes.length, 1,
+      'native framing in a parked child defers invalidation until the split composition returns');
+    await operation(boardPage, 'collection:set-layout', {maximized: false});
+    await waitForCollectionInkCleared(boardPage);
+    await boardPage.evaluate(() => {
+      window.savedCollectionAPI = window.blind;
+      window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+      window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+    });
+    assert.equal((await operation(boardPage, 'collection:get')).scenes.every(scene => scene.ready), true);
+    const resumedCamera = (await sceneOperation(boardPage, 'notes', 'view:get')).camera;
+    await sceneOperation(boardPage, 'notes', 'view:pan', {delta: [10, 0]});
+    assert.notDeepEqual((await sceneOperation(boardPage, 'notes', 'view:get')).camera, resumedCamera,
+      'BFcache restoration must retain usable child transports, not only the root API');
+    const exitedCollection = await boardPage.evaluate(async () => {
+      window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: false}));
+      return {published: !!window.blind, result: await window.savedCollectionAPI.execute('collection:get', {})};
+    });
+    assert.equal(exitedCollection.published, false);
+    assert.equal(exitedCollection.result.error.code, 'DISPOSED',
+      'a persisted collection pagehide must preserve destructive cleanup for the later real exit');
+    await panelNode.dispose();
+    await boardPage.close();
   } finally {
     await browser?.close();
     if (server) { server.kill(); await new Promise(resolve => server.once('exit', resolve)); }

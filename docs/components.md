@@ -4,9 +4,9 @@
 
 Within each scene, Blind shares files as entities. A component is a renderer
 type; an entity is one placed instance of that type bound to a source. Flat
-groups organize entities. There is no separate timeline or nested scene. All geometry in a group
-retains its relative coordinates. Content surfaces occupy world-space rectangles
-and participate in camera projection and Fit.
+groups organize entities. There is no separate timeline or nested scene. Geometry
+retains its relative coordinates. `world` content occupies scene-space rectangles
+and participates in Fit; `panel` content occupies a fixed host-owned sidebar.
 
 ## Share without configuration
 
@@ -130,9 +130,10 @@ blind share --config scene.json
 
 `member` selects an exact ZIP member path (no recursive unpacking, maximum 64 MiB).
 `path` is required. Optional resource fields are `component`, `label`, `group`,
-`position: [x,y,z]` and `size: [width,height]`. Paths resolve relative to the config;
+`position: [x,y,z]`, `size: [width,height]` and `placement: "world"|"panel"`.
+Placement defaults to `world`; geometry cannot use `panel`. Paths resolve relative to the config;
 absolute local paths and configured `oss://ALIAS/BUCKET/KEY` references work too.
-Unknown fields are rejected. Labels and group names contain 1–120 characters.
+Unknown fields are rejected. Labels and group names contain 1 to 120 characters.
 At most 256 resources are accepted. Surface files are limited to 64 MiB.
 
 Unpositioned entities are arranged in stable, flat groups in the XY plane.
@@ -142,6 +143,15 @@ Explicit positions are absolute world-space coordinates and are never tiled.
 The `groups: [{"label":"Reference", "members":[1,2]}]` form and grouped
 `--label` syntax also map to flat groups. A resource belongs to one group; repeat
 its path for an additional instance. A scene may consist entirely of surfaces.
+
+Top-level `viewport` selects `{"mode":"auto"|"board"|"spatial"}`. Auto uses a
+real DOM 2D board for coplanar planar world content, with no WebGL, Arcball or
+CSS3D renderer. Geometry, spatial plugins or noncoplanar world content select the
+spatial viewport. Hidden entities still participate in mode selection; fixed
+panels do not. Explicit incompatible `board` configurations fail.
+Captured board state adds `board: {"center":[x,y],"scale":N}`; scale is positive
+CSS pixels per scene unit. Panels remain fixed during navigation, do not
+contribute to Fit, and reserve space from scene chrome and the world viewport.
 
 ## Interaction
 
@@ -155,10 +165,10 @@ body reading in every presentation; geometry and opaque previews retain scene na
 `web/src/scene-components.ts` defines the shared entity schema,
 `ComponentCapabilities`, `ComponentRuntime` and `ComponentRegistry`. Each
 renderer registers its type and declares supported presentations (`spatial`,
-`focus`, `fullscreen` for earlier plugins), movement, and input ownership by presentation.
-The protocol still accepts `resizable` for older plugins, but the Viewer ignores it
-and has no drag resize control. A plugin declaring only `fullscreen` opens
-in the focus dialog without requesting browser fullscreen.
+`focus`, `fullscreen`), movement, input ownership, `host_space` and exact
+operation grants. `host_space` is `planar` or `spatial`; a spatial component
+requires a spatial world viewport. A component declaring only `fullscreen`
+opens in the focus dialog without requesting browser fullscreen.
 The host owns grouping, selection, scene list, layout, focus container and sharing.
 Renderers implement bounds, position, visibility, opacity, label, presentation, focus,
 selection and disposal. Geometry adapters retain the existing mesh loader, LOD,
@@ -170,10 +180,59 @@ binds to `{kind:"mesh"|"attachment",index:N}`; source
 paths and credentials are never sent in this binding. Source URLs remain revision
 checked by the server. Viewer updates accept **only** ID and mutable presentation
 fields; a viewer cannot replace a source or type through a layout update.
-Stored descriptors named `components` remain readable at the server boundary;
-share updates also accept that older field name. Public scene payloads always
-expose `entities`. Older geometry-only descriptors synthesize an entity per
-Mesh or PTS resource on the server.
+The public payload uses `entities`, with explicit placement and viewport state.
+There are no alternate component-field names or legacy scene-command adapters.
+
+## Public operations
+
+The page exposes `window.blind` with `version: 1`, `sceneId`, `catalog()`,
+`execute(operation, params = {})` and `subscribe(listener)`. UI controls and
+Collection controls invoke the same semantic domain operations, not DOM clicks.
+Discover the catalog rather than assuming an entity type supports every action:
+each entry contains concrete parameter/result JSON schemas, a description,
+permission, read-only status, availability and caller authorization. Operation
+descriptions specify coordinate space; failures explain unsupported targets.
+
+```js
+const catalog = window.blind.catalog();
+const entities = await window.blind.execute("entity:list");
+if (!entities.ok) throw entities.error;
+const ids = entities.value.map(entity => entity.id);
+const shown = await window.blind.execute("scene:show", {ids, opacity: 1, fit: true});
+const unsubscribe = window.blind.subscribe(event => {
+  console.log(event.sceneId, event.revision, event.domain, event.data);
+});
+```
+
+Families cover entity selection/style/placement/focus, viewport navigation/settings,
+native reading/selection/expansion/zoom/layers/presentation, annotation editing/history,
+section planes/targets/plots/rulers, scene-list and toolbar state, resources, sharing,
+and Collection layout/activation. Queries do not finish drafts or mutate selection.
+Writes return their completed semantic result; events carry committed state and a
+scene revision. Entity, scene, annotation and stroke IDs are stable public handles.
+
+Results are `{ok:true,value,sceneId,revision}` or
+`{ok:false,error:{code,message,target?,retryable},sceneId,revision}`.
+Errors distinguish invalid arguments, unknown handles, unavailable capabilities,
+not-ready/disposed scenes, permission denial and missing physical user activation.
+Board rotation, surface picking and geometry sections are unsupported rather than
+simulated. Multi-entity actions validate all targets before changing any.
+
+Coordinates are declared per operation: spatial world coordinates, board center
+in scene units and scale in CSS pixels per scene unit, native source anchors/CSS
+coordinates, normalized screen points with capture aspect ratio, or section-plane
+coordinates. Source revisions bind persistent content/geometry annotations.
+Screen ink belongs to a captured view and is cleared by actual framing or native
+reading changes, including fixed-panel width changes, not by a board chrome-only
+rescale or display-only settings such as background and lighting. A
+`view:invalidated` event announces a screen-coordinate framing change;
+`view` events carry the latest viewport snapshot and do not themselves invalidate ink.
+
+`share:create` produces public links; owner details remain host/Collection-only.
+Clipboard actions require a physical user gesture; agents should use the returned
+links instead. Private source paths, credentials and opaque plugin state are not
+part of public content inspection. Collection snapshots fail explicitly if any
+child is unavailable; they never silently substitute stale cached state.
 
 ## Plugin components (API 1)
 
@@ -201,6 +260,8 @@ frame_origins = []
 presentations = ["spatial", "focus"]
 movable = false
 resizable = false
+host_space = "planar"
+operations = ["scene.read", "scene.write", "ui.write", "content.read", "content.write", "annotation.write", "section.write"]
 ```
 
 The entrypoint is self-contained HTML with inline scripts/styles. A renderer-only
@@ -231,9 +292,9 @@ one plugin ID cannot coexist in a single scene or collection; separate URLs can
 pin different revisions. See [snapshot lifecycle and limits](plugins.md#sharing-and-snapshot-storage).
 
 The host sends `blind:init` through `postMessage` with `version:1`, source `buffer`
-(ArrayBuffer), `label`, `state`, `presentation`, `exporting`, and a private
-`MessagePort` in `event.ports[0]`. Verify `event.source === parent` and the protocol.
-Use that port thereafter:
+(ArrayBuffer), `entityId`, `label`, `state`, `presentation`, `exporting`,
+`operations: {sceneId,catalog}`, and a private `MessagePort` in `event.ports[0]`.
+Verify `event.source === parent` and the protocol. Use that port thereafter:
 
 | Direction | Message | Meaning |
 | --- | --- | --- |
@@ -242,6 +303,33 @@ Use that port thereafter:
 | Component → host | `{version:1,type:"state",state:{…}}` | Save serializable UI state, up to 64 KiB |
 | Host → component | `{version:1,type:"presentation",presentation:"focus"}` | Input/space presentation changed |
 
+
+Component operations use the same catalog and result contract:
+
+```js
+port.postMessage({
+  type: "blind:operation-request", version: 1,
+  sceneId: init.operations.sceneId, requestId: crypto.randomUUID(),
+  operation: "scene:show", params: {ids: ["known-entity-id"], fit: true}
+});
+// Reply: {type:"blind:operation-result", version:1, requestId, ...result}
+// Events: {type:"blind:operation-event", version:1, sceneId, revision, domain, data}
+```
+
+The host binds the port to its entity and pinned manifest grants; caller-supplied
+actor fields cannot change identity or permissions. Default grants are
+`scene.read`, `scene.write`, `ui.write`, `content.read`, `content.write`,
+`annotation.write`, `section.write`. Content reads/writes address the calling
+entity; sibling content reads additionally require explicit `content.read-scene`.
+Opt-in grants are `content.read-scene`, `share.create`, `resource.open` and
+`collection.write`. `host`, wildcards, duplicate and unknown grants are rejected.
+Export mode rejects mutations. Disposal rejects pending calls and closes
+subscriptions. Window-client timeouts mean completion is unknown and are not
+automatically retried.
+
+Serializable renderer `state` writes receive a `state:result`; they are separate
+from semantic scene operations. Lifecycle events report readiness, focus,
+shortcuts, errors and disposal. There is no `blind:scene-command` transport.
 Resources, credentials and absolute storage paths are not exposed to the component.
 The renderer receives only its resource bytes. External frames require explicit
 HTTPS origins in the package; network fetch, external scripts, navigation and forms
@@ -263,7 +351,7 @@ components, without global business-specific exceptions.
 Resolver manifests can return `components` alongside geometry `resources`,
 `panels` and downloadable `attachments`. Require `components.v1`, plus
 `archive.members` if used. Each component has `id`, `uri`, `label`, `component`,
-optional `member`, `group`, `position` and `size`. Example:
+optional `member`, `group`, `position`, `size` and `placement`. Example:
 
 ```json
 {"id":"worker-log","uri":"oss://team/bucket/run.zip","member":"run.log",

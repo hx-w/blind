@@ -55,6 +55,7 @@ jobs:
           npm run test:browser --prefix web
           npm run test:collection --prefix web
           npm run test:content --prefix web
+          npm run test:operations --prefix web
           python3 tests/integration_preview.py
           python3 tests/integration_collection.py
           python3 tests/integration_components.py

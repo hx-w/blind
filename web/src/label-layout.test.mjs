@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { layoutLabel } from './label-layout.ts';
 
-const silhouette = { x: 300, y: 250, width: 400, height: 300 };
-const input = { width: 1000, height: 800, labelWidth: 120, labelHeight: 30, x: 499.99, y: 400, silhouette, silhouettes: [silhouette], occupied: [] };
+const input = { width: 1000, height: 800, labelWidth: 120, labelHeight: 30, x: 499.99, y: 400, occupied: [] };
 
 test('small rotations across the screen center keep the label on its original side', () => {
   const first = layoutLabel(input);
@@ -29,9 +28,9 @@ test('initial placement avoids occupied space; retained placement follows its an
   assert.deepEqual(restored.rect, first.rect);
 });
 
-test('large projected meshes and stale offsets cannot pull a leader across the viewport', () => {
+test('stale offsets cannot pull a leader across the viewport', () => {
   for (const previous of [undefined, { x: 1100, y: 0 }]) {
-    const anchor = { ...input, width: 1942, x: 400, silhouette: {x:0,y:0,width:1200,height:721}, silhouettes: [{x:0,y:0,width:1200,height:721}] };
+    const anchor = { ...input, width: 1942, x: 400 };
     const { rect } = layoutLabel(anchor, previous);
     const dx = Math.max(rect.x - anchor.x, anchor.x - rect.x - rect.width, 0);
     const dy = Math.max(rect.y - anchor.y, anchor.y - rect.y - rect.height, 0);

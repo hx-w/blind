@@ -208,6 +208,7 @@ mod tests {
         assert_eq!(plain.get_pixel(799, 479).0, [0, 0, 120, 255]);
         assert_eq!(plain.get_pixel(400, 240).0, [27, 29, 32, 255]);
         let marked = decode(&[ScreenStroke {
+            id: "collection-mark".into(),
             label: None,
             color: "#ff6b5e".into(),
             aspect: 801. / 480.,

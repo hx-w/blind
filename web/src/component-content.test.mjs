@@ -13,6 +13,8 @@ function moduleUrl(file, imports = {}) {
   return `data:text/javascript;base64,${Buffer.from(js).toString('base64')}`;
 }
 const packageImports = Object.fromEntries(['dompurify', 'marked', 'mermaid', '@viz-js/viz', '@noble/hashes/sha2.js'].map(name => [name, import.meta.resolve(name)]));
+const operationCoreModule = moduleUrl('./operations/core.ts');
+const operationTransportModule = moduleUrl('./operations/transport.ts', {'./core': operationCoreModule});
 const readingModule = moduleUrl('./content-reading.ts', packageImports);
 const graphModule = moduleUrl('./graph.ts', {...packageImports,
   './dot-render.ts': new URL('./dot-render.ts', import.meta.url).href,
@@ -21,9 +23,10 @@ const graphModule = moduleUrl('./graph.ts', {...packageImports,
 const markdownModule = moduleUrl('./markdown.ts', {...packageImports, './graph.ts': graphModule});
 const { htmlContent, jsonContent, validateComponentState } = await import(moduleUrl('./component-content.ts', {
   './api.ts': moduleUrl('./api.ts'), './content-reading': readingModule, './markdown': markdownModule, './graph': graphModule,
+  './operations/core': operationCoreModule, './operations/transport': operationTransportModule,
 }));
 const {contentState, DOMReading, validateContentState, updateContentState} = await import(readingModule);
-const {ContentAnnotations} = await import(moduleUrl('./content-annotations.ts', {'./content-reading': readingModule}));
+const {ContentAnnotations} = await import(moduleUrl('./content-annotations.ts', {'./content-reading': readingModule, './operations/core': operationCoreModule}));
 
 const nativeAnchor = {source:'sha256:revision', target:'line:0', offset:0, x:0, y:0};
 function nativeMark(id, label = '复核') {
@@ -173,6 +176,56 @@ function annotationsFixture(t, state, nativeOverrides = {}) {
   disposeWith(() => annotations.dispose());
   return {annotations, find, native, changes:() => changes};
 }
+
+test('native annotation semantic API rejects unknown targets and mismatched anchors before changing marks or history', t => {
+  const state = {marks: [nativeMark('saved')]};
+  const {annotations, changes} = annotationsFixture(t, state, {acceptsAnchor: anchor => anchor.source === nativeAnchor.source});
+  const saved = JSON.stringify(state);
+  for (const invoke of [
+    () => annotations.edit('missing', {label: 'new'}),
+    () => annotations.remove('missing'),
+    () => annotations.select('missing'),
+    () => annotations.create({label: 'wrong source', color: '#ff6b5e', kind: 'point', anchors: [{...nativeAnchor, source: 'sha256:other'}]}),
+    () => annotations.create({label: 'bad line', color: '#ff6b5e', kind: 'line', anchors: [{...nativeAnchor}]}),
+  ]) assert.throws(invoke);
+  assert.equal(JSON.stringify(state), saved);
+  assert.equal(changes(), 0);
+  assert.equal(annotations.toolbarState.canUndo, false);
+  const created = annotations.create({label: 'real native point', color: '#8fa9c9', kind: 'point', anchors: [{...nativeAnchor}]});
+  assert.equal(annotations.toolbarState.selected, created.id);
+  annotations.edit(created.id, {label: 'reviewed'});
+  assert.equal(state.marks.at(-1).label, 'reviewed');
+  annotations.remove(created.id);
+  assert.equal(state.marks.length, 1);
+  annotations.undo();
+  assert.equal(state.marks.at(-1).label, 'reviewed');
+  annotations.redo();
+  assert.deepEqual(state.marks, [nativeMark('saved')]);
+});
+
+test('native JSON semantic disclosure and paging preserve immutable source and reading identity', async t => {
+  const {disposeWith, flushFrames} = nativeDOMFixture(t);
+  const source = JSON.stringify({items: Array.from({length: 160}, (_, index) => ({value: index}))});
+  t.mock.method(globalThis, 'fetch', async () => new Response(source));
+  const spec = {};
+  const content = jsonContent('/json', 'items.json', spec);
+  disposeWith(() => content.dispose());
+  await content.ready; flushFrames();
+  const native = content.native, before = JSON.stringify(spec.state);
+  assert.throws(() => native.json.setExpanded('/missing', true));
+  assert.equal(JSON.stringify(spec.state), before);
+  native.json.setExpanded('/items', true);
+  assert.equal(native.json.branches().find(branch => branch.path === '/items').loaded, 100);
+  native.json.page('/items');
+  assert.equal(native.json.branches().find(branch => branch.path === '/items').loaded, 160);
+  const anchor = native.catalogTargets().find(target => target.id === 'json:/items/150').anchor;
+  assert.ok(native.acceptsAnchor(anchor));
+  native.json.setExpanded('/items', false);
+  native.restore(anchor);
+  assert.equal(spec.state.reading.source, anchor.source);
+  assert.equal(spec.state.reading.target, anchor.target);
+  assert.ok(spec.state.expanded.includes('/items'));
+});
 
 test('saved marks restore lazy targets even when current geometry is absent, with adapter source checks', t => {
   const {Element, find, disposeWith} = nativeDOMFixture(t);

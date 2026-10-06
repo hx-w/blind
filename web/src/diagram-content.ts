@@ -75,6 +75,14 @@ export const diagramContent: ContentFactory = (url, label, spec) => {
   });
   const native: NativeContent = {
     scroll: viewport,
+    catalogTargets: () => targets.map(target => {
+      const center = {x: target.box.x + target.box.width / 2, y: target.box.y + target.box.height / 2};
+      const origin = depth?.unproject(target.id, center) ?? {...center, offset: 0};
+      return {id: target.id, label: target.id, anchor: {source, target: target.id, offset: origin.offset ?? 0,
+        x: (origin.x - sourceBox.x) / sourceBox.width, y: (origin.y - sourceBox.y) / sourceBox.height}};
+    }),
+    acceptsAnchor: anchor => anchor.source === source && anchor.x >= 0 && anchor.x <= 1 && anchor.y >= 0 && anchor.y <= 1 &&
+      (anchor.target === 'vector' || targets.some(target => target.id === anchor.target && target.element.style.visibility !== 'hidden')),
     capture() {
       if (!source) return;
       const x = Math.max(PADDING - viewport.scrollLeft, Math.min(viewport.clientWidth / 2, PADDING + viewBox.width * scale - viewport.scrollLeft));
@@ -189,6 +197,7 @@ export const diagramContent: ContentFactory = (url, label, spec) => {
     const next = Math.min((viewport.clientWidth - PADDING * 2) / viewBox.width, (viewport.clientHeight - PADDING * 2) / viewBox.height);
     native.zoom!(next / scale);
   };
+  native.fit = fit;
   viewport.addEventListener('scroll', () => {
     if (frame || !source || initializing) return;
     frame = requestAnimationFrame(() => { frame = 0; if (updateContentState(state, {reading: native.capture()}, element)) contentStateChanged(element); });

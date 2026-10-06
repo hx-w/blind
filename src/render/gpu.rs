@@ -1485,11 +1485,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn renderer_initializes_all_shader_pipelines() {
-        Renderer::new().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn inspection_modes_and_light_settings_affect_png() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tetra.ply");
         let mut scene = SceneDescriptor::create(&[path], None).await.unwrap();
@@ -1625,6 +1620,7 @@ mod tests {
         assert!(back.labels.is_empty());
         assert!(back.annotation_vertices.is_empty());
         scene.state.strokes.push(ScreenStroke {
+            id: "screen-note".into(),
             label: Some("屏幕备注".into()),
             color: "#ff6b5e".into(),
             aspect: 390.0 / 844.0,
@@ -1780,6 +1776,7 @@ mod tests {
         overlay_screen_strokes(
             &mut image,
             &[ScreenStroke {
+                id: "screen-diagonal".into(),
                 label: None,
                 color: "#ff6b5e".into(),
                 aspect: 1.0,

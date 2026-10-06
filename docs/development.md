@@ -17,6 +17,7 @@ a pull request, run:
 ```sh
 npm test --prefix web
 npm run test:browser --prefix web
+npm run test:operations --prefix web
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
@@ -38,6 +39,8 @@ Component and collection exports require Chrome/Chromium; see
 After `cargo build --locked`, `npm run test:content --prefix web` exercises native
 reading, real reshares, source-versioned content marks and bundled diagram PNGs.
 `npm run test:collection --prefix web` checks collection switching and cross-pane ink.
+`npm run test:operations --prefix web` checks public operation validation,
+DOM-board navigation, fixed panels and committed interaction state.
 Set `BLIND_TEST_CHROMIUM` and `BLIND_RENDER_BROWSER` to a headless Chromium
 executable when it is not discoverable through the standard browser installation.
 The [release workflow](../.github/workflows/release.yml) publishes macOS ARM,

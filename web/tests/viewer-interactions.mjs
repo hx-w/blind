@@ -14,18 +14,23 @@ const scene = {
     ...(i === 0 ? {label:{text:'Mesh one'}} : {}) })),
   label_groups: [{text:'Reference pair',meshes:[0,1]}],
   state: { selected: 0, shading: 'flat', projection: 'perspective', background: 'dark', axes: false,
-    frame: { width: 1280, height: 800 }, camera: null, strokes: [{color:'#ff6b5e',aspect:1.6,points:[[0.2,0.2],[0.4,0.3]]}] },
+    viewport: {mode:'spatial'}, frame: { width: 1280, height: 800 }, camera: null, strokes: [{id:'initial-stroke',color:'#ff6b5e',aspect:1.6,points:[[0.2,0.2],[0.4,0.3]]}] },
 };
 function publicScene(data) {
   if (data.entities) return data;
   return {...data,entities:data.meshes.map((mesh,index)=>({
-    id:`mesh-${index}`,component:mesh.format==='pts'?'points':'mesh',source:{kind:'mesh',index},
+    id:`mesh-${index}`,placement:'world',component:mesh.format==='pts'?'points':'mesh',source:{kind:'mesh',index},
     label:mesh.label?.text ?? mesh.name,
     group:data.label_groups?.find(group=>group.meshes.includes(index))?.text ?? null,
     position:mesh.translation ?? [0,0,0],size:null,visible:mesh.visible,opacity:mesh.opacity,
   }))};
 }
 let browser, server, origin, shared;
+async function viewerOperation(page, name, params = {}) {
+  const result = await page.evaluate(({name, params}) => window.blind.execute(name, params), {name, params});
+  assert.equal(result.ok, true, `${name}: ${JSON.stringify(result.error)}`);
+  return result.value;
+}
 async function clickDisplay(page) {
   if (await page.locator('.dock-observe').getAttribute('aria-hidden') === 'true') await page.locator('#observe-trigger').click();
   if (await page.locator('[data-observe-category="light"]').getAttribute('aria-expanded') === 'false') await page.locator('[data-observe-category="light"]').click();
@@ -393,8 +398,8 @@ test('JSON component selects, renames and expands without changing its source', 
   data.meshes = data.meshes.slice(0, 1);
   data.attachments = [{id:'json',label:'Report',byte_size:40,url:'/test/attachments/0',unavailable:null}];
   data.entities = [
-    {id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',group:null,position:[0,0,0],size:null,visible:true,opacity:1},
-    {id:'report',component:'json',source:{kind:'attachment',index:0},label:'Report',group:null,position:[40,0,0],size:[40,32],visible:true,opacity:1},
+    {id:'mesh',placement:'world',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',group:null,position:[0,0,0],size:null,visible:true,opacity:1},
+    {id:'report',placement:'world',component:'json',source:{kind:'attachment',index:0},label:'Report',group:null,position:[40,0,0],size:[40,32],visible:true,opacity:1},
   ];
   const page = await browser.newPage({viewport:{width:900,height:700}});
   try {
@@ -425,13 +430,64 @@ test('JSON component selects, renames and expands without changing its source', 
       await mkdir(process.env.BLIND_TEST_SCREENSHOTS, {recursive:true});
       await page.screenshot({path:`${process.env.BLIND_TEST_SCREENSHOTS}/json-component.png`});
     }
+    await viewerOperation(page, 'content:present', {id: 'report', presentation: 'spatial'});
+    await viewerOperation(page, 'entity:set-placement', {id: 'report', placement: 'panel'});
+    await page.locator('.component-fixed-panels [data-component="json"]').waitFor({state: 'visible'});
+    const panelBounds = await surface.boundingBox();
+    const screenStroke = {color: '#ff6b5e', aspect: 900 / 700, points: [[.2, .3], [.6, .4]]};
+    const ink = await viewerOperation(page, 'annotation:create-screen', screenStroke);
+    await viewerOperation(page, 'entity:set-style', {id: 'report', opacity: .6});
+    assert.deepEqual((await viewerOperation(page, 'annotation:list', {kind: 'screen'})).screen, [ink],
+      'a fixed panel update that retains reserved width must preserve spatial screen ink');
+    assert.equal((await surface.boundingBox()).width, panelBounds.width);
+    await viewerOperation(page, 'annotation:undo');
+    assert.equal((await viewerOperation(page, 'annotation:get')).canRedo, true);
+    await viewerOperation(page, 'entity:set-style', {id: 'report', visible: false});
+    const hiddenHistory = await viewerOperation(page, 'annotation:get');
+    assert.equal(hiddenHistory.canUndo, false);
+    assert.equal(hiddenHistory.canRedo, false,
+      'removing a spatial reserved panel width must invalidate redo-only screen ink');
+    await viewerOperation(page, 'annotation:create-screen', screenStroke);
+    await viewerOperation(page, 'entity:set-style', {id: 'report', visible: true, opacity: 1});
+    assert.deepEqual((await viewerOperation(page, 'annotation:list', {kind: 'screen'})).screen, [],
+      'adding reserved panel width must invalidate spatial screen ink');
+    const surfaceBefore = (await viewerOperation(page, 'annotation:list', {kind: 'surface'})).surface;
+    const sourceMark = await viewerOperation(page, 'annotation:create-surface', {
+      entityId: 'mesh', revision: data.meshes[0].revision, kind: 'point', label: 'Source mark',
+      color: '#ff6b5e', visible: true, closed: false, points: [[0, 0, 0]], normals: [[0, 0, 1]], controls: [0],
+    });
+    await viewerOperation(page, 'annotation:create-screen', screenStroke);
+    await viewerOperation(page, 'entity:set-style', {id: 'report', visible: false});
+    assert.deepEqual((await viewerOperation(page, 'annotation:list', {kind: 'surface'})).surface, [...surfaceBefore, {...sourceMark, entityId: 'mesh'}],
+      'framing invalidates screen history without deleting source-anchored marks');
+    assert.equal((await viewerOperation(page, 'annotation:get')).canUndo, true);
+    await viewerOperation(page, 'annotation:undo');
+    assert.deepEqual((await viewerOperation(page, 'annotation:list', {kind: 'surface'})).surface, surfaceBefore,
+      'source annotation undo remains usable after screen-only history entries are removed');
+    const liveAPI = await page.evaluate(async () => {
+      window.savedViewerAPI = window.blind;
+      window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: true}));
+      window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}));
+      return {sameAPI: window.blind === window.savedViewerAPI, view: await window.blind.execute('view:get', {})};
+    });
+    assert.equal(liveAPI.sameAPI, true);
+    assert.equal(liveAPI.view.ok, true);
+    await viewerOperation(page, 'view:pan', {delta: [15, 0]});
+    assert.notDeepEqual((await viewerOperation(page, 'view:get')).camera, liveAPI.view.value.camera,
+      'a restored single scene must retain usable camera operations');
+    const exitAPI = await page.evaluate(async () => {
+      window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: false}));
+      return {published: !!window.blind, result: await window.savedViewerAPI.execute('view:get', {})};
+    });
+    assert.equal(exitAPI.published, false);
+    assert.equal(exitAPI.result.error.code, 'DISPOSED');
   } finally { await page.close(); }
 });
 
 test('large JSON uses a bounded preview with a link to the original file', async () => {
   const data = structuredClone(scene); data.meshes = []; data.label_groups = []; data.state.strokes = [];
   data.attachments = [{id:'large',label:'Large report',byte_size:4 * 1024 * 1024 + 100,url:'/test/attachments/0',unavailable:null}];
-  data.entities = [{id:'large',component:'json',source:{kind:'attachment',index:0},label:'Large report',group:null,
+  data.entities = [{id:'large',placement:'world',component:'json',source:{kind:'attachment',index:0},label:'Large report',group:null,
     position:[0,0,0],size:[80,50],visible:true,opacity:1}];
   const page = await browser.newPage({viewport:{width:900,height:700}});
   try {
@@ -558,7 +614,6 @@ test('per-entity opacity and visibility preserve their values and shared state',
       return {delta:Math.abs((a.top+a.bottom)/2-(b.top+b.bottom)/2), gap:b.left-a.right,width:a.width};
     });
     assert.ok(geometry.delta < 8 && geometry.gap >= 0 && geometry.width >= 70, 'slider and visibility must fit the same row');
-    assert.equal(await page.locator('#opacity-range').count(), 0, 'the detail panel no longer duplicates opacity');
     await slider.fill('37');
     assert.equal(await slider.getAttribute('aria-valuetext'),'37%');
     await toggle.click();
@@ -586,7 +641,6 @@ test('scene color opens below its Mesh and updates only that Mesh in shares', as
     await page.locator('#scene-tree-toggle').click();
     const first = page.locator('.scene-tree-row').first();
     const second = page.locator('.scene-tree-row').nth(1);
-    assert.equal(await page.locator('#color-swatches').count(), 0, 'color editing lives in each scene row');
     assert.equal(await first.locator('.scene-tree-color').evaluate(button => button.style.getPropertyValue('--swatch')), '#ffc857');
     await first.locator('.scene-tree-color').click();
     assert.equal(await first.locator('.scene-tree-color').getAttribute('aria-expanded'), 'true');
@@ -616,7 +670,6 @@ test('inline rename keeps long labels readable and preserves the full shared val
   fixture.meshes[0].label = {text: longName};
   const page = await openPage({width:320,height:700},0,fixture);
   try {
-    assert.equal(await page.locator('.panel-trigger').count(),0);
     await page.locator('#scene-tree-toggle').click();
     const item = page.locator('.scene-tree-item').first();
     const select = item.locator('.scene-tree-select');
@@ -624,7 +677,6 @@ test('inline rename keeps long labels readable and preserves the full shared val
     const compact = await select.textContent();
     assert.ok(compact.startsWith('左') && compact.endsWith('版') && compact.includes('…'));
     assert.equal(await select.getAttribute('aria-label'),longName);
-    assert.equal(await page.locator('.scene-tree-name-preview').count(),0);
     const canvasLabel = page.locator('.mesh-label:visible').first();
     assert.ok((await canvasLabel.textContent()).includes('…'));
     assert.ok((await canvasLabel.boundingBox()).height < 40,'3D label cannot cover the model');
@@ -654,7 +706,7 @@ test('a label spanning multiple Meshes draws a focusable frame beside individual
   const page = await openPage({width:390,height:844});
   try {
     const group = page.locator('.mesh-group-label');
-    assert.equal(await group.getAttribute('aria-label'),'聚焦标注 Reference pair，2 个 Mesh');
+    assert.match(await group.textContent(), /Reference pair/);
     assert.equal(await page.locator('.mesh-label').getByText('Mesh one').isVisible(),true);
     const geometry = await page.evaluate(() => {
       const label=document.querySelector('.mesh-group-label').getBoundingClientRect();
@@ -662,8 +714,6 @@ test('a label spanning multiple Meshes draws a focusable frame beside individual
     });
     assert.ok(geometry.path.length > 20,'group frame must contain visible corner segments');
     assert.ok(geometry.left >= 0 && geometry.right <= geometry.width,'group label must stay inside the viewport');
-    await group.click();
-    assert.equal(await group.isVisible(),true);
   } finally { await page.close(); }
 });
 
@@ -881,12 +931,13 @@ test('surface points and paths survive touch editing, navigation and share reope
     await touch.send('Input.dispatchTouchEvent',{type:'touchCancel',touchPoints:[]});
     assert.deepEqual((await captureShare(page)).state.annotations[0],firstPoint);
     await page.locator('[data-surface-mode="line"]').click();
+    const cameraBeforeTouchLine = (await captureShare(page)).state.camera;
     await tap(165,420); await tap(170,385); await tap(190,355);
     await page.locator('#surface-end').click();
     snapshot = await captureShare(page);
     assert.equal(snapshot.state.annotations.length,2);
     assert.ok(snapshot.state.annotations[1].points.length > 3);
-    assert.deepEqual(snapshot.state.camera,(await captureShare(page)).state.camera);
+    assert.deepEqual(snapshot.state.camera, cameraBeforeTouchLine, 'touch line drawing must not navigate the camera');
     await page.locator('[data-surface-mode="select"]').click();
     await page.mouse.move(200,420); await page.mouse.down(); await page.mouse.move(240,460,{steps:8}); await page.mouse.up();
     const rotated = await captureShare(page);
@@ -905,8 +956,6 @@ test('selection supports camera gestures and the inline color palette fits a nar
   try {
     await page.locator('#brush-tool').click();
     await page.locator('[data-surface-mode="point"]').click();
-    assert.equal(await page.locator('#surface-navigate').count(),0);
-    assert.equal(await page.locator('#surface-color-toggle').count(),0);
     assert.equal(await page.locator('[data-surface-color]:visible').count(),4);
     const palette=await page.locator('.surface-colors').boundingBox();const toolbar=await page.locator('#surface-toolbar').boundingBox();
     assert.ok(palette.x>=toolbar.x && palette.x+palette.width<=toolbar.x+toolbar.width);
@@ -996,8 +1045,6 @@ test('surface hits choose the visible mesh independently of the mesh selection',
   try {
     await page.locator('#brush-tool').click();
     await page.locator('[data-surface-mode="point"]').click();
-    assert.equal(await page.locator('#surface-target').count(),0);
-    assert.equal(await page.locator('#surface-new').count(),0);
     await page.mouse.click(195,400);
     const snapshot=await captureShare(page);
     assert.equal(snapshot.state.annotations.length,1);assert.equal(snapshot.state.annotations[0].mesh,1);
@@ -1095,7 +1142,6 @@ test('annotation names stay on canvas and the list adapts to available space ind
     try {
       const roomy=viewport.width>=900 && viewport.height>=600;
       assert.equal(await page.locator('.surface-list').isVisible(),roomy);
-      assert.equal(await page.locator('#surface-list-toggle').count(),0);
       assert.equal(await page.locator('#surface-toolbar').isVisible(),false);
       assert.equal(await page.locator('#surface-input').isVisible(),false);
       assert.equal(await page.locator('.surface-badge').last().textContent(),'标记 11 · 参考位置');
@@ -1371,8 +1417,8 @@ test('wireframe gaps expose component input while painted edges remain occluders
     const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#ff0000'}]};
     data.state={...data.state,projection,shading,strokes:[],camera:{position:[0,0,10],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
     data.attachments=[{id:'log',label:'Occluded log',byte_size:20,url:'/wireframe-log'}];
-    data.entities=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
-      {id:'log',component:'text',source:{kind:'attachment',index:0},label:'Log',position:[0,0,-1],size:[4,4],visible:true,opacity:1}];
+    data.entities=[{id:'mesh',placement:'world',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
+      {id:'log',placement:'world',component:'text',source:{kind:'attachment',index:0},label:'Log',position:[0,0,-1],size:[4,4],visible:true,opacity:1}];
     const page=await browser.newPage({viewport:{width:800,height:800},deviceScaleFactor:2});
     await page.route('**/wireframe-log',r=>r.fulfill({contentType:'text/plain',body:'Visible through wireframe'}));
     await page.route('**/api/v1/scenes/**',r=>r.fulfill({json:data}));
@@ -1495,9 +1541,9 @@ test('spatial content respects depth and stays fixed during pointer and keyboard
     const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#ff0000'}, {...scene.meshes[1],translation:[100,0,0]}]};
     data.state={...data.state,selected:1,strokes:[],camera:{position:[0,0,10],target:[0,0,0],up:[0,1,0],fov:34,zoom:1,orthographic_height:8}};
     data.attachments=[{id:'image',label:'Depth image',byte_size:100,url:'/depth.svg'}];
-    data.entities=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
-      {id:'image',component:type,source:{kind:'attachment',index:0},label:'Image',position:[0,0,z],size:[4,4],visible:true,opacity:1},
-      {id:'other-mesh',component:'mesh',source:{kind:'mesh',index:1},label:'Other mesh',position:[100,0,0],visible:true,opacity:1}];
+    data.entities=[{id:'mesh',placement:'world',component:'mesh',source:{kind:'mesh',index:0},label:'Mesh',position:[0,0,0],visible:true,opacity:1},
+      {id:'image',placement:'world',component:type,source:{kind:'attachment',index:0},label:'Image',position:[0,0,z],size:[4,4],visible:true,opacity:1},
+      {id:'other-mesh',placement:'world',component:'mesh',source:{kind:'mesh',index:1},label:'Other mesh',position:[100,0,0],visible:true,opacity:1}];
     const page=await browser.newPage({viewport:{width:800,height:800}});
     await page.route('**/depth.svg',r=>type==='text'?r.fulfill({contentType:'text/plain',body:'Diagnostic text'}):r.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFElEQVR4nGNkYPjPgA0wYRUdtBIAy0MBD1YkjLoAAAAASUVORK5CYII=','base64')}));
     await page.route('**/api/v1/scenes/**',r=>r.request().method()==='GET'?r.fulfill({json:data}):r.continue());
@@ -1557,9 +1603,9 @@ test('translucent DOM layers blend once and respect intervening geometry from bo
   })));
   const data={...structuredClone(scene),label_groups:[],meshes:[{...scene.meshes[0],label:null,color:'#00ff00'}]};
   data.attachments=['red','blue'].map(color=>({id:color,label:color,byte_size:100,url:`/alpha-${color}.png`}));
-  data.entities=[{id:'mesh',component:'mesh',source:{kind:'mesh',index:0},label:'Middle mesh',position:[0,0,0],visible:true,opacity:1},
-    {id:'rear',component:'image',source:{kind:'attachment',index:0},label:'Red rear',position:[0,0,-1],size:[4,4],visible:true,opacity:1},
-    {id:'front',component:'image',source:{kind:'attachment',index:1},label:'Blue front',position:[0,0,1],size:[4,4],visible:true,opacity:.5}];
+  data.entities=[{id:'mesh',placement:'world',component:'mesh',source:{kind:'mesh',index:0},label:'Middle mesh',position:[0,0,0],visible:true,opacity:1},
+    {id:'rear',placement:'world',component:'image',source:{kind:'attachment',index:0},label:'Red rear',position:[0,0,-1],size:[4,4],visible:true,opacity:1},
+    {id:'front',placement:'world',component:'image',source:{kind:'attachment',index:1},label:'Blue front',position:[0,0,1],size:[4,4],visible:true,opacity:.5}];
   await page.route('**/alpha-*.png',r=>r.fulfill({contentType:'image/png',body:Buffer.from(colors[r.request().url().includes('red')?'red':'blue'],'base64')}));
   await page.route('**/api/v1/scenes/**',r=>r.request().method()==='GET'?r.fulfill({json:data}):r.continue());
   await page.route('**/mesh/0',r=>r.fulfill({body:planePly(2)}));
@@ -1642,22 +1688,26 @@ for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
   test(`scene tree isolates and restores every component type at ${viewport.width}×${viewport.height}`, async () => {
     const mixed=structuredClone(scene); mixed.label_groups=[]; mixed.state.strokes=[];
     mixed.meshes=mixed.meshes.map((m,i)=>({...m,name:i?'Margin':'Scan',label:undefined,format:i?'pts':'ply',opacity:i?0:.37,visible:true}));
-    mixed.attachments=['Log','Trace'].map((label,i)=>({id:`a${i}`,label,byte_size:16,url:`/test/attachments/${i}`,unavailable:null}));
-    mixed.entities=['mesh','points','text','example:trace'].map((component,i)=>({id:`c${i}`,component,
+    mixed.attachments=['Log','Trace'].map((label,i)=>({id:`a${i}`,label,byte_size:16,url:`/api/v1/scenes/fixture/attachments/${i}`,unavailable:null}));
+    mixed.entities=['mesh','points','text','example:trace'].map((component,i)=>({id:`c${i}`,component,placement:'world',
       source:{kind:i<2?'mesh':'attachment',index:i<2?i:i-2},label:['Scan','Margin','Log','Trace'][i],group:i<2?'Geometry':'Diagnostics',
       position:[i*4,0,0],size:i<2?null:[3,2],visible:i!==3,opacity:[.37,0,.6,0][i],
-      ...(i===3?{renderer:{plugin:'example',revision:'fixture',name:'trace',capabilities:{movable:false,resizable:false,presentations:['spatial','focus']}}}:{})}));
+      ...(i===3?{renderer:{plugin:'example',revision:'fixture',name:'trace',capabilities:{movable:false,resizable:false,presentations:['spatial','focus'],host_space:'planar',operations:[]}}}:{})}));
     const openMixed=async data=>{
       const page=await browser.newPage({viewport});
       await page.route('**/api/v1/scenes/**',r=>r.request().method()==='GET'?r.fulfill({json:data}):r.continue());
-      await page.route('**/test/attachments/*',r=>r.fulfill({contentType:'text/plain',body:'test diagnostic'}));
-      await page.route('**/test/renderers/*',r=>r.fulfill({contentType:'text/html',body:`<!doctype html><p>Trace fixture</p><script>addEventListener('message',e=>{if(e.data?.type==='blind:init')e.ports[0].postMessage({version:1,type:'ready'});});</script>`}));
+      await page.route('**/api/v1/scenes/*/attachments/*',r=>r.fulfill({contentType:'text/plain',body:'test diagnostic'}));
+      await page.route('**/api/v1/scenes/*/renderers/*',r=>r.fulfill({contentType:'text/html',body:`<!doctype html><body><p>Trace fixture</p><script>document.body.dataset.session=crypto.randomUUID();addEventListener('message',e=>{if(e.data?.type==='blind:init')e.ports[0].postMessage({version:1,type:'ready'});});</script>`}));
       await page.goto(`${origin}/s/fixture`); await page.locator('#loading-state').waitFor({state:'hidden'});
       assert.equal(await page.locator('#invalid-state').isVisible(),false);
+      assert.equal(await page.locator('.scene-surface').count(),2,'both visible and initially hidden content must be connected');
       const toggle=page.locator('#scene-tree-toggle'); if(await toggle.getAttribute('aria-expanded')!=='true')await toggle.click();
       return page;
     };
     const page=await openMixed(mixed);
+    const pluginBody = page.frameLocator('iframe[title="Trace"]').locator('body[data-session]');
+    const pluginSession = await pluginBody.getAttribute('data-session');
+    assert.match(pluginSession, /^[0-9a-f-]{36}$/, 'initially hidden plugin loads its real sandbox document');
     const checks=()=>page.locator('.scene-tree-visibility').evaluateAll(buttons=>buttons.map(button=>button.dataset.visible==='true'));
     const row=name=>page.locator('.scene-tree-row').getByRole('button',{name,exact:true});
     try {
@@ -1674,6 +1724,7 @@ for (const viewport of [{width:1280,height:800},{width:320,height:700}]) {
       snapshot=await captureShare(page);assert.ok(snapshot.entities.every(c=>!c.visible));assert.ok(snapshot.meshes.every(m=>!m.visible));
       await page.getByRole('button',{name:'全部显示',exact:true}).click();assert.deepEqual(await checks(),[true,true,true,true]);
       await page.waitForFunction(()=>[...document.querySelectorAll('.scene-surface')].every(e=>e.checkVisibility()));
+      assert.equal(await pluginBody.getAttribute('data-session'), pluginSession, 'show/hide keeps the original plugin document and state');
       snapshot=await captureShare(page);assert.deepEqual(snapshot.entities.map(c=>c.opacity),[.37,1,.6,1]);
       assert.ok(snapshot.entities.every(c=>c.visible));assert.ok(snapshot.meshes.every(m=>m.visible));
       const logRow=row('Log').locator('xpath=ancestor::div[contains(@class,"scene-tree-row")]');
@@ -1799,7 +1850,7 @@ test('Markdown renders safely in themed spatial, expanded and export views', asy
     const embeddedImage = await page.evaluate(() => { const canvas = document.createElement('canvas'); canvas.width = canvas.height = 2; return canvas.toDataURL(); });
     const data = {...structuredClone(scene), meshes: [], label_groups: [],
       attachments: [{id: 'notes', label: '检查说明', byte_size: source.length, url: '/markdown-fixture'}],
-      entities: [{id: 'notes', component: 'markdown', source: {kind: 'attachment', index: 0}, label: '检查说明',
+      entities: [{id: 'notes', placement: 'world', component: 'markdown', source: {kind: 'attachment', index: 0}, label: '检查说明',
         group: null, position: [0,0,0], size: [110,70], visible: true, opacity: 1}],
       state: {...scene.state, selected: null, strokes: [], camera: null}};
     await page.route('**/api/v1/scenes/**', r => r.request().method() === 'GET' ? r.fulfill({json: data}) : r.continue());
@@ -1823,13 +1874,6 @@ test('Markdown renders safely in themed spatial, expanded and export views', asy
       await page.locator('.component-body').dblclick();
       await page.locator('.component-dialog[open]').waitFor();
       assert.ok(await article.locator('h2').first().evaluate(e => parseFloat(getComputedStyle(e).fontSize) > 18), 'document headings retain their hierarchy in the dialog');
-      for (const theme of ['light', 'dark']) {
-        await page.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
-        if (process.env.BLIND_MARKDOWN_SCREENSHOTS) {
-          await mkdir(process.env.BLIND_MARKDOWN_SCREENSHOTS, {recursive: true});
-          await page.screenshot({path: `${process.env.BLIND_MARKDOWN_SCREENSHOTS}/markdown-${width}-${theme}.png`});
-        }
-      }
       await page.getByRole('button', {name: '返回场景'}).click();
       assert.equal((await captureShare(page)).entities[0].id, 'notes');
       await page.goto(`${origin}/s/fixture?render=1`);

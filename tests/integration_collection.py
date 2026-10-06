@@ -54,7 +54,10 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
 
         fixture = ROOT / 'tests/fixtures/tetra.ply'
         second = temp / 'second.ply'
-        second.write_bytes(fixture.read_bytes().replace(b'0.8', b'1.8'))
+        first_bytes = fixture.read_bytes()
+        second_bytes = first_bytes.replace(b'\n1 0 0\n', b'\n2 0 0\n')
+        assert second_bytes != first_bytes
+        second.write_bytes(second_bytes)
         config = {
             'kind': 'collection', 'schema_version': 1, 'title': 'Review pair', 'active_scene_id': 'design',
             'scenes': [
@@ -63,8 +66,8 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
             ],
         }
         oversized = temp / 'oversized.json'
-        with oversized.open('wb') as stream:
-            stream.truncate(4 * 1024 * 1024 + 1)
+        oversized.write_text(json.dumps(config) + ' ' * (4 * 1024 * 1024), encoding='utf-8')
+        assert json.loads(oversized.read_text()) == config
         cli('share', '--config', oversized, ok=False)
         shared = json.loads(cli('share', '--config', '-', '--format', 'json', input=json.dumps(config)))
         assert shared['kind'] == 'collection' and len(shared['scenes']) == 2
@@ -79,6 +82,7 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
         assert design['meshes'][0]['label']['text'] == 'Crown'
         assert scan['meshes'][0]['label']['text'] == 'Reference'
         assert design['meshes'][0]['source_url'].endswith('?scene=design')
+        assert api(f'/api/v1/scenes/{token}/meshes/0?scene=design')[1] == first_bytes
         assert api(f'/api/v1/scenes/{token}/meshes/0?scene=scan')[1] == second.read_bytes()
         assert api(f'/api/v1/scenes/{token}?scene=missing')[0] == 404
 
@@ -112,6 +116,18 @@ with tempfile.TemporaryDirectory(prefix='blind-collection-') as directory:
         midpoint = image.width // 2
         assert image.crop((0, 42, midpoint, image.height)).getcolors(maxcolors=10) is None, 'first scene image is blank'
         assert image.crop((midpoint + 1, 42, image.width, image.height)).getcolors(maxcolors=10) is None, 'second scene image is blank'
+
+        def color_pixels(tile, channel):
+            return sum(1 for rgb in tile.getdata()
+                       if rgb[channel] > 100 and rgb[channel] > max(rgb[(channel + 1) % 3], rgb[(channel + 2) % 3]) * 1.5)
+
+        # Saved child colors discriminate actual child rendering from duplicate nonblank tiles.
+        scan_image = Image.open(io.BytesIO(png)).convert('RGB')
+        assert color_pixels(scan_image, 1) > 100, 'selected scan lost its saved green material'
+        left = image.crop((0, 42, midpoint, image.height))
+        right = image.crop((midpoint + 1, 42, image.width, image.height))
+        assert color_pixels(left, 0) > 100 and color_pixels(left, 0) > color_pixels(left, 1), 'design cell lost its red wire rendering'
+        assert color_pixels(right, 1) > 100 and color_pixels(right, 1) > color_pixels(right, 0), 'scan cell lost its green smooth rendering'
 
         second.write_bytes(second.read_bytes() + b'\n')
         assert api(f'/api/v1/scenes/{new_token}/meshes/0?scene=scan')[0] == 410

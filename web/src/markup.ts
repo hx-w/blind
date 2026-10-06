@@ -54,6 +54,7 @@ export class MarkupCanvas {
 
   get isEnabled(): boolean { return this.enabled; }
   get hasStrokes(): boolean { return this.strokes.length > 0; }
+  get isDrawing(): boolean { return this.active !== null; }
 
   load(strokes: ScreenStroke[]): void {
     this.cancelActive();
@@ -107,7 +108,7 @@ export class MarkupCanvas {
     this.releaseActivePointer();
     const available = Math.max(MAX_POINTS - pointCount(this.strokes), 0);
     if (active.points.length >= 2 && active.points.length <= available && this.strokes.length < MAX_STROKES) {
-      this.strokes.push({ color: active.color, aspect: active.aspect, points: active.points });
+      this.strokes.push({ id: active.id, color: active.color, aspect: active.aspect, points: active.points });
       this.changed();
     } else {
       this.scheduleDraw();
@@ -115,7 +116,7 @@ export class MarkupCanvas {
     this.onStrokeEnd?.();
   }
 
-  private cancelActive(): void {
+  cancelActive(): void {
     if (!this.active) return;
     this.releaseActivePointer();
     this.scheduleDraw();
@@ -153,6 +154,7 @@ export class MarkupCanvas {
     const point = this.normalizedPoint(event);
     this.onStrokeStart?.();
     this.active = {
+      id: crypto.randomUUID(),
       pointerId: event.pointerId,
       color: this.color,
       aspect: this.cssWidth / Math.max(this.cssHeight, 1),
@@ -204,7 +206,8 @@ export class MarkupCanvas {
     if (active.points.length >= MAX_STROKE_POINTS) {
       const committedPoints = pointCount(this.strokes);
       if (this.strokes.length >= MAX_STROKES - 1 || committedPoints + active.points.length >= MAX_POINTS) return;
-      this.strokes.push({ color: active.color, aspect: active.aspect, points: active.points });
+      this.strokes.push({ id: active.id, color: active.color, aspect: active.aspect, points: active.points });
+      active.id = crypto.randomUUID();
       active.points = [previous];
       this.onChange?.();
     }
@@ -246,6 +249,7 @@ export class MarkupCanvas {
     for (const [i,stroke] of this.strokes.entries()) this.drawStroke(stroke, i===this.selection);
     if (this.active) {
       this.drawStroke({
+        id: this.active.id,
         color: this.active.color,
         aspect: this.active.aspect,
         points: this.active.points,

@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {readFile} from 'node:fs/promises';
-import {stripTypeScriptTypes} from 'node:module';
+import ts from 'typescript';
 import {chromium} from 'playwright';
 
 test('depth edge anchors and DOT arrows follow transformed SVG paths in both directions', async () => {
-  const source = stripTypeScriptTypes(await readFile(new URL('../src/graph-depth.ts', import.meta.url), 'utf8'), {mode:'transform'});
+  const source = ts.transpileModule(await readFile(new URL('../src/graph-depth.ts', import.meta.url), 'utf8'), {compilerOptions:{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.ESNext}}).outputText;
   const browser = await chromium.launch({headless:true, executablePath:process.env.BLIND_TEST_CHROMIUM || undefined});
   try {
     const page = await browser.newPage();

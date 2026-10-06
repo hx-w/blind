@@ -4,15 +4,19 @@ import type { MeshViewer } from './viewer';
 import type { MarkupCanvas } from './markup';
 import { clamp, layoutLabel, type LabelOffset, type Rect } from './label-layout';
 import {installIcons} from './icons';
+import {AnnotationHistory, type AnnotationEditor, type AnnotationToolbarState} from './annotations/editor';
+import {createAnnotationToolbar,ANNOTATION_COLORS as COLORS} from './annotations/toolbar';
+import {validateColor,validateLabel,validateScreens,validateSurfaces} from './annotations/validation';
+import {OperationError} from './operations/core';
 
 type Hit = { point: Vec3; normal: Vec3 };
 type Mode = 'select' | 'point' | 'line' | 'screen';
 type Snapshot = { marks: SurfaceAnnotation[]; strokes: ScreenStroke[]; selected?: string; screen?: number; draft?: string };
 type BadgeView = { button: HTMLButtonElement; line: SVGLineElement; width: number; height: number; offset?: LabelOffset };
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const COLORS = ['#ff6b5e', '#ffc857', '#5fb4ff', '#f4f2ea'];
 
-export class SurfaceEditor {
+export class SurfaceEditor implements AnnotationEditor {
+  readonly surface={create:(input:Omit<SurfaceAnnotation,'id'|'mesh'> & {entityId:string})=>this.createSurface(input),edit:(id:string,patch:Partial<Pick<SurfaceAnnotation,'label'|'color'|'visible'|'points'|'normals'|'controls'|'closed'>>)=>this.editSurface(id,patch)};
   private readonly panel: HTMLElement;
   private readonly input: HTMLElement;
   private readonly list: HTMLElement;
@@ -35,8 +39,9 @@ export class SurfaceEditor {
   private badgeObstacles: Rect[] | null = null;
   private badgeViewport = '';
   private hovered?: string;
-  private history: Snapshot[] = [];
-  private future: Snapshot[] = [];
+  private readonly timeline = new AnnotationHistory<Snapshot>();
+  private readonly history = this.timeline.past;
+  private readonly future = this.timeline.future;
   private screenBefore?: Snapshot;
   private gesture?: { id: number; before: Snapshot; x: number; y: number; moving?: number; markId?: string; selectionOnly?: boolean; changed: boolean; dragged?: boolean };
   private status = '';
@@ -51,29 +56,8 @@ export class SurfaceEditor {
     this.badges = document.createElement('div'); this.badges.id = 'surface-badges';
     this.badgeLeaders.setAttribute('aria-hidden','true');this.badges.append(this.badgeLeaders);
     document.querySelector('#viewer')!.append(this.badges);
-    this.panel = document.createElement('section'); this.panel.id = 'surface-toolbar'; this.panel.hidden = true;
-    this.panel.setAttribute('aria-label', '标记工具'); this.panel.setAttribute('data-label-obstacle', '');
-    this.panel.innerHTML = `
-      <div class="surface-modes" role="group" aria-label="标注工具">
-        <button data-surface-mode="select" type="button"><i data-lucide="mouse-pointer-2" aria-hidden="true"></i>选择</button>
-        <button data-surface-mode="point" type="button"><i data-lucide="crosshair" aria-hidden="true"></i>点</button>
-        <button data-surface-mode="line" type="button"><i data-lucide="spline" aria-hidden="true"></i>线</button>
-        <button data-surface-mode="screen" id="surface-brush" type="button"><i data-lucide="brush" aria-hidden="true"></i>画笔</button>
-        <button id="surface-done" class="surface-primary" type="button">完成</button>
-      </div>
-      <div class="surface-actions">
-        <div class="surface-colors" role="group" aria-label="标记颜色">${COLORS.map((color, i) => `<button type="button" data-surface-color="${color}" aria-label="${['珊瑚红','琥珀黄','标记蓝','柔白'][i]}" style="--ink:${color}"><i></i></button>`).join('')}</div>
-        <span class="surface-action-spacer"></span>
-        <button id="surface-undo" type="button" aria-label="撤销标记"><i data-lucide="undo-2" aria-hidden="true"></i></button><button id="surface-redo" type="button" aria-label="重做标记"><i data-lucide="redo-2" aria-hidden="true"></i></button>
-      </div>
-      <div class="surface-selection" hidden>
-        <input id="surface-name" maxlength="120" aria-label="标记名称" placeholder="标记名称" autocomplete="off"/>
-        <button id="surface-close" type="button">闭合</button><button id="surface-end" type="button">完成线</button>
-        <button id="surface-delete" type="button" aria-label="删除选中标记"><i data-lucide="trash-2" aria-hidden="true"></i></button>
-      </div>
-      <p id="surface-hint" role="status"></p>`;
+    this.panel = createAnnotationToolbar(true);
     shell.append(this.panel);
-    installIcons(this.panel);
     this.list = document.createElement('section'); this.list.className = 'surface-list'; this.list.hidden = true;
     this.list.setAttribute('aria-label','标记列表'); this.list.setAttribute('data-label-obstacle','');
     this.list.innerHTML = '<div class="surface-list-heading"><strong>标记</strong><span>点选定位</span><button type="button" id="surface-list-close" aria-label="收起标记列表"><i data-lucide="x" aria-hidden="true"></i></button></div><div id="surface-items"></div>';
@@ -88,33 +72,18 @@ export class SurfaceEditor {
     layout();
     this.el('#surface-list-close').addEventListener('click', () => { this.listDismissed=true; this.updateLayout(); });
     this.el('#surface-done').addEventListener('click', () => this.exit());
-    this.el('#surface-end').addEventListener('click', () => { this.finishLine(); this.sync(); });
-    this.el('#surface-close').addEventListener('click', () => this.closeLine());
+    this.el('#surface-end').addEventListener('click', () => this.finish());
+    this.el('#surface-close').addEventListener('click', () => {if(this.current){try{this.setClosed(this.current.id,!this.current.closed);}catch(error){this.callbacks.toast(error instanceof Error?error.message:String(error));}}});
     this.el('#surface-delete').addEventListener('click', () => this.remove());
     this.el('#surface-undo').addEventListener('click', () => this.undo());
     this.el('#surface-redo').addEventListener('click', () => this.redo());
     this.el<HTMLInputElement>('#surface-name').addEventListener('change', event => {
-      if (!this.current && this.selectedScreen === undefined) return;
-      this.remember();
-      const label = (event.target as HTMLInputElement).value.trim();
-      if (this.current) this.current.label = label;
-      else {
-        const strokes = this.markup.exportStrokes();
-        strokes[this.selectedScreen!].label = label || undefined;
-        this.markup.load(strokes);
-      }
-      this.sync();
+      const label=(event.target as HTMLInputElement).value.trim();
+      if(this.current)this.editSurface(this.current.id,{label});
+      else if(this.selectedScreen!==undefined)this.editScreen(this.markup.exportStrokes()[this.selectedScreen].id,{label});
     });
-    this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-mode]').forEach(button => button.addEventListener('click', () => {
-      this.markup.finishActive(); this.finishLine(); this.selected = undefined; this.selectedScreen=undefined;
-      this.mode = button.dataset.surfaceMode as Mode; this.status = ''; this.sync();
-    }));
-    this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-color]').forEach(button => button.addEventListener('click', () => {
-      this.color = button.dataset.surfaceColor!;
-      if (this.current) { this.remember(); this.current.color = this.color; }
-      else if(this.selectedScreen!==undefined) { this.remember(); const strokes=this.markup.exportStrokes(); strokes[this.selectedScreen].color=this.color; this.markup.load(strokes); }
-      this.sync();
-    }));
+    this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-mode]').forEach(button=>button.addEventListener('click',()=>this.setTool(button.dataset.surfaceMode as Mode)));
+    this.panel.querySelectorAll<HTMLButtonElement>('[data-surface-color]').forEach(button=>button.addEventListener('click',()=>this.setColor(button.dataset.surfaceColor!)));
     this.markup.onStrokeStart=()=> { this.selected=undefined; this.selectedScreen=undefined; this.screenBefore=this.snapshot(); };
     this.markup.onStrokeEnd=()=> {
       if(this.screenBefore) {
@@ -137,8 +106,8 @@ export class SurfaceEditor {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? this.redo() : this.undo(); }
       else if (event.key === 'Escape') { event.preventDefault(); if (this.gesture) this.cancelGesture(); else if(!this.list.hidden) {this.listDismissed=true;this.updateLayout();} else this.exit(); }
       else if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.remove(); }
-      else if (event.code === 'Space' && !event.repeat) { event.preventDefault(); this.chooseSelection(); }
-      else if (event.key === 'Enter') { event.preventDefault(); this.finishLine(); this.sync(); }
+      else if (event.code === 'Space' && !event.repeat) { event.preventDefault(); this.cancelGesture();this.setTool('select'); }
+      else if (event.key === 'Enter') { event.preventDefault(); this.finish(); }
     });
     // Selection shares the viewer canvas with camera controls. Only a hit on a
     // mark captures the gesture; ordinary drags and multi-touch stay with Arcball.
@@ -216,6 +185,8 @@ export class SurfaceEditor {
   }
   setExternalScreenMarkup(external: boolean): void { this.externalScreenMarkup=external; this.sync(); }
   async enter(id?: string): Promise<void> {
+    if(id&&!this.viewer.annotations.some(m=>m.id===id))throw new OperationError('INVALID_ARGUMENT','Surface annotation not found',{target:id});
+    if(this.active){if(id)this.selectMark(id);return;}
     this.active = true;
     if(id) this.selectMark(id);
     else { this.mode='screen'; this.selected=undefined; this.selectedScreen=undefined; this.status=''; }
@@ -225,6 +196,7 @@ export class SurfaceEditor {
     this.el('#gesture-hint').classList.add('dismissed'); this.sync();
   }
   load(): void {
+    this.timeline.clear();this.selected=undefined;this.selectedScreen=undefined;this.draft=undefined;this.screenBefore=undefined;
     this.listDismissed=false;
     this.refreshList();this.sync();
   }
@@ -236,6 +208,7 @@ export class SurfaceEditor {
     this.viewer.focusAnnotation(mark); this.status=''; this.sync();
   }
   exit(): void {
+    if(!this.active)return;
     this.markup.finishActive(); this.pending=undefined; this.cancelGesture(); this.finishLine(); this.active = false; this.selected = undefined; this.selectedScreen=undefined;
     if (this.panel.contains(this.el('#share-view')))
       this.el('.review-dock .dock-main').append(this.el('#share-view'));
@@ -243,32 +216,46 @@ export class SurfaceEditor {
     this.viewer.setInteractionEnabled(true); this.sync();
   }
   finishForShare(): void { this.markup.finishActive(); this.cancelGesture(); this.finishLine(); this.sync(); }
-  invalidateScreenHistory(): void { for(const s of [...this.history,...this.future]) {s.strokes=[];s.screen=undefined;} this.selectedScreen=undefined; }
-  private chooseSelection(): void { this.markup.finishActive(); this.cancelGesture(); this.finishLine(); this.mode='select'; this.status=''; this.sync(); }
+  invalidateScreenHistory(): void {
+    this.markup.cancelActive(); this.screenBefore=undefined; this.selectedScreen=undefined;
+    const signature = (snapshot: Snapshot) => JSON.stringify([snapshot.marks, snapshot.draft]);
+    const current = JSON.stringify([this.viewer.annotations, this.draft]);
+    for (const stack of [this.history, this.future]) {
+      let nearest = current;
+      for (let index = stack.length - 1; index >= 0; index--) {
+        const snapshot = stack[index]; snapshot.strokes=[]; snapshot.screen=undefined;
+        const value = signature(snapshot);
+        if (value === nearest) stack.splice(index, 1);
+        else nearest = value;
+      }
+    }
+    this.sync();
+  }
   private snapshot(): Snapshot { return { marks: structuredClone(this.viewer.annotations), strokes:this.markup.exportStrokes(), screen:this.selectedScreen, selected: this.selected, draft: this.draft }; }
-  private async restore(snapshot: Snapshot): Promise<boolean> {
+  private async restore(snapshot: Snapshot,notify=true): Promise<boolean> {
+    if(snapshot.marks.some(mark=>this.viewer.modelInfos[mark.mesh]?.revision!==mark.revision))throw new OperationError('CONFLICT','Annotation history refers to a changed source revision');
     const targets=[...new Set(snapshot.marks.map(mark=>mark.mesh))];
     const needsRaw=targets.filter(index=>this.viewer.modelInfos[index]?.quality!=='raw' || this.viewer.modelInfos[index]?.loading);
     if(needsRaw.length) {
-      this.busy=true;this.status='正在恢复精细表面…';this.sync();
+      this.busy=true;this.status='正在恢复精细表面…';this.sync(false);
       try {for(const index of needsRaw) await this.viewer.setQuality(index,'raw');}
       catch {this.callbacks.toast('精细表面加载失败，未恢复标记');return false;}
-      finally {this.busy=false;this.status='';this.sync();}
+      finally {this.busy=false;this.status='';this.sync(false);}
     }
+    if(snapshot.marks.some(mark=>this.viewer.modelInfos[mark.mesh]?.revision!==mark.revision))throw new OperationError('CONFLICT','Source revision changed while restoring annotation history');
+    if(targets.some(index=>this.viewer.modelInfos[index]?.quality!=='raw'||!this.viewer.hasSurface(index)))throw new OperationError('RESOURCE_UNAVAILABLE','Raw surface geometry is unavailable',{retryable:true});
     this.selected=snapshot.selected;this.selectedScreen=snapshot.screen;this.draft=snapshot.draft;
     const restored=snapshot.marks.find(mark=>mark.id===(snapshot.draft??snapshot.selected));
     if(restored) this.target=restored.mesh;
     if(this.draft) this.mode='line';
-    this.viewer.setAnnotations(structuredClone(snapshot.marks));this.markup.load(snapshot.strokes);this.sync();return true;
+    this.viewer.setAnnotations(structuredClone(snapshot.marks));this.markup.load(snapshot.strokes);this.sync(notify);return true;
   }
-  private remember(snapshot = this.snapshot()): void { this.history.push(snapshot); if (this.history.length > 40) this.history.shift(); this.future = []; }
-  private async undo(): Promise<void> { if(this.busy)return;this.cancelGesture();const previous=this.history.at(-1);if(!previous)return;const current=this.snapshot();if(await this.restore(previous)){this.history.pop();this.future.push(current);this.sync();} }
-  private async redo(): Promise<void> { if(this.busy)return;this.cancelGesture();const next=this.future.at(-1);if(!next)return;const current=this.snapshot();if(await this.restore(next)){this.future.pop();this.history.push(current);this.sync();} }
+  private remember(snapshot = this.snapshot()): void { this.timeline.remember(snapshot); }
+  async undo(): Promise<void> { if(this.busy||this.markup.isDrawing)throw new OperationError('CONFLICT','Finish or cancel the active annotation first');this.cancelGesture();const previous=this.history.at(-1);if(!previous)return;const current=this.snapshot();if(await this.restore(previous,false)){this.history.pop();this.future.push(current);this.sync();}else throw new OperationError('RESOURCE_UNAVAILABLE','Raw geometry could not be restored',{retryable:true}); }
+  async redo(): Promise<void> { if(this.busy||this.markup.isDrawing)throw new OperationError('CONFLICT','Finish or cancel the active annotation first');this.cancelGesture();const next=this.future.at(-1);if(!next)return;const current=this.snapshot();if(await this.restore(next,false)){this.future.pop();this.history.push(current);this.sync();}else throw new OperationError('RESOURCE_UNAVAILABLE','Raw geometry could not be restored',{retryable:true}); }
   private remove(): void {
-    if(this.selectedScreen!==undefined) {this.remember();const strokes=this.markup.exportStrokes();strokes.splice(this.selectedScreen,1);this.selectedScreen=undefined;this.markup.load(strokes);this.sync();return;}
-    if (!this.current) return; this.remember(); const id = this.selected;
-    this.viewer.setAnnotations(this.viewer.annotations.filter(mark => mark.id !== id)); this.selected = undefined;
-    if (this.draft === id) this.draft = undefined; this.sync();
+    const selected=this.toolbarState.selection;
+    if(selected)this.removeAnnotation(selected.kind,selected.id);
   }
   private finishLine(): void {
     const mark = this.viewer.annotations.find(m => m.id === this.draft);
@@ -352,7 +339,7 @@ export class SurfaceEditor {
       }
     }
     if (this.draft && current && current.controls.length >= 3 && this.nearPoint(current.points[0], event.clientX, event.clientY, 14)) {
-      this.gesture = undefined; this.closeLine(); return;
+      this.gesture = undefined;try{this.setClosed(current.id,true);}catch(error){this.callbacks.toast(error instanceof Error?error.message:String(error));}return;
     }
     if(this.mode==='select') return;
     const mark = this.draft ? this.current : this.newMark(hit);
@@ -444,16 +431,6 @@ export class SurfaceEditor {
     return true;
   }
   private screen(point: Vec3): [number,number] { const p=this.viewer.projectSurface(point); return [p.x,p.y]; }
-  private closeLine(): void {
-    const mark = this.current; if (!mark || mark.kind !== 'line') return;
-    if (mark.closed) { this.remember(); const end = mark.controls.at(-2)!; mark.points.length = end + 1; mark.normals.length = end + 1; mark.controls.pop(); mark.closed = false; this.sync(); return; }
-    if (mark.controls.length < 3) { this.callbacks.toast('至少三个控制点才能闭合'); return; }
-    const before = this.snapshot(); const hits = this.segment(mark.points.at(-1)!, ...this.screen(mark.points[0]));
-    if (!hits || mark.points.length + hits.length > 4096 || this.viewer.annotations.reduce((n,m) => n+m.points.length,0) + hits.length > 16384) { this.callbacks.toast(this.status); return; }
-    hits[hits.length-1] = {point: [...mark.points[0]], normal: [...mark.normals[0]]};
-    mark.points.push(...hits.map(h=>h.point)); mark.normals.push(...hits.map(h=>h.normal));
-    mark.controls.push(mark.points.length-1); mark.closed = true; this.draft = undefined; this.smooth(mark); this.remember(before); this.sync();
-  }
   /** A centripetal curve through editing handles, resampled onto the same visible surface.
    * Commit only when every sample remains valid. Saved scenes never run this fitting step. */
   private smooth(mark: SurfaceAnnotation): void {
@@ -498,7 +475,7 @@ export class SurfaceEditor {
       item.addEventListener('pointerleave',()=> {this.hovered=undefined;this.viewer.setAnnotations(this.viewer.annotations,this.selected);});
       const toggle=document.createElement('button');toggle.type='button';toggle.className='surface-visibility';toggle.innerHTML=`<i data-lucide="${mark.visible ? 'eye' : 'eye-off'}" aria-hidden="true"></i>`;
       toggle.setAttribute('aria-label',`${mark.visible?'隐藏':'显示'} ${mark.label}`);toggle.setAttribute('aria-pressed',String(mark.visible));
-      toggle.addEventListener('click',()=> {this.remember();mark.visible=!mark.visible;this.sync();});item.append(toggle);
+      toggle.addEventListener('click',()=>this.editSurface(mark.id,{visible:!mark.visible}));item.append(toggle);
     });
     strokes.forEach((stroke,i)=>row(marks.length+i+1,stroke.label || `画笔 ${i+1}`,stroke.color,'屏幕',i===this.selectedScreen,()=>this.selectScreen(i)));
     installIcons(container);
@@ -558,9 +535,69 @@ export class SurfaceEditor {
     });
     this.markup.exportStrokes().forEach((stroke,index)=> {
       const points=this.markup.displayPoints(index),p=points[Math.floor(points.length/2)];
-      if(p)badge(`screen:${index}`,p[0],p[1],stroke.label || `画笔 ${index+1}`,stroke.color,index===this.selectedScreen,()=>this.selectScreen(index));
+      if(p)badge(`screen:${stroke.id}`,p[0],p[1],stroke.label || `画笔 ${index+1}`,stroke.color,index===this.selectedScreen,()=>this.select('screen',stroke.id));
     });
     for(const [key,view] of this.badgeElements)if(!retained.has(key)){view.button.remove();view.line.remove();this.badgeElements.delete(key);}
+  }
+  get toolbarState():AnnotationToolbarState {
+    const mark=this.current,stroke=this.markup.exportStrokes()[this.selectedScreen??-1],busy=this.busy||this.markup.isDrawing;
+    const hint=this.mode==='select'?'拖动旋转 · 双指移动与缩放 · 点选标记编辑':this.mode==='screen'?'屏幕画笔 · 松手成一笔，改变视角后隐藏':this.mode==='point'?'点按可见表面落点 · 拖动微调':this.draft?'继续点按连线，或点「完成线」':'沿表面拖画，松手成线 · 也可逐点连线';
+    return {active:this.active,mode:this.mode,color:mark?.color??stroke?.color??this.color,selection:mark?{kind:'surface',id:mark.id}:stroke?{kind:'screen',id:stroke.id}:null,label:mark?.label??stroke?.label??'',canUndo:!!this.history.length&&!busy,canRedo:!!this.future.length&&!busy,canClose:mark?.kind==='line',closed:mark?.closed??false,canFinishLine:!!this.draft,busy,status:this.status||hint,supportsSurface:true};
+  }
+  surfaceAnnotations():SurfaceAnnotation[] {return structuredClone(this.viewer.annotations);}
+  private assertIdle(includeScreen=true):void {if(this.busy||this.gesture||this.pending||(includeScreen&&this.markup.isDrawing))throw new OperationError('CONFLICT','Finish or cancel the active annotation gesture or wait for Raw loading');}
+  setTool(mode:Mode):void {this.assertIdle(false);if(this.mode===mode)return;this.markup.finishActive();this.finishLine();this.selected=undefined;this.selectedScreen=undefined;this.mode=mode;this.status='';this.sync();}
+  setColor(color:string):void {this.assertIdle();validateColor(color);this.color=color;const mark=this.current,stroke=this.markup.exportStrokes()[this.selectedScreen??-1];if(mark){this.editSurface(mark.id,{color});return;}if(stroke){this.editScreen(stroke.id,{color});return;}this.sync();}
+  select(kind:'surface'|'screen',id:string):void {this.assertIdle();if(kind==='surface'){if(!this.viewer.annotations.some(m=>m.id===id))throw new OperationError('INVALID_ARGUMENT','Surface annotation not found',{target:id});this.selectMark(id);}else{const index=this.markup.exportStrokes().findIndex(s=>s.id===id);if(index<0)throw new OperationError('INVALID_ARGUMENT','Screen annotation not found',{target:id});this.selectScreen(index);}}
+  createScreen(input:Omit<ScreenStroke,'id'>):ScreenStroke {this.assertIdle();const stroke={...structuredClone(input),id:crypto.randomUUID()},next=[...this.markup.exportStrokes(),stroke];validateScreens(next);this.remember();this.markup.load(next);this.selected=undefined;this.selectedScreen=next.length-1;this.sync();return structuredClone(stroke);}
+  editScreen(id:string,patch:Partial<Omit<ScreenStroke,'id'>>):ScreenStroke {this.assertIdle();const next=this.markup.exportStrokes(),index=next.findIndex(s=>s.id===id);if(index<0)throw new OperationError('INVALID_ARGUMENT','Screen annotation not found',{target:id});const previous=JSON.stringify(next[index]);next[index]={...next[index],...structuredClone(patch)};validateScreens(next);if(JSON.stringify(next[index])===previous)return structuredClone(next[index]);this.remember();this.markup.load(next);this.sync();return structuredClone(next[index]);}
+  async createSurface(input:Omit<SurfaceAnnotation,'id'|'mesh'> & {entityId:string}):Promise<SurfaceAnnotation> {
+    if(this.draft)throw new OperationError('CONFLICT','Finish or cancel the current surface line draft first');
+    this.assertIdle();const mesh=this.viewer.getMeshIndex(input.entityId);
+    if(mesh===undefined)throw new OperationError('UNKNOWN_ENTITY','Mesh entity does not exist',{target:input.entityId});
+    if(this.viewer.modelInfos[mesh]?.format==='pts')throw new OperationError('UNSUPPORTED','Point clouds have no annotatable surface',{target:input.entityId});
+    if(!this.viewer.modelInfos[mesh])throw new OperationError('NOT_READY','Mesh metadata is not ready',{target:input.entityId,retryable:true});
+    if(this.viewer.modelInfos[mesh].revision!==input.revision)throw new OperationError('CONFLICT','Source revision changed',{field:'revision',target:input.entityId});
+    const {entityId:_,...data}=input,mark:SurfaceAnnotation={...structuredClone(data),mesh,id:crypto.randomUUID()};
+    validateSurfaces([...this.viewer.annotations,mark]);
+    if(this.viewer.modelInfos[mesh].quality!=='raw'||this.viewer.modelInfos[mesh].loading){this.busy=true;this.sync(false);try{await this.viewer.setQuality(mesh,'raw');}catch{throw new OperationError('RESOURCE_UNAVAILABLE','Raw surface could not be loaded',{target:input.entityId,retryable:true});}finally{this.busy=false;this.sync(false);}}
+    if(this.viewer.getMeshIndex(input.entityId)!==mesh||this.viewer.modelInfos[mesh]?.revision!==mark.revision)throw new OperationError('CONFLICT','Entity or source revision changed during Raw load',{field:'revision',target:input.entityId});
+    if(this.viewer.modelInfos[mesh].quality!=='raw'||!this.viewer.hasSurface(mesh))throw new OperationError('RESOURCE_UNAVAILABLE','Raw surface geometry is unavailable',{target:input.entityId,retryable:true});
+    validateSurfaces([...this.viewer.annotations,mark]);this.remember();this.viewer.setAnnotations([...this.viewer.annotations,mark]);this.selected=mark.id;this.selectedScreen=undefined;this.sync();return structuredClone(mark);
+  }
+  editSurface(id:string,patch:Partial<Pick<SurfaceAnnotation,'label'|'color'|'visible'|'points'|'normals'|'controls'|'closed'>>):SurfaceAnnotation {
+    this.assertIdle();const index=this.viewer.annotations.findIndex(m=>m.id===id);if(index<0)throw new OperationError('INVALID_ARGUMENT','Surface annotation not found',{target:id});
+    const next=structuredClone(this.viewer.annotations);next[index]={...next[index],...structuredClone(patch)};
+    if(this.viewer.modelInfos[next[index].mesh]?.revision!==next[index].revision)throw new OperationError('CONFLICT','Source revision changed',{target:id});
+    validateLabel(next[index].label);validateColor(next[index].color);
+    const metadataOnly=patch.points===undefined&&patch.normals===undefined&&patch.controls===undefined&&patch.closed===undefined;
+    validateSurfaces(metadataOnly?next.filter(m=>m.id!==this.draft):next);
+    if(JSON.stringify(next[index])===JSON.stringify(this.viewer.annotations[index]))return structuredClone(next[index]);
+    this.remember();this.viewer.setAnnotations(next);this.sync();return structuredClone(next[index]);
+  }
+  removeAnnotation(kind:'surface'|'screen',id:string):void {
+    this.assertIdle();
+    if(kind==='screen'){const strokes=this.markup.exportStrokes(),index=strokes.findIndex(s=>s.id===id);if(index<0)throw new OperationError('INVALID_ARGUMENT','Screen annotation not found',{target:id});this.remember();strokes.splice(index,1);this.markup.load(strokes);this.selectedScreen=undefined;}
+    else{if(!this.viewer.annotations.some(m=>m.id===id))throw new OperationError('INVALID_ARGUMENT','Surface annotation not found',{target:id});this.remember();this.viewer.setAnnotations(this.viewer.annotations.filter(m=>m.id!==id));if(this.selected===id)this.selected=undefined;if(this.draft===id)this.draft=undefined;}this.sync();
+  }
+  clearAnnotations(kind?:'surface'|'screen'):void {this.assertIdle();if((kind==='screen'||!this.viewer.annotations.length)&&(kind==='surface'||!this.markup.hasStrokes))return;this.remember();if(kind!=='screen'){this.viewer.setAnnotations([]);this.selected=undefined;this.draft=undefined;}if(kind!=='surface'){this.markup.clear();this.selectedScreen=undefined;}this.sync();}
+  finish():void {this.finishForShare();}
+  cancel():void {this.pending=undefined;this.markup.cancelActive();if(this.screenBefore){this.markup.load(this.screenBefore.strokes);this.selectedScreen=this.screenBefore.screen;}this.screenBefore=undefined;this.cancelGesture();if(this.draft){const id=this.draft;this.viewer.setAnnotations(this.viewer.annotations.filter(m=>m.id!==id));this.draft=undefined;this.selected=undefined;}this.sync();}
+  setClosed(id:string,closed:boolean):void {
+    this.assertIdle();const mark=this.viewer.annotations.find(m=>m.id===id);
+    if(!mark)throw new OperationError('INVALID_ARGUMENT','Surface annotation not found',{target:id});
+    if(mark.kind!=='line')throw new OperationError('INVALID_ARGUMENT','Only a line can be closed',{target:id});
+    if(mark.closed===closed)return;
+    const next=structuredClone(mark);
+    if(closed){
+      if(mark.controls.length<3)throw new OperationError('INVALID_ARGUMENT','Closing requires three control points',{field:'closed'});
+      const previousTarget=this.target,previousStatus=this.status;this.target=mark.mesh;
+      const hits=this.segment(mark.points.at(-1)!,...this.screen(mark.points[0]));const failure=this.status;this.target=previousTarget;this.status=previousStatus;
+      if(!hits)throw new OperationError('CONFLICT',failure||'Closing path cannot be sampled on the visible surface',{target:id});
+      hits[hits.length-1]={point:[...mark.points[0]],normal:[...mark.normals[0]]};
+      next.points.push(...hits.map(h=>h.point));next.normals.push(...hits.map(h=>h.normal));next.controls.push(next.points.length-1);next.closed=true;this.smooth(next);
+    }else{const end=mark.controls.at(-2)!;next.points.length=end+1;next.normals.length=end+1;next.controls.pop();next.closed=false;}
+    const marks=this.viewer.annotations.map(m=>m.id===id?next:m);validateSurfaces(marks);this.remember();this.viewer.setAnnotations(marks);this.draft=undefined;this.sync();
   }
   private sync(refresh = true): void {
     this.panel.querySelectorAll<HTMLButtonElement>('button:not(#share-view)').forEach(button=>button.disabled=this.busy);

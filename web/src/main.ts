@@ -1,5 +1,8 @@
 import './styles.css';
 import {captureOwner, setInitialScene} from './bootstrap';
+import {OperationHost, OperationError} from './operations/core';
+import {publishOperations, serveWindowOperations} from './operations/transport';
+import {workbenchOperations} from './operations/workbench';
 
 const token = location.pathname.match(/\/s\/([^/]+)$/)?.[1];
 const params = new URLSearchParams(location.search);
@@ -19,9 +22,15 @@ function showUnavailable(status: number, message?: string): void {
     document.documentElement.dataset.renderStatus = 'error';
     document.documentElement.dataset.renderError = message ?? 'Scene render failed';
   }
-  const sceneId = params.get('scene');
-  if (params.has('embedded') && sceneId)
-    parent.postMessage({type:'blind:scene-error', id:sceneId, message:message ?? 'Scene failed'}, location.origin);
+  const operations = new OperationHost({sceneId: params.get('scene') ?? 'scene', ready: () => false});
+  operations.register(workbenchOperations.get, () => {throw new OperationError('RESOURCE_UNAVAILABLE', message ?? 'Scene failed');});
+  const unpublish = publishOperations(operations);
+  const disconnect = params.has('embedded') ? serveWindowOperations(operations) : undefined;
+  operations.notify('lifecycle', {error: message ?? 'Scene failed'});
+  window.addEventListener('pagehide', event => {
+    if (event.persisted) return;
+    operations.dispose(); disconnect?.(); unpublish();
+  });
 }
 
 if (token) {

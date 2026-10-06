@@ -3,6 +3,47 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-10-06
+
+### Added
+
+- Discoverable, typed scene operations shared by UI, components and Collection:
+  entity controls, view navigation, native reading, annotations, sections,
+  resources and sharing, with concrete schemas, stable IDs and committed events.
+- Fixed `panel` component placement for controllers, separate from world layout
+  and presentation, with reserved sidebar and scene-control space.
+- A genuine DOM 2D board for planar scenes, with pointer-anchored pan/zoom,
+  persistent center/scale and screen annotation history; no WebGL or 3D controls.
+- Pinned component `host_space` and operation grants, own-entity content access,
+  explicit opt-ins and structured readiness/capability/permission errors.
+
+### Changed
+
+- Cut over Collection and component scene control to semantic operations; remove
+  legacy scene-command, DOM-click and stale-snapshot fallback paths.
+- Persist viewport, placement and required screen-stroke IDs in schema version 8.
+- Standardize help navigation on `--help` and `-h`, with command-group guidance
+  and links to the CLI, viewer operations and plugin API documentation.
+- Existing Server links and pinned browser snapshots require an explicitly
+  authorized clear-all cutover before upgrading from 2.1.0; recreate shares
+  afterward. Client registrations, configuration and original sources remain intact.
+
+### Fixed
+
+- Wait for native layout/reading settlement before returning geometry-changing
+  operations; board chrome zoom no longer reflows source content or clears new ink.
+- Preserve strokes begun while Collection annotation-tool activation is awaiting
+  a child, and fail sharing explicitly when a child is unavailable.
+- Keep initial narrow-board content actions clear of the scene toolbar, and mount
+  initially hidden spatial plugin documents without losing state on visibility changes.
+- Keep Collection ink aligned with native reading and fixed-panel framing while
+  retaining it for display-only settings; discard invalidated screen-only undo/redo
+  entries without deleting source-anchored edits, and restore operations after BFcache navigation.
+- Preserve explicit reading changes during presentation transitions and keep
+  depth-diagram catalog anchors in source coordinates.
+- Reject sparse operation arrays before mutation and accept the documented
+  entity and screen-stroke ID bounds across their consumers.
+
 ## [2.1.0] - 2026-10-05
 
 ### Added

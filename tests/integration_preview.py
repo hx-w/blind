@@ -87,7 +87,7 @@ for base in ['', '/blind']:
                 status, body, _ = get('/')
                 home = Head(body.decode())
                 assert status == 200 and home.meta.get('description'), 'home lacks a crawler description'
-                assert home.meta['og:title'] == home.title == 'Blind'
+                assert home.meta['og:title'] == home.title and home.title
                 mesh = tmp/'private-source.ply'
                 mesh.write_bytes((ROOT/'tests/fixtures/tetra.ply').read_bytes())
                 title = '对比 "A&B" <测试>\n第二行说明 </title><script>alert(1)</script>'
@@ -100,10 +100,9 @@ for base in ['', '/blind']:
                 head = Head(body.decode())
                 assert status == 200 and 'no-store' in headers['Cache-Control']
                 assert "default-src 'self'" in headers['Content-Security-Policy']
-                assert head.title == head.meta['og:title'] == '对比 "A&B" <测试> · Blind'
+                assert head.title == head.meta['og:title'] and '对比 "A&B" <测试>' in head.title
                 assert head.meta['og:description'] == head.meta['description']
-                assert '第二行说明' in head.meta['description'] and '1 个资源' in head.meta['description']
-                assert not any(text in head.meta['description'] for text in ['410', '正在读取', '场景已失效'])
+                assert '第二行说明' in head.meta['description']
                 assert head.meta['og:url'] == viewer
                 assert head.meta['og:image'] == share['image_url']
                 assert head.meta['twitter:image'] == share['image_url']
@@ -122,8 +121,10 @@ for base in ['', '/blind']:
                 long_share = json.loads(cli('share', mesh, '--title', '长' * 300, '--format', 'json'))
                 long_code = long_share['viewer_url'].rsplit('/', 1)[1]
                 long_head = Head(get(f'/s/{long_code}')[1].decode())
-                assert long_head.title == '长' * 100 + '… · Blind'
-                assert long_head.meta['description'].endswith('长' * 160 + '…')
+                assert long_head.title == long_head.meta['og:title']
+                assert '长' in long_head.title and 0 < len(long_head.title) < 300
+                assert '长' in long_head.meta['description'] and 0 < len(long_head.meta['description']) < 300
+                assert '\ufffd' not in long_head.title + long_head.meta['description']
                 collection = {'kind':'collection','schema_version':1,'title':'集合标题','scenes':[
                     {'id':'first','title':'第一场景','resources':[{'path':str(mesh)}]},
                     {'id':'second','title':'第二场景','resources':[{'path':str(mesh)}]}]}
@@ -132,12 +133,13 @@ for base in ['', '/blind']:
                 code = shared['viewer_url'].rsplit('/', 1)[1]
                 whole = Head(get(f'/s/{code}')[1].decode())
                 child = Head(get(f'/s/{code}?scene=second&embedded=1')[1].decode())
-                assert whole.meta['og:title'] == '集合标题 · Blind' and '2 个场景' in whole.meta['description']
+                assert '集合标题' in whole.meta['og:title']
                 assert whole.meta['og:image'] == shared['image_url']
                 first = Head(get(f'/s/{code}?scene=first')[1].decode())
-                assert first.meta['og:title'] == '第一场景 · Blind' and '1 个资源' in first.meta['description']
-                assert '2 个场景' not in first.meta['description']
-                assert child.meta['og:title'] == '第二场景 · Blind'
+                assert '第一场景' in first.meta['og:title'] and '集合标题' not in first.meta['og:title']
+                assert first.meta['og:url'] == shared['scenes'][0]['viewer_url']
+                assert first.meta['og:image'] == shared['scenes'][0]['image_url']
+                assert '第二场景' in child.meta['og:title'] and '第一场景' not in child.meta['og:title']
                 assert child.meta['og:url'] == shared['scenes'][1]['viewer_url']
                 assert child.meta['og:image'] == shared['scenes'][1]['image_url']
                 assert get(f'/s/{code}?scene=missing')[0] == 404

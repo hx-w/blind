@@ -42,7 +42,7 @@ fetch timing are outside Blind's control.
 
 The encrypted descriptor contains:
 
-- Schema version, title, and creation time.
+- Schema version 8, title, and creation time.
 - Canonical source path, format, byte size, and SHA-256 revision for every Mesh.
 - Registered source ID, hostname, OS user and display name (absent in some earlier local scenes).
 - Visibility, selected Mesh, color, and opacity.
@@ -53,16 +53,16 @@ The encrypted descriptor contains:
   Mesh indices are zero-based in the descriptor and must contain at least two
   unique, valid members.
 - Camera position, target, up vector, field of view, zoom, projection, and orthographic height.
+- Viewport mode and, for boards, center and positive CSS-pixels-per-scene-unit scale.
 - Captured frame dimensions.
 - Surface mode, axes, and gray background mode.
 - Scene entities with a renderer type, source reference, editable label,
-  visibility, opacity, position, and component-specific state. Older stored
-  descriptors using `components` remain readable.
+  visibility, opacity, position, size, `world`/`panel` placement and component state.
 - For plugin entities, an immutable binding with plugin ID, component name,
   browser snapshot revision, capabilities and allowed frame origins.
-- Screen strokes as a color, capture aspect ratio, and bounded normalized
-  points. A scene permits 64 strokes, 512 points per stroke, and 4,096 points
-  in total.
+- Screen strokes with a required stable ID of 1 to 128 ASCII letters, digits,
+  underscores or hyphens, color, capture aspect ratio, and bounded normalized
+  points. A scene permits 64 strokes, 512 points per stroke, and 4,096 points in total.
 
 The registry payload never contains a PAT or Mesh bytes. XChaCha20-Poly1305 encrypts and authenticates the compressed descriptor before SQLite receives it.
 Browser HTML lives separately in the registry's content-addressed snapshot table.
@@ -77,7 +77,12 @@ An independent six-character owner secret is placed in the URL fragment of `owne
 
 ## Exact restore
 
-New scenes run Fit against the joint bounds of all visible Meshes after the viewport is ready. Camera pose and styling in a captured scene restore exactly and do not run Fit again. The captured vertical framing remains stable across aspect ratios, while a different device may reveal more or less content horizontally.
+New scenes frame visible world entities after loading; fixed panels are excluded.
+Spatial camera pose or board center/scale in a captured scene restore without
+running Fit again. Captured vertical framing remains stable across aspect ratios,
+while a different device may reveal more or less content horizontally. PNG export
+uses the same viewport and fixed-panel layout, waits for native/plugin readiness,
+and rejects operation mutations in export mode.
 
 Screen markup is tied to that exact camera framing rather than Mesh geometry.
 It can cross empty space and remaps across viewport aspect ratios. The first

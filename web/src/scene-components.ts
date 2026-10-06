@@ -8,6 +8,7 @@ export interface SceneEntity {
   renderer?: {plugin:string; revision:string; name:string; frame_origins?: string[]; capabilities: Omit<ComponentCapabilities, "input">};
   state?: unknown;
   source: {kind: 'mesh' | 'attachment'; index: number};
+  placement: 'world' | 'panel';
   label: string;
   group: string | null;
   position: Vec3 | null;
@@ -15,7 +16,7 @@ export interface SceneEntity {
   visible: boolean;
   opacity: number;
 }
-export type EntityUpdate = Pick<SceneEntity, 'id' | 'label' | 'position' | 'size' | 'visible' | 'opacity' | 'state'>;
+export type EntityUpdate = Pick<SceneEntity, 'id' | 'label' | 'position' | 'size' | 'visible' | 'opacity' | 'state' | 'placement'>;
 export interface ComponentCapabilities {
   presentations: readonly Presentation[];
   movable: boolean;
@@ -24,6 +25,8 @@ export interface ComponentCapabilities {
   input: Readonly<Record<Presentation, 'scene' | 'content'>>;
   /** Additional controls exposed only by geometric component definitions. */
   geometry?: 'mesh' | 'points';
+  host_space?: 'planar' | 'spatial';
+  operations?: readonly string[];
 }
 export interface ComponentRuntime {
   readonly bounds: Box3;
@@ -61,7 +64,7 @@ export function sceneEntities(scene: PublicScene): SceneEntity[] {
   return structuredClone(scene.entities);
 }
 export function entityUpdate(spec: SceneEntity): EntityUpdate {
-  return {...(spec.state === undefined ? {} : {state:spec.state}), id: spec.id, label:spec.label, position: spec.position ? [...spec.position] : null, size: spec.size ? [...spec.size] : null, visible: spec.visible, opacity: spec.opacity};
+  return {...(spec.state === undefined ? {} : {state:spec.state}), id: spec.id, label:spec.label, placement: spec.placement, position: spec.position ? [...spec.position] : null, size: spec.size ? [...spec.size] : null, visible: spec.visible, opacity: spec.opacity};
 }
 /** Insertion order is stable. A scene has one flat list of groups, never nested scenes. */
 export function componentGroups(components: readonly SceneEntity[]): Map<string, SceneEntity[]> {

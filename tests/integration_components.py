@@ -66,14 +66,23 @@ extensions = ["trace.json", "traceblob"]
 frame_origins = ["https://example.org"]
 '''
         (package/'blind-plugin.toml').write_text(manifest)
-        html = """<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:#e000e0}</style><script>window.addEventListener('message',e=>{if(e.source===parent&&e.data?.type==='blind:init'){document.body.textContent=new TextDecoder().decode(e.data.buffer);e.ports[0].postMessage({version:1,type:'ready'});}});</script>"""
+        expected_trace = '{"traceEvents":[{"name":"work","ph":"X","ts":0,"dur":20,"pid":1,"tid":1}]}'
+        html = """<!doctype html><style>html,body{margin:0;width:100%;height:100%}</style><script>const expected=""" + json.dumps(expected_trace) + """;window.addEventListener('message',e=>{if(e.source===parent&&e.data?.type==='blind:init'){const source=new TextDecoder().decode(e.data.buffer);if(source!==expected)return;document.body.textContent=source;document.body.style.background='#e000e0';e.ports[0].postMessage({version:1,type:'ready'});}});</script>"""
         (package/'panel.html').write_text(html)
         cli('plugin','install',package)
         (tmp/'run.log').write_text('real text <script>must not execute</script>\n')
-        (tmp/'trace.json').write_text('{"traceEvents":[{"name":"work","ph":"X","ts":0,"dur":20,"pid":1,"tid":1}]}')
+        (tmp/'trace.json').write_text(expected_trace)
         (tmp/'capture.json').write_text((tmp/'trace.json').read_text())
         (tmp/'page.html').write_text('<h1>Report</h1><script>document.title="isolated"</script>')
         mesh = ROOT/'tests/fixtures/tetra.ply'
+        # Exercise the production source constructor beyond its former 64-mesh ceiling.
+        capacity_manifest = tmp/'capacity.json'
+        capacity_manifest.write_text(json.dumps({'resources': [{'path': str(mesh)} for _ in range(65)]}))
+        _, capacity_scene = share('--config', capacity_manifest)
+        assert len(capacity_scene['meshes']) == len(capacity_scene['entities']) == 65
+        assert [entity['source'] for entity in capacity_scene['entities']] == [
+            {'kind': 'mesh', 'index': index} for index in range(65)]
+        assert len({entity['id'] for entity in capacity_scene['entities']}) == 65
         markdown = ROOT/'tests/fixtures/review.md'
         # Directory discovery runs on the source machine and yields one normal scene.
         directory = tmp/'directory'; directory.mkdir()
@@ -110,7 +119,6 @@ frame_origins = ["https://example.org"]
         assert cli('share', directory, tmp/'missing', '--format', 'json', ok=False) == ''
         for i in range(257): (empty/f'{i}.txt').write_text('too many')
         assert cli('share', empty, '--format', 'json', ok=False) == ''
-        cli('share', '--config', tmp/'scene.json', '--recursive', ok=False)
         md_token, md_scene = share(markdown)
         assert md_scene['entities'][0]['component'] == 'markdown' and not md_scene['meshes']
         assert api('/'+md_scene['attachments'][0]['url'])[1] == markdown.read_bytes()
@@ -172,6 +180,7 @@ frame_origins = ["https://example.org"]
         cli('share',mesh,'--component','points',ok=False)
         (tmp/'scene.json').write_text(json.dumps({'resources':[{'path':str(mesh),'group':'Geometry'},{'path':'capture.json','component':'example:panel','label':'Timeline','group':'Diagnostics','position':[10,20,30],'size':[120,70]},{'path':str(mesh),'label':'Second','group':'Geometry'}]}))
         token, scene = share('--config',tmp/'scene.json')
+        cli('share', '--config', tmp/'scene.json', '--recursive', ok=False)
         assert [c['group'] for c in scene['entities']] == ['Geometry','Diagnostics','Geometry']
         assert scene['entities'][1]['label'] == 'Timeline'
         assert scene['meshes'][1]['label']['text'] == 'Second'

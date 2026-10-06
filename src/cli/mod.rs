@@ -44,8 +44,13 @@ SCENE CONFIG
 }
 
 RESOURCE FIELDS
-  Scene fields: resources is required; title and groups are optional.
+  Scene fields: resources is required; title, groups and viewport are optional.
   Omit kind and schema_version for this basic scene format.
+  viewport   Optional {"mode":"auto"|"board"|"spatial","board":{"center":[x,y],"scale":n}}.
+             Default mode auto selects a real 2D board for coplanar surface-only
+             world scenes, otherwise spatial. Board scale is CSS px/world unit,
+             finite and positive; center is finite. Explicit board rejects world
+             geometry, spatial plugins and noncoplanar world surfaces.
   path       Required file path or oss://ALIAS/BUCKET/KEY. Config resources are
              explicit files, not directory scans.
   label      Optional display name, 1 to 120 nonblank characters.
@@ -55,6 +60,8 @@ RESOURCE FIELDS
              no absolute paths, empty segments, "." or ".."; no recursive unpack.
              The extracted member is limited to 64 MiB.
   group      Optional flat display group, 1 to 120 nonblank characters.
+  placement  Optional world|panel, default world. Panel pins a surface to the
+             fixed screen-space sidebar, outside world layout/Fit. Not geometry.
   position   Optional [x,y,z] absolute world coordinates, not screen pixels.
              Each number must be finite with absolute value <= 1000000.
   size       Optional [width,height] in world units for surfaces, not geometry.
@@ -118,7 +125,9 @@ PLUGINS AND ADVANCED MANIFESTS
   Plugins may return a versioned resolver manifest, also accepted by --config:
   schema_version: 1; resources: [{id,uri,label?}]; optional title, requires,
   components, panels, attachments and warnings.
-  components: [{id,uri,label,component?,member?,group?,position?,size?}].
+  viewport uses the same state as basic scene config; each collection child
+  can specify viewport independently, including plugin-uri children.
+  components: [{id,uri,label,component?,placement?,member?,group?,position?,size?}].
   panels: [{id,label,members:[RESOURCE_ID,...],group?}], flat geometry assemblies,
   not independent collection scenes. If present, they cover every geometry
   resource; members within one panel are distinct existing resource IDs.
@@ -134,6 +143,26 @@ PLUGINS AND ADVANCED MANIFESTS
   4096 expanded panel members. At least one resource or component is required.
   Manifest uris are local paths or OSS, not nested plugin or HTTP URLs.
   No renderer code or private plugin settings belong in a share manifest.
+
+LIVE VIEWER AND COMPONENT CONTROL
+  The CLI creates and shares scenes. Control a loaded viewer through
+  window.blind.catalog(), execute(operation, params), and subscribe(listener).
+  The catalog declares JSON schemas, permissions and current availability.
+  Browser components use API 1 blind:init and its private MessagePort, with
+  capabilities.host_space and exact capabilities.operations grants.
+  The legacy blind:scene-command transport is removed. Protocol details:
+  https://github.com/hx-w/blind/blob/main/docs/components.md#public-operations
+  https://github.com/hx-w/blind/blob/main/docs/components.md#plugin-components-api-1
+
+DOCUMENTATION
+  CLI configuration and agent output:
+  https://github.com/hx-w/blind/blob/main/docs/cli.md
+  Board viewport and fixed panel placement:
+  https://github.com/hx-w/blind/blob/main/docs/components.md#groups-and-layout
+  Viewer gestures, reading and annotations:
+  https://github.com/hx-w/blind/blob/main/docs/viewer.md
+  Resolver packages and plugin administration:
+  https://github.com/hx-w/blind/blob/main/docs/plugins.md
 
 OUTPUT AND FAILURE CONTRACT
   Use --format json for agents: stdout contains one JSON result on success.
@@ -151,12 +180,36 @@ OUTPUT AND FAILURE CONTRACT
   No Skill, repository checkout or direct Server API call is needed to construct
   the scene and collection inputs described here."#;
 
+const ROOT_HELP: &str = r#"GET STARTED
+  Check connection: blind status --json
+  Local hosting: blind serve
+  Remote registration: blind join --stdin < invitation.json
+  Share read-only sources: blind share model.ply review.md --format json
+
+HELP AND COMMAND GROUPS
+  Use blind --help, blind <command> --help, or -h for brief help.
+  Plugin administration: blind plugin <command> --help
+  Object storage: blind oss <command> --help
+  Background service: blind service <command> --help
+  There is no help subcommand. The Client needs no background process.
+
+COMPLEX SCENES
+  blind share --help gives complete scene/collection JSON fields, examples,
+  limits, plugin discovery, link lifetimes and the agent output/error contract.
+  Generate a config and submit it with blind share --config - --format json.
+
+DOCUMENTATION
+  CLI: https://github.com/hx-w/blind/blob/main/docs/cli.md
+  Viewer operations: https://github.com/hx-w/blind/blob/main/docs/components.md#public-operations
+  Plugins: https://github.com/hx-w/blind/blob/main/docs/plugins.md"#;
+
 #[derive(Parser)]
 #[command(
     name = "blind",
     version,
+    disable_help_subcommand = true,
     about = "Share 3D models, documents and independent scenes through Blind sources",
-    after_help = "GET STARTED\n  Check connection: blind status --json\n  Local hosting: blind serve\n  Remote registration: blind join --stdin < invitation.json\n  Share read-only sources: blind share model.ply review.md --format json\n\nCOMPLEX SCENES\n  blind share --help gives complete scene/collection JSON fields, examples,\n  limits, plugin discovery, link lifetimes and the agent output/error contract.\n  Generate a config and submit it with blind share --config - --format json.\n  Every command has --help. The Client needs no background process."
+    after_help = ROOT_HELP
 )]
 struct Cli {
     #[command(subcommand)]
@@ -184,7 +237,7 @@ enum ClientCommand {
     /// Share files or directories as scene components through the registered Blind server.
     #[command(
         long_about = "Share files or directories as native scene components through the registered Server. PLY/STL/OBJ → mesh, PTS → points, TXT/LOG/JSONL/CSV → text, MD/Markdown → markdown, JSON → json, HTML/HTM → html, PNG/JPEG/WebP/GIF → image, MMD/Mermaid → mermaid, DOT/GV → dot. Files in one scene share a camera and layout; a collection gives each scene independent review state. Use --config for explicit layouts or several scenes. Source files are never edited.",
-        after_help = "Use blind share --help for complete scene/collection JSON schemas, examples and constraints.",
+        after_help = "Use blind share --help for complete scene/collection JSON schemas, examples and constraints.\nConfiguration: https://github.com/hx-w/blind/blob/main/docs/cli.md\nViewer operations: https://github.com/hx-w/blind/blob/main/docs/components.md#public-operations",
         after_long_help = SHARE_HELP
     )]
     Share {

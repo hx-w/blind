@@ -42,3 +42,9 @@ content before atomically registering scenes and snapshot references. See
 [snapshot identity, conflicts and lifecycle](plugins.md#sharing-and-snapshot-storage).
 
 For Agent integration, prefer the [CLI JSON contract](cli.md#agent-interface).
+
+For a running viewer, use the [public operation catalog](components.md#public-operations):
+`window.blind` and the component's private port expose the same typed semantic
+operations used by UI and Collection. This interface operates on loaded scene
+state, with exact operation grants and structured errors; it is not a DOM-control
+or arbitrary HTTP proxy.

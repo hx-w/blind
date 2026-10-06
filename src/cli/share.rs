@@ -25,6 +25,8 @@ const MAX_SHARE_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShareConfig {
+    #[serde(default)]
+    viewport: Option<crate::scene::ViewportState>,
     title: Option<String>,
     resources: Vec<ShareResource>,
     #[serde(default)]
@@ -44,6 +46,8 @@ struct CollectionConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CollectionSceneConfig {
+    #[serde(default)]
+    viewport: Option<crate::scene::ViewportState>,
     id: String,
     title: String,
     resources: Option<Vec<ShareResource>>,
@@ -55,6 +59,8 @@ struct CollectionSceneConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShareResource {
+    #[serde(default)]
+    placement: crate::scene::component::Placement,
     #[serde(default)]
     member: Option<String>,
     path: PathBuf,
@@ -79,6 +85,7 @@ pub struct ParsedLabels {
 }
 
 struct ShareInput {
+    viewport: Option<crate::scene::ViewportState>,
     display: Vec<crate::scene::component::DisplayOptions>,
     manifest: Option<crate::plugin::ShareManifest>,
     meshes: Vec<PathBuf>,
@@ -414,9 +421,15 @@ fn read_share_config(path: &Path) -> Result<SharePlan> {
             );
             validate_collection_name(&part.title)
                 .with_context(|| format!("scenes[{}].title", index + 1))?;
+            if let Some(viewport) = &part.viewport {
+                viewport
+                    .validate(&[])
+                    .with_context(|| format!("scenes[{}].viewport", index + 1))?;
+            }
             let input = match (part.resources, part.uri) {
                 (Some(resources), None) => parse_share_config(
                     ShareConfig {
+                        viewport: part.viewport,
                         title: Some(part.title),
                         resources,
                         groups: part.groups,
@@ -425,6 +438,7 @@ fn read_share_config(path: &Path) -> Result<SharePlan> {
                 ),
                 (None, Some(uri)) if part.groups.is_empty() && crate::plugin::is_plugin(&uri) => {
                     Ok(ShareInput {
+                        viewport: part.viewport,
                         display: Vec::new(),
                         manifest: None,
                         meshes: vec![PathBuf::from(uri)],
@@ -462,6 +476,7 @@ fn read_share_config(path: &Path) -> Result<SharePlan> {
         let mut manifest: crate::plugin::ShareManifest = serde_json::from_value(value)?;
         normalize_manifest(&mut manifest, &base)?;
         return Ok(SharePlan::Scene(Box::new(ShareInput {
+            viewport: None,
             display: Vec::new(),
             meshes: manifest
                 .resources
@@ -498,6 +513,9 @@ fn validate_collection_name(name: &str) -> Result<()> {
 }
 
 fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
+    if let Some(viewport) = &config.viewport {
+        viewport.validate(&[]).context("invalid viewport")?;
+    }
     if config.resources.is_empty() {
         bail!("share config resources must contain at least one item");
     }
@@ -506,6 +524,7 @@ fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
     let mut mesh_labels = Vec::with_capacity(config.resources.len());
     for (index, resource) in config.resources.into_iter().enumerate() {
         let options = crate::scene::component::DisplayOptions {
+            placement: resource.placement,
             component: resource.component,
             member: resource.member,
             group: resource.group,
@@ -582,6 +601,7 @@ fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
         );
     }
     Ok(ShareInput {
+        viewport: config.viewport,
         display,
         manifest: None,
         meshes,
@@ -620,6 +640,7 @@ pub(super) async fn share(
             let labels = parse_labels(&labels, meshes.len())?;
             let display = parse_components(&components, meshes.len())?;
             SharePlan::Scene(Box::new(ShareInput {
+                viewport: None,
                 display,
                 manifest: None,
                 meshes,
@@ -647,7 +668,7 @@ pub(super) async fn share(
                         .map(share_path)
                         .collect::<Result<Vec<_>>>()?
                 };
-                scenes.push(json!({"id":part.id,"title":input.title,"paths":paths,"manifest":input.manifest,"display":input.display,"labels":input.labels.meshes,"label_groups":input.labels.groups}));
+                scenes.push(json!({"id":part.id,"title":input.title,"viewport":input.viewport,"paths":paths,"manifest":input.manifest,"display":input.display,"labels":input.labels.meshes,"label_groups":input.labels.groups}));
             }
             crate::plugin::validate_bundle_set(&renderers.bundles)?;
             let payload = api(&c.server, "/api/v1/client/scenes", &c.credential, Some(json!({
@@ -679,7 +700,7 @@ pub(super) async fn share(
             paths.len()
         );
     }
-    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"display":input.display,"renderers":&renderers.bundles,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"ttl_days":ttl_days}))).await?;
+    let payload=api(&c.server,"/api/v1/client/scenes",&c.credential,Some(json!({"viewport":input.viewport,"display":input.display,"renderers":&renderers.bundles,"paths":if input.manifest.is_some(){Vec::<String>::new()}else{paths},"manifest":input.manifest,"title":input.title,"labels":input.labels.meshes,"label_groups":input.labels.groups,"origin":host,"ttl_days":ttl_days}))).await?;
     print_share_payload(payload, format, ttl_days)
 }
 
@@ -808,6 +829,106 @@ pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scene_collection_and_manifest_configs_carry_board_viewport_and_panel_placement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let viewport = json!({"mode":"board","board":{"center":[12.5,-7.25],"scale":2.75}});
+        let resource = json!({"path":"report.md","placement":"panel","size":[120,90]});
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "viewport":viewport,"resources":[resource]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let SharePlan::Scene(input) = read_share_config(&path).unwrap() else {
+            panic!("expected scene");
+        };
+        assert_eq!(
+            input.viewport.as_ref().unwrap().mode,
+            crate::scene::ViewportMode::Board
+        );
+        assert_eq!(
+            input
+                .viewport
+                .as_ref()
+                .unwrap()
+                .board
+                .as_ref()
+                .unwrap()
+                .center,
+            [12.5, -7.25]
+        );
+        assert_eq!(
+            input.display[0].placement,
+            crate::scene::component::Placement::Panel
+        );
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "kind":"collection","schema_version":1,"title":"Review","scenes":[
+                    {"id":"board","title":"Board","viewport":viewport,"resources":[resource]},
+                    {"id":"plugin","title":"Plugin","viewport":viewport,"uri":"example://report"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let SharePlan::Collection(input) = read_share_config(&path).unwrap() else {
+            panic!("expected collection");
+        };
+        for part in &input.scenes {
+            assert_eq!(
+                part.input
+                    .viewport
+                    .as_ref()
+                    .unwrap()
+                    .board
+                    .as_ref()
+                    .unwrap()
+                    .scale,
+                2.75
+            );
+        }
+        assert_eq!(
+            input.scenes[0].input.display[0].placement,
+            crate::scene::component::Placement::Panel
+        );
+        fs::write(&path, serde_json::to_vec(&json!({
+            "schema_version":1,"requires":["components.v1"],"viewport":viewport,
+            "resources":[],"components":[{"id":"report","label":"Report","uri":"report.md","placement":"panel"}]
+        })).unwrap()).unwrap();
+        let SharePlan::Scene(input) = read_share_config(&path).unwrap() else {
+            panic!("expected manifest");
+        };
+        let manifest = input.manifest.unwrap();
+        assert_eq!(manifest.viewport.mode, crate::scene::ViewportMode::Board);
+        assert_eq!(
+            manifest.components[0].display.placement,
+            crate::scene::component::Placement::Panel
+        );
+        for scale in [0., -1.] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "viewport":{"mode":"board","board":{"center":[0,0],"scale":scale}},
+                    "resources":[{"path":"report.md"}]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            assert!(read_share_config(&path).is_err());
+        }
+        fs::write(
+            &path,
+            br#"{"resources":[{"path":"mesh.ply","component":"mesh","placement":"panel"}]}"#,
+        )
+        .unwrap();
+        assert!(read_share_config(&path).is_err());
+    }
     #[test]
     fn versioned_manifest_normalizes_every_local_source_and_rejects_nested_uris() {
         let directory = tempfile::tempdir().unwrap();

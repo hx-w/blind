@@ -1,5 +1,6 @@
 import type {ContentMark, ContentState, NativeContent} from './content-surface';
 import {validateContentState} from './content-reading';
+import {OperationError} from './operations/core';
 
 const svgNS = 'http://www.w3.org/2000/svg';
 const copy = (marks: readonly ContentMark[]): ContentMark[] => marks.map(mark => ({...mark, anchors: mark.anchors.map(anchor => ({...anchor}))}));
@@ -29,23 +30,23 @@ export class ContentAnnotations {
   private readonly resize: ResizeObserver;
   private readonly mutation: MutationObserver;
   get active(): boolean { return this.enabled; }
-  constructor(private readonly native: NativeContent, private readonly state: ContentState, private readonly body: HTMLElement, private readonly changed: () => void) {
+  constructor(private readonly native: NativeContent, private readonly state: ContentState, private readonly body: HTMLElement, private readonly changed: () => void, private readonly transact: (mutation: () => void) => void = mutation => mutation()) {
     validateContentState(state);
     this.overlay.classList.add('content-marks'); this.overlay.setAttribute('aria-hidden', 'true'); body.append(this.overlay);
     this.tools.className = 'content-annotation-tools'; this.tools.hidden = true; this.tools.setAttribute('aria-label', '内容标注');
     const modes = document.createElement('div'); modes.className = 'content-tool-row';
     for (const [kind, label] of [['point', '点'], ['line', '线']] as const) {
-      const button = action(label, () => { this.kind = kind; this.pending = undefined; this.updateModes(); this.native.scroll.focus({preventScroll: true}); });
+      const button = action(label, () => { this.setTool(kind); this.native.scroll.focus({preventScroll: true}); });
       button.setAttribute('aria-pressed', String(this.kind === kind)); modes.append(button); this.modes.push(button);
     }
     modes.append(action('完成标注', () => this.close()));
     this.status.className = 'content-mark-status'; this.status.setAttribute('role', 'status'); this.status.setAttribute('aria-live', 'polite');
-    this.label.type = 'text'; this.label.placeholder = '标注名称'; this.label.setAttribute('aria-label', '标注名称'); this.label.maxLength = 160;
+    this.label.type = 'text'; this.label.placeholder = '标注名称'; this.label.setAttribute('aria-label', '标注名称'); this.label.maxLength = 120;
     this.label.addEventListener('change', () => this.editSelected());
     this.color.type = 'color'; this.color.value = '#ff6b5e'; this.color.setAttribute('aria-label', '标注颜色'); this.color.addEventListener('change', () => this.editSelected());
     const fields = document.createElement('div'); fields.className = 'content-tool-row'; fields.append(this.label, this.color);
-    this.deleteButton = action('删除', () => { if (this.selected) this.commit((this.state.marks ?? []).filter(mark => mark.id !== this.selected)); this.selected = undefined; this.refreshTools(); });
-    this.undoButton = action('撤销', () => this.history(this.past, this.future)); this.redoButton = action('重做', () => this.history(this.future, this.past));
+    this.deleteButton = action('删除', () => { if (this.selected) this.remove(this.selected); });
+    this.undoButton = action('撤销', () => this.undo()); this.redoButton = action('重做', () => this.redo());
     const history = document.createElement('div'); history.className = 'content-tool-row'; history.append(this.deleteButton, this.undoButton, this.redoButton);
     this.list.className = 'content-mark-list'; this.list.setAttribute('aria-label', '已有内容标注');
     this.tools.append(modes, fields, history, this.status, this.list);
@@ -54,9 +55,17 @@ export class ContentAnnotations {
     this.mutation = new MutationObserver(this.schedule); this.mutation.observe(native.scroll, {subtree: true, childList: true, attributes: true, characterData: true});
     this.refreshTools(); this.schedule();
   }
-  open(): void { this.enabled = true; this.tools.hidden = false; this.native.setSelection(false); this.cursor = {x: this.native.scroll.clientWidth / 2, y: this.native.scroll.clientHeight / 2}; this.updateModes(); this.schedule(); }
-  close(): void { this.enabled = false; this.tools.hidden = true; this.pending = undefined; this.cursor = undefined; this.schedule(); }
-  cancel(): void { this.pending = undefined; this.schedule(); }
+  open(): void {
+    this.enabled = true; this.tools.hidden = false; this.native.setSelection(false);
+    this.cursor = {x: this.native.scroll.clientWidth / 2, y: this.native.scroll.clientHeight / 2};
+    this.updateModes(); this.schedule(); this.changed();
+  }
+  close(): void {
+    const changed = this.enabled || !!this.pending;
+    this.enabled = false; this.tools.hidden = true; this.pending = undefined; this.cursor = undefined; this.schedule();
+    if (changed) this.changed();
+  }
+  cancel(): void { if (!this.pending) return; this.pending = undefined; this.schedule(); this.changed(); }
   begin(x: number, y: number): void {
     const anchor = this.native.hit(x, y); if (!anchor) return;
     const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
@@ -78,13 +87,58 @@ export class ContentAnnotations {
     this.schedule();
   }
   refresh(): void { this.refreshTools(); this.schedule(); }
+  get toolbarState() { return {active: this.enabled, kind: this.kind, selected: this.selected ?? null, label: this.label.value, color: this.color.value, canUndo: !!this.past.length, canRedo: !!this.future.length}; }
+  setTool(kind: 'point' | 'line', label?: string, color?: string): void {
+    if (color !== undefined && !/^#[0-9a-f]{6}$/i.test(color)) throw new OperationError('INVALID_ARGUMENT', 'Expected hex color', {field: 'color'});
+    this.kind = kind; this.pending = undefined;
+    if (label !== undefined) this.label.value = label;
+    if (color !== undefined) this.color.value = color;
+    this.updateModes(); this.changed();
+  }
+  create(mark: Omit<ContentMark, 'id'>): ContentMark {
+    const value = {...mark, id: crypto.randomUUID(), anchors: mark.anchors.map(anchor => ({...anchor}))};
+    try { validateContentState({...this.state, marks: [...(this.state.marks ?? []), value]}); }
+    catch (error) { throw new OperationError('INVALID_ARGUMENT', error instanceof Error ? error.message : String(error)); }
+    if (!value.anchors.every(anchor => this.native.acceptsAnchor?.(anchor) ?? !!this.native.locate(anchor))) throw new OperationError('INVALID_ARGUMENT', 'Anchor does not belong to available source content', {field: 'anchors'});
+    this.selected = value.id;
+    if (!this.commit([...(this.state.marks ?? []), value])) throw new OperationError('INVALID_ARGUMENT', 'Invalid content annotation');
+    this.refreshTools(); return structuredClone(value);
+  }
+  select(id: string): void {
+    const mark = this.state.marks?.find(mark => mark.id === id);
+    if (!mark) throw new OperationError('INVALID_ARGUMENT', 'Unknown content annotation', {target: id});
+    this.transact(() => { this.selected = id; this.native.restore(mark.anchors[0]); this.changed(); this.refreshTools(); this.schedule(); });
+  }
+  edit(id: string, changes: {label?: string; color?: string}): void {
+    if (!this.state.marks?.some(mark => mark.id === id)) throw new OperationError('INVALID_ARGUMENT', 'Unknown content annotation', {target: id});
+    const marks = this.state.marks.map(mark => mark.id === id ? {...mark, ...changes} : mark);
+    if (!this.commit(marks)) throw new OperationError('INVALID_ARGUMENT', 'Invalid content annotation');
+  }
+  remove(id: string): void {
+    if (!this.state.marks?.some(mark => mark.id === id)) throw new OperationError('INVALID_ARGUMENT', 'Unknown content annotation', {target: id});
+    const marks = this.state.marks.filter(mark => mark.id !== id);
+    try { validateContentState({...this.state, marks}); }
+    catch (error) { throw new OperationError('INVALID_ARGUMENT', error instanceof Error ? error.message : String(error)); }
+    if (this.selected === id) this.selected = undefined;
+    if (!this.commit(marks)) throw new OperationError('INVALID_ARGUMENT', 'Invalid content annotations');
+    this.refreshTools();
+  }
+  clear(): void {
+    if (!this.state.marks?.length) return;
+    try { validateContentState({...this.state, marks: []}); }
+    catch (error) { throw new OperationError('INVALID_ARGUMENT', error instanceof Error ? error.message : String(error)); }
+    this.selected = undefined; this.commit([]); this.refreshTools();
+  }
+  undo(): void { this.history(this.past, this.future); }
+  redo(): void { this.history(this.future, this.past); }
   private updateModes(): void {
     this.modes[0].setAttribute('aria-pressed', String(this.kind === 'point')); this.modes[1].setAttribute('aria-pressed', String(this.kind === 'line'));
     this.status.textContent = this.kind === 'point' ? '点击内容放置点。键盘方向键定位，Enter 放置。' : '拖动内容绘制线。键盘方向键定位，Enter 设置起点和终点。';
   }
   private editSelected(): void {
     if (!this.selected) return;
-    this.commit((this.state.marks ?? []).map(mark => mark.id === this.selected ? {...mark, label: this.label.value.trim() || mark.label, color: this.color.value} : mark));
+    try { this.edit(this.selected, {label: this.label.value.trim() || this.state.marks?.find(mark => mark.id === this.selected)?.label, color: this.color.value}); }
+    catch (error) { if (!(error instanceof OperationError)) throw error; }
   }
   private accepts(marks: ContentMark[]): boolean {
     try { validateContentState({...this.state, marks}); return true; }
@@ -118,7 +172,7 @@ export class ContentAnnotations {
       const valid = mark.anchors.length > 0 && mark.anchors.every(anchor => !!this.native.locate(anchor));
       const item = action(mark.label, () => {
         // restore performs source checking before resolving lazy JSON targets.
-        this.selected = mark.id; this.native.restore(mark.anchors[0]); this.changed(); this.refreshTools(); this.schedule();
+        this.select(mark.id);
       });
       item.setAttribute('aria-pressed', String(mark.id === this.selected)); item.dataset.locatable = String(valid);
       if (!valid) item.title = '源内容已变化或目标当前不可见';
@@ -137,7 +191,7 @@ export class ContentAnnotations {
     } else if (event.key === 'Enter') {
       event.preventDefault(); event.stopPropagation(); if (this.pending) this.end(); else { this.begin(cursor.x, cursor.y); if (this.kind === 'point') this.end(); }
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
-      event.preventDefault(); event.stopPropagation(); this.history(event.shiftKey ? this.future : this.past, event.shiftKey ? this.past : this.future);
+      event.preventDefault(); event.stopPropagation(); if (event.shiftKey) this.redo(); else this.undo();
     }
   };
   private schedule = (): void => { if (!this.frame) this.frame = requestAnimationFrame(() => { this.frame = 0; this.draw(); }); };

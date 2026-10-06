@@ -10,6 +10,7 @@ import { MeshLabels } from './labels';
 import { SurfaceInk } from './surface-render';
 import type { SurfaceAnnotation, Vec3 } from './api';
 import { mapConcurrent } from './load-queue';
+import { OperationError } from './operations/core';
 import shader from '../../shaders/matte.json';
 
 const LOAD_CONCURRENCY = 4;
@@ -50,8 +51,24 @@ export interface MeshLoadProgress {
   rawFallbacks: number;
   failed: number;
 }
+export interface SectionSource {
+  object: THREE.Object3D;
+  bounds: THREE.Box3;
+  revision: string;
+  name: string;
+  entityId: string;
+}
 
 export class MeshViewer {
+  readonly kind = 'spatial' as const;
+  private styleBatchDepth = 0;
+  private pendingMaterials = false;
+  private pendingLayout = false;
+  private pendingModelChange = false;
+  private transition: Promise<'committed' | 'interrupted'> = Promise.resolve('committed');
+  private finishTransition?: (status: 'committed' | 'interrupted') => void;
+  private reservedRight = 0;
+  private readonly labelRoot = document.createElement('div');
   private readonly scene = new THREE.Scene();
   private readonly surfaceInk = new SurfaceInk();
   private annotationSelection?: string;
@@ -79,6 +96,15 @@ export class MeshViewer {
       this.frameRequested = true;
       requestAnimationFrame(this.animate);
     }
+  }
+  get viewportWidth(): number { return Math.max(this.root.clientWidth - this.reservedRight, 1); }
+  setReservedSpace(right: number): void {
+    const reservedRight = Math.max(0, Math.min(right, this.root.clientWidth - 1));
+    if (reservedRight === this.reservedRight) return;
+    this.onViewChangeStart?.();
+    this.reservedRight = reservedRight;
+    this.labels.invalidateLayout(); this.resize();
+    this.onViewChangeEnd?.();
   }
   navigatePointer(event: PointerEvent): void { this.renderer.domElement.dispatchEvent(new PointerEvent('pointerdown', event)); }
   navigateWheel(event: WheelEvent): void { this.renderer.domElement.dispatchEvent(new WheelEvent('wheel', event)); }
@@ -141,13 +167,34 @@ export class MeshViewer {
     model.bounds.setFromObject(model.object); this.labels.invalidateLayout(); this.relayout();
   }
   setMeshOpacity(index: number, opacity: number): void {
-    const model = this.models[index]; if (!model) return;
+    const model = this.models[index]; if (!model || model.info.opacity === opacity) return;
     const wasVisible = model.info.opacity > 0;
     model.info.opacity = opacity; this.applyMaterials();
-    if (wasVisible !== (opacity > 0)) this.onModelChange?.();
+    if (wasVisible !== (opacity > 0)) this.relayout();
+    this.modelChanged();
   }
-  setComponentBounds(bounds: THREE.Box3): void { this.componentBounds.copy(bounds); this.relayout(); }
-  focusBounds(bounds: THREE.Box3): void { if (!bounds.isEmpty()) this.fitBox(bounds, false); }
+  batchStyles<T>(apply: () => T): T {
+    this.styleBatchDepth++;
+    try { return apply(); }
+    finally {
+      if (--this.styleBatchDepth === 0) {
+        const materials = this.pendingMaterials, layout = this.pendingLayout, changed = this.pendingModelChange;
+        this.pendingMaterials = this.pendingLayout = this.pendingModelChange = false;
+        if (materials) this.applyMaterials();
+        if (layout) this.relayout();
+        if (changed) this.onModelChange?.();
+      }
+    }
+  }
+  private modelChanged(): void {
+    if (this.styleBatchDepth) this.pendingModelChange = true;
+    else this.onModelChange?.();
+  }
+  setComponentBounds(bounds: THREE.Box3): void {
+    if (this.componentBounds.equals(bounds)) return;
+    this.componentBounds.copy(bounds); this.relayout();
+  }
+  focusBounds(bounds: THREE.Box3, animate = false): void { if (!bounds.isEmpty()) this.fitBox(bounds, animate); }
 
   private readonly rendererSize = new THREE.Vector2();
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
@@ -162,9 +209,11 @@ export class MeshViewer {
   private pointerStart: { x: number; y: number } | null = null;
   private lastTap = { index: -1, time: 0 };
   onSelectionChange?: (index: number) => void;
+  onEntityFocus?: (ids: readonly string[], animate: boolean) => void;
   onModelChange?: () => void;
   onLoadProgress?: (progress: MeshLoadProgress) => void;
   onViewChangeStart?: () => void;
+  onViewChangeEnd?: () => void;
   onRender?: () => void;
 
   constructor(private readonly root: HTMLElement) {
@@ -173,7 +222,16 @@ export class MeshViewer {
     this.renderer.toneMapping = THREE.NoToneMapping;
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.root.append(this.renderer.domElement);
-    this.labels = new MeshLabels(this.root, (meshes, animate) => this.focusLabelGroup(meshes, animate));
+    Object.assign(this.labelRoot.style, {position: 'absolute', left: '0', top: '0', height: '100%', pointerEvents: 'none'});
+    this.root.append(this.labelRoot);
+    this.labels = new MeshLabels(this.labelRoot, (meshes, animate) => {
+      const ids: string[] = [];
+      for (const index of meshes) {
+        const id = this.entityIdsByMesh.get(index);
+        if (id !== undefined) ids.push(id);
+      }
+      if (ids.length) this.onEntityFocus?.(ids, animate);
+    });
     this.camera = this.perspective;
     this.camera.position.fromArray(shader.camera.default_view_direction);
     this.raycaster.firstHitOnly = true;
@@ -196,6 +254,7 @@ export class MeshViewer {
     this.renderer.domElement.addEventListener('pointerup', this.pointerUp);
     this.controls.addEventListener('start', () => { this.cancelFit(); this.prepareOrbit(); this.onViewChangeStart?.(); });
     this.controls.addEventListener('change', () => { this.updateClipping(); this.invalidate(); });
+    this.controls.addEventListener('end', () => { this.onViewChangeEnd?.(); });
     this.invalidate();
   }
 
@@ -272,19 +331,23 @@ export class MeshViewer {
   get selectedModel(): ViewerMesh | undefined { return this.models[this.selected]?.info; }
   get modelInfos(): ViewerMesh[] { return this.models.map((model) => model.info); }
   get currentState(): ViewState { return this.exportState(); }
-  sectionSource(index: number): {object: THREE.Object3D; bounds: THREE.Box3; revision: string; name: string; entityId: string} | null {
+  getMeshIndex(entityId: string): number | undefined {
+    for (const [index, id] of this.entityIdsByMesh) if (id === entityId) return index;
+    return undefined;
+  }
+  sectionSource(index: number): SectionSource | null {
     const model = this.models[index];
     return model && this.hasSurface(index)
       ? {object: model.object, bounds: model.bounds.clone(), revision: model.info.revision, name: model.info.label?.text ?? model.info.name, entityId: this.entityIdsByMesh.get(index) ?? `mesh-${index}`}
       : null;
   }
-  sectionTarget(index: number): ReturnType<MeshViewer['sectionSource']> {
+  sectionTarget(index: number): SectionSource | null {
     const info = this.models[index]?.info;
     return info?.visible && info.opacity > 0 ? this.sectionSource(index) : null;
   }
   sectionPick(index: number, x: number, y: number): THREE.Vector3 | null {
     const target = this.sectionTarget(index); if (!target) return null;
-    const rect = this.root.getBoundingClientRect();
+    const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2);
     this.raycaster.setFromCamera(this.pointer, this.camera);
     return this.raycaster.intersectObject(target.object, true)[0]?.point.clone() ?? null;
@@ -357,11 +420,11 @@ export class MeshViewer {
     return found;
   }
   projectSurface(point: Vec3): {x: number; y: number; visible: boolean} {
-    const p = new THREE.Vector3(...point).project(this.camera), rect = this.root.getBoundingClientRect();
+    const p = new THREE.Vector3(...point).project(this.camera), rect = this.renderer.domElement.getBoundingClientRect();
     return { x: rect.left + (p.x + 1) * rect.width / 2, y: rect.top + (1 - p.y) * rect.height / 2, visible: p.z > -1 && p.z < 1 };
   }
   pickSurface(x: number, y: number, target?: number): {point: Vec3; normal: Vec3; mesh: number} | null {
-    const rect = this.root.getBoundingClientRect();
+    const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2);
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const hit = this.raycaster.intersectObjects(this.models.filter(m => m.info.visible && m.info.opacity > 0).map(m => m.object), true)[0];
@@ -372,7 +435,7 @@ export class MeshViewer {
     // Input must follow painted coverage, including wireframe gaps and points.
     // Sample geometry alone before the content plane; DOM backdrops and holes
     // must not count as occluders. Annotation picking remains triangle based.
-    const rect = this.root.getBoundingClientRect();
+    const rect = this.renderer.domElement.getBoundingClientRect();
     const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
     const px = Math.floor((x - rect.left) / rect.width * size.x);
     const py = Math.floor((y - rect.top) / rect.height * size.y);
@@ -411,7 +474,7 @@ export class MeshViewer {
   }
   focusAnnotation(mark: SurfaceAnnotation): void {
     const i = Math.floor(mark.points.length / 2), point = mark.points[i];
-    const screen = this.projectSurface(point), rect = this.root.getBoundingClientRect();
+    const screen = this.projectSurface(point), rect = this.renderer.domElement.getBoundingClientRect();
     if (this.surfacePointVisible(point, mark.mesh) && screen.x > rect.left+40 && screen.x < rect.right-40 && screen.y > rect.top+90 && screen.y < rect.bottom-280) return;
     this.onViewChangeStart?.();
     const anchor = new THREE.Vector3(...point), normal = new THREE.Vector3(...mark.normals[i]).normalize();
@@ -440,7 +503,7 @@ export class MeshViewer {
     model.info.visible = visible;
     model.object.visible = visible;
     this.relayout();
-    this.onModelChange?.();
+    this.modelChanged();
   }
 
   private readonly qualityLoads = new Map<number, Promise<void>>();
@@ -483,7 +546,7 @@ export class MeshViewer {
 
   setMeshColor(index: number, color: string): void {
     const model = this.models[index]; if (!model || model.info.color === color) return;
-    model.info.color = color; this.applyMaterials(); this.onModelChange?.();
+    model.info.color = color; this.applyMaterials(); this.modelChanged();
   }
   setLabelAt(index: number, text: string): void {
     const model = this.models[index];
@@ -493,7 +556,7 @@ export class MeshViewer {
   }
 
   refreshLabels(): void { this.labels.invalidateLayout(); this.invalidate(); }
-  setOpacity(opacity: number): void { const model = this.models[this.selected]; if (model) { model.info.opacity = opacity; this.applyMaterials(); this.onModelChange?.(); } }
+  setOpacity(opacity: number): void { this.setMeshOpacity(this.selected, opacity); }
   setShading(shading: ViewState['shading']): void { this.state.shading = shading; this.applyMaterials(); }
   get renderMode(): RenderMode { return this.state.render_mode ?? 'matte'; }
   get lightSettings(): LightSettings { return {...(this.state.light ?? {azimuth: 45, elevation: 20, intensity: 1})}; }
@@ -530,24 +593,46 @@ export class MeshViewer {
     this.resize(); this.syncCamera();
   }
 
+  get hasVisibleContent(): boolean { return !this.visibleBounds.isEmpty(); }
+  waitForViewTransition(): Promise<'committed' | 'interrupted'> { return this.transition; }
+  setCamera(camera: NonNullable<ViewState['camera']>): void {
+    this.cancelFit(); this.onViewChangeStart?.(); this.restoreCamera({...this.state, camera});
+  }
+  pan(delta: readonly [number, number]): void {
+    this.cancelFit(); this.onViewChangeStart?.();
+    const pose = this.captureCameraPose();
+    const units = this.sectionWorldPerPixel(pose.target);
+    const shift = new THREE.Vector3(-delta[0] * units, delta[1] * units, 0).applyQuaternion(this.camera.quaternion);
+    this.camera.position.add(shift); this.controls.target.copy(pose.target).add(shift); this.camera.up.copy(pose.up);
+    this.syncCamera();
+  }
+  zoom(factor: number, anchor?: readonly [number, number]): void {
+    if (!Number.isFinite(factor) || factor <= 0) throw new OperationError('INVALID_ARGUMENT', 'Zoom factor must be finite and positive', {field: 'factor'});
+    if (this.camera instanceof THREE.OrthographicCamera && (this.camera.zoom * factor < .01 || this.camera.zoom * factor > 100)) throw new OperationError('INVALID_ARGUMENT', 'Zoom would exceed the supported spatial magnification range', {field: 'factor'});
+    const pose = this.captureCameraPose(), rect = this.renderer.domElement.getBoundingClientRect();
+    const before = this.sectionWorldPerPixel(pose.target), after = before / factor;
+    const x = anchor ? anchor[0] - rect.left - rect.width / 2 : 0;
+    const y = anchor ? rect.height / 2 - (anchor[1] - rect.top) : 0;
+    const shift = new THREE.Vector3(x * (before - after), y * (before - after), 0).applyQuaternion(this.camera.quaternion);
+    if (!(this.camera instanceof THREE.OrthographicCamera)) pose.position.sub(pose.target).divideScalar(factor).add(pose.target);
+    for (let i = 0; i < 3; i++) if (!Number.isFinite(pose.position.getComponent(i) + shift.getComponent(i)) || !Number.isFinite(pose.target.getComponent(i) + shift.getComponent(i))) throw new OperationError('INVALID_ARGUMENT', 'Zoom would exceed finite camera coordinates', {field: 'factor'});
+    this.cancelFit(); this.onViewChangeStart?.();
+    if (this.camera instanceof THREE.OrthographicCamera) this.camera.zoom *= factor;
+    this.camera.position.copy(pose.position).add(shift); this.controls.target.copy(pose.target).add(shift); this.camera.up.copy(pose.up);
+    this.camera.updateProjectionMatrix(); this.syncCamera();
+  }
+  rotate(axis: readonly [number, number, number], angle: number): void {
+    const magnitude = Math.max(Math.abs(axis[0]), Math.abs(axis[1]), Math.abs(axis[2]));
+    if (!Number.isFinite(magnitude) || magnitude === 0 || !Number.isFinite(angle)) throw new OperationError('INVALID_ARGUMENT', 'Rotation requires a finite nonzero axis and finite angle', {field: 'axis'});
+    this.cancelFit(); this.onViewChangeStart?.();
+    const pose = this.captureCameraPose();
+    const rotation = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(axis[0] / magnitude, axis[1] / magnitude, axis[2] / magnitude).normalize(), angle);
+    this.camera.position.sub(pose.target).applyQuaternion(rotation).add(pose.target);
+    this.camera.up.copy(pose.up).applyQuaternion(rotation); this.controls.target.copy(pose.target); this.syncCamera();
+  }
   fitAll(animate = true): void {
     if (this.visibleBounds.isEmpty()) return;
     this.fitBox(this.visibleBounds, animate);
-  }
-
-  focusSelected(): void {
-    const model = this.models[this.selected];
-    if (!model) return;
-    this.fitBox(model.bounds, true);
-  }
-
-  focusLabelGroup(indices: number[], animate = true): void {
-    const bounds = new THREE.Box3();
-    for (const index of indices) {
-      const model = this.models[index];
-      if (model?.info.visible) bounds.union(model.bounds);
-    }
-    if (!bounds.isEmpty()) this.fitBox(bounds, animate);
   }
 
   setCanonicalView(code: string): void {
@@ -561,6 +646,7 @@ export class MeshViewer {
     };
     const direction = directions[code]; if (!direction) return;
     this.onViewChangeStart?.();
+    this.cancelFit();
     this.camera.position.copy(center).addScaledVector(direction, distance);
     this.camera.up.set(0, 1, 0);
     if (Math.abs(direction.y) > 0.9) this.camera.up.set(0, 0, direction.y > 0 ? -1 : 1);
@@ -576,7 +662,8 @@ export class MeshViewer {
   }
 
   resize(): void {
-    const width = Math.max(this.root.clientWidth, 1); const height = Math.max(this.root.clientHeight, 1); const aspect = width / height;
+    const width = this.viewportWidth; const height = Math.max(this.root.clientHeight, 1); const aspect = width / height;
+    this.renderer.domElement.style.width = `${width}px`; this.labelRoot.style.width = `${width}px`;
     this.perspective.aspect = aspect; this.perspective.updateProjectionMatrix();
     const orthographicHeight = this.orthographic.userData.height ?? 2;
     this.orthographic.left = -orthographicHeight * aspect / 2; this.orthographic.right = orthographicHeight * aspect / 2;
@@ -596,6 +683,7 @@ export class MeshViewer {
 
   // Refresh the derived view state after a model's geometry or visibility changes.
   private relayout(): void {
+    if (this.styleBatchDepth) { this.pendingLayout = true; return; }
     this.refreshVisibleBounds();
     this.resizeHelpers();
     this.prepareOrbit();
@@ -647,6 +735,7 @@ export class MeshViewer {
   }
 
   private applyMaterials(): void {
+    if (this.styleBatchDepth) { this.pendingMaterials = true; return; }
     this.models.forEach((model) => model.object.traverse((child) => {
       if (!isDrawable(child)) return;
       updateObjectMaterial(child, {
@@ -675,6 +764,7 @@ export class MeshViewer {
     return {
       selected: this.selected, focused_component_id: this.state.focused_component_id, shading: this.state.shading, render_mode: this.renderMode, light: this.lightSettings, projection: this.state.projection,
       background: this.state.background, axes: this.axes.visible,
+      viewport: this.state.viewport,
       frame: { width: Math.round(this.root.clientWidth), height: Math.round(this.root.clientHeight) },
       camera: {
         position: cameraPose.position.toArray() as [number, number, number],
@@ -701,6 +791,9 @@ export class MeshViewer {
   private cancelFit(): void {
     if (this.fitAnimation !== undefined) cancelAnimationFrame(this.fitAnimation);
     this.fitAnimation = undefined;
+    this.finishTransition?.('interrupted');
+    this.finishTransition = undefined;
+    this.transition = Promise.resolve('committed');
   }
 
   private fitBox(box: THREE.Box3, animate: boolean): void {
@@ -711,7 +804,7 @@ export class MeshViewer {
     const direction = this.camera.getWorldDirection(new THREE.Vector3()).negate();
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(this.camera.quaternion);
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(this.camera.quaternion);
-    const aspect = Math.max(this.root.clientWidth / Math.max(this.root.clientHeight, 1), 0.1);
+    const aspect = Math.max(this.viewportWidth / Math.max(this.root.clientHeight, 1), 0.1);
     const fov = shader.camera.fov_degrees;
     const verticalFov = THREE.MathUtils.degToRad(fov);
     const horizontalFov = 2 * Math.atan(Math.tan(verticalFov / 2) * aspect);
@@ -733,11 +826,14 @@ export class MeshViewer {
     };
     if (animate && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
       const start = performance.now();
+      const completion = Promise.withResolvers<'committed' | 'interrupted'>();
+      this.transition = completion.promise; this.finishTransition = completion.resolve;
       apply(0);
       const tick = (now: number) => {
         const t = Math.min((now - start) / 260, 1);
         apply(1 - Math.pow(1 - t, 4));
         this.fitAnimation = t < 1 ? requestAnimationFrame(tick) : undefined;
+        if (t === 1) { this.finishTransition?.('committed'); this.finishTransition = undefined; }
       };
       this.fitAnimation = requestAnimationFrame(tick);
     } else apply(1);
@@ -805,7 +901,7 @@ export class MeshViewer {
   // Refresh the cached joint bounds; only visibility and model changes alter them.
   private refreshVisibleBounds(): void {
     this.visibleBounds.copy(this.componentBounds);
-    for (const model of this.models) if (model.info.visible) this.visibleBounds.union(model.bounds);
+    for (const model of this.models) if (model.info.visible && model.info.opacity > 0) this.visibleBounds.union(model.bounds);
   }
   private resizeHelpers(): void {
     const box = this.visibleBounds; if (box.isEmpty()) return; const size = Math.max(box.getSize(new THREE.Vector3()).length(), 0.001);
@@ -832,7 +928,11 @@ export class MeshViewer {
     const hit = this.raycaster.intersectObjects(this.models.filter(model => model.info.visible && model.info.opacity > 0).map(model => model.object), true)[0];
     const index = hit?.object.userData.modelIndex as number | undefined;
     if (index === undefined) return;
-    const now = performance.now(); if (this.lastTap.index === index && now - this.lastTap.time < 320) this.focusSelected();
+    const now = performance.now();
+    if (this.lastTap.index === index && now - this.lastTap.time < 320) {
+      const id = this.entityIdsByMesh.get(index);
+      if (id !== undefined) this.onEntityFocus?.([id], true);
+    }
     this.lastTap = { index, time: now }; this.select(index);
   };
   private disposeModels(): void { for (const model of this.models) { this.scene.remove(model.object); disposeObject(model.object); } this.models = []; }
@@ -840,7 +940,7 @@ export class MeshViewer {
     this.frameRequested = false;
     if (!this.dirty) return;
     this.dirty = false;
-    const width = Math.max(this.root.clientWidth, 1); const height = Math.max(this.root.clientHeight, 1);
+    const width = this.viewportWidth; const height = Math.max(this.root.clientHeight, 1);
     this.renderer.getSize(this.rendererSize);
     // Resizing clears the drawing buffer, even at the same size. Do it only
     // when needed, immediately before rendering, never in ResizeObserver.

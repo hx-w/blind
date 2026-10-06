@@ -28,6 +28,8 @@ pub struct ShareResponse {
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateSceneRequest {
     #[serde(default)]
+    pub(super) viewport: Option<crate::scene::ViewportState>,
+    #[serde(default)]
     pub(super) collection: Option<CreateCollectionRequest>,
     #[serde(default)]
     pub(super) display: Vec<crate::scene::component::DisplayOptions>,
@@ -55,6 +57,8 @@ pub(super) struct CreateCollectionRequest {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateCollectionPart {
+    #[serde(default)]
+    pub(super) viewport: Option<crate::scene::ViewportState>,
     pub(super) id: String,
     pub(super) title: String,
     #[serde(default)]

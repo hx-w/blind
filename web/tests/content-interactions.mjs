@@ -32,8 +32,13 @@ async function state(url) {
   assert.equal(response.status, 200);
   return response.json();
 }
+async function operation(page, name, params = {}) {
+  const result = await page.evaluate(({name, params}) => window.blind.execute(name, params), {name, params});
+  assert.equal(result.ok, true, JSON.stringify(result.error));
+  return result.value;
+}
 
-test('source-anchored spatial reading survives dragging, fullscreen reflow and real reshare', {timeout:180000}, async () => {
+test('source-anchored board reading survives dragging, fullscreen reflow and real reshare', {timeout:180000}, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'blind-native-content-'));
   const origin = `http://127.0.0.1:${await freePort()}`;
   const env = {...process.env, BLIND_CONFIG_DIR:join(directory,'server'), BLIND_CLIENT_DIR:join(directory,'client')};
@@ -60,16 +65,17 @@ test('source-anchored spatial reading survives dragging, fullscreen reflow and r
     const errors=[]; page.on('pageerror',error=>errors.push(error.message));
     await page.goto(links.viewer_url);
     await page.locator('.component-content pre').filter({hasText:'source line 4322:'}).waitFor();
+    await page.locator('#loading-state').waitFor({state:'hidden'});
     const body = page.locator('.component-body');
-    const box = await body.boundingBox();
     const original = await state((await shareView(page)).viewer_url);
+    const box = await body.boundingBox();
     await page.mouse.move(box.x+box.width*.45,box.y+box.height*.65);
     await page.mouse.down();
     await page.mouse.move(box.x+box.width*.45,box.y+box.height*.25,{steps:12});
     await page.mouse.up();
     const shared = await shareView(page);
     const saved = await state(shared.viewer_url);
-    assert.ok(saved.entities[0].state.reading, 'direct spatial drag must produce a source reading anchor');
+    assert.ok(saved.entities[0].state.reading, 'direct board drag must produce a source reading anchor');
     assert.notDeepEqual(saved.entities[0].state.reading, original.entities[0].state?.reading, 'drag must advance the actual source target');
     assert.deepEqual(saved.state.camera, original.state.camera, 'body reading must not navigate the camera');
     assert.deepEqual(saved.entities[0].position, original.entities[0].position, 'content remains fixed in world coordinates');
@@ -149,6 +155,11 @@ test('source-anchored spatial reading survives dragging, fullscreen reflow and r
       if (filename === 'architecture.mmd') {
         await page.goto(graphLinks.viewer_url);
         await page.locator('.diagram-canvas > svg').waitFor();
+        await page.locator('#loading-state').waitFor({state:'hidden'});
+        assert.equal(await page.getByRole('button',{name:'更多',exact:true}).evaluate(button => {
+          const box = button.getBoundingClientRect();
+          return button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+        }), true, 'initial narrow-board framing keeps native actions clear of the scene toolbar');
         await page.getByRole('button',{name:'更多',exact:true}).click();
         for (let step=0;step<6;step++) await page.getByRole('button',{name:'放大',exact:true}).click();
         await page.getByRole('button',{name:'更多',exact:true}).click();
@@ -170,8 +181,52 @@ test('source-anchored spatial reading survives dragging, fullscreen reflow and r
         assert.ok(Math.abs(afterReading.x-beforeReading.x)<.01 && Math.abs(afterReading.y-beforeReading.y)<.01,
           'diagram zoom must retain the source point at the viewport center, not also scroll');
         assert.deepEqual(afterZoom.state.camera,beforeZoom.state.camera,'diagram zoom must not navigate the scene camera');
+        const graphId = afterZoom.entities[0].id;
+        const flatCatalog = await operation(page, 'content:get', {id: graphId});
         await page.getByRole('button',{name:'更多',exact:true}).click();
         await page.getByRole('combobox',{name:'图层',exact:true}).selectOption('depth');
+        const depthCatalog = await operation(page, 'content:get', {id: graphId});
+        const depthNode = depthCatalog.targets.find(target => target.id.startsWith('node:'));
+        assert.ok(depthNode, 'semantic depth must expose a source node anchor');
+        const flatNode = flatCatalog.targets.find(target => target.id === depthNode.id);
+        assert.ok(flatNode);
+        assert.ok(Math.abs(depthNode.anchor.x - flatNode.anchor.x) < 1e-9 &&
+          Math.abs(depthNode.anchor.y - flatNode.anchor.y) < 1e-9,
+          'depth catalog anchors must stay in original source coordinates, not projected plane coordinates');
+        await operation(page, 'content:present', {id: graphId, presentation: 'fullscreen'});
+        const expectedScroll = await page.evaluate(targetId => {
+          const target = [...document.querySelectorAll('.diagram-semantic-depth [data-graph-target]')]
+            .find(element => element.dataset.graphTarget === targetId);
+          const viewport = document.querySelector('.diagram-viewport');
+          const targetBox = target.getBoundingClientRect(), viewportBox = viewport.getBoundingClientRect();
+          return {
+            x: Math.max(0, Math.min(viewport.scrollWidth - viewport.clientWidth,
+              viewport.scrollLeft + targetBox.x + targetBox.width / 2 - viewportBox.x - viewport.clientWidth / 2)),
+            y: Math.max(0, Math.min(viewport.scrollHeight - viewport.clientHeight,
+              viewport.scrollTop + targetBox.y + targetBox.height / 2 - viewportBox.y - viewport.clientHeight / 2)),
+          };
+        }, depthNode.id);
+        await operation(page, 'content:set-reading', {id: graphId, anchor: depthNode.anchor});
+        const restoredScroll = await viewport.evaluate(element => ({x: element.scrollLeft, y: element.scrollTop}));
+        assert.ok(Math.abs(restoredScroll.x - expectedScroll.x) < 1 && Math.abs(restoredScroll.y - expectedScroll.y) < 1,
+          'reading a depth catalog target must center its real projected node, bounded only by native scroll limits');
+        const anchored = await operation(page, 'content:annotation-create', {
+          id: graphId, kind: 'point', label: 'Depth source node', color: '#ff6b5e', anchors: [depthNode.anchor],
+        });
+        assert.deepEqual(anchored.state.marks[0].anchors, [depthNode.anchor]);
+        await page.locator('.content-marks circle').waitFor({state: 'attached'});
+        await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const alignment = await page.evaluate(targetId => {
+          const target = [...document.querySelectorAll('.diagram-semantic-depth [data-graph-target]')]
+            .find(element => element.dataset.graphTarget === targetId);
+          const targetBox = target.getBoundingClientRect(), markBox = document.querySelector('.content-marks circle').getBoundingClientRect();
+          return {x: markBox.x + markBox.width / 2 - targetBox.x - targetBox.width / 2,
+            y: markBox.y + markBox.height / 2 - targetBox.y - targetBox.height / 2};
+        }, depthNode.id);
+        assert.ok(Math.abs(alignment.x) < 1 && Math.abs(alignment.y) < 1,
+          `catalog anchor must locate the rendered depth node for native annotation: ${JSON.stringify(alignment)}`);
+        await operation(page, 'content:present', {id: graphId, presentation: 'spatial'});
+        await operation(page, 'content:menu', {id: graphId, open: true});
         await page.getByRole('button',{name:'屏幕画笔',exact:true}).click();
         await page.locator('#surface-toolbar:not([hidden])').waitFor();
         await page.mouse.move(90,450); await page.mouse.down();
