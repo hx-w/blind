@@ -28,6 +28,7 @@ EXAMPLES
   blind share --config - --format json < collection.json
   blind share capture.json --component cyclops:trace --format json
   blind share jaw.ply capture.json --component 2=cyclops:trace --format json
+  blind share jaw.ply reference.stl --quality 1=raw --quality 2=lod --format json
 
 SCENE CONFIG
 {
@@ -56,6 +57,9 @@ RESOURCE FIELDS
   label      Optional display name, 1 to 120 nonblank characters.
   component  Optional mesh|points|text|markdown|json|html|image|mermaid|dot or
              PLUGIN:NAME. Omit to infer from the filename or ZIP member name.
+  quality    Optional raw|lod for mesh/points only; default lod. LOD is a derived
+             approximation generated on demand, not exact source geometry.
+             Raw uses original geometry on initial load and PNG export.
   member     Optional exact ZIP member path, e.g. reports/report.json. Use "/",
              no absolute paths, empty segments, "." or ".."; no recursive unpack.
              The extracted member is limited to 64 MiB.
@@ -105,11 +109,12 @@ PATHS, LIMITS AND CONFLICTS
   Unknown fields/types in the basic scene/collection formats fail. Do not add
   camera, annotations or presentation: those are viewer state, not config fields.
   --config conflicts with positional files, --recursive, --title, --label and
-  --component. --plugin, --host, --ttl and --format still apply.
+  --component and --quality. --plugin, --host, --ttl and --format still apply.
   Directory discovery skips hidden entries and contained symlinks, sorts each
   directory, removes duplicate canonical paths and preserves argument order.
-  --label and --component indices refer to that final expanded order, starting
-  at 1. --label 1,2=TEXT creates a group; one index names one resource.
+  --label, --component and --quality indices refer to that final expanded order,
+  starting at 1. One resource also accepts --quality raw or --quality lod.
+  --label 1,2=TEXT creates a group; one index names one resource.
   Sources remain read-only. Links bind exact revisions: changing/deleting or
   revoking a source invalidates them. Default TTL is 7 days; --ttl 0 has no time
   expiry but still needs unchanged, reachable sources and a running server.
@@ -123,15 +128,18 @@ PLUGINS AND ADVANCED MANIFESTS
   --component INDEX=PLUGIN:NAME selects only that resource's renderer.
   Run blind plugin --help or blind oss --help for configuration commands.
   Plugins may return a versioned resolver manifest, also accepted by --config:
-  schema_version: 1; resources: [{id,uri,label?}]; optional title, requires,
+  schema_version: 1; resources: [{id,uri,label?,quality?}]; optional title, requires,
   components, panels, attachments and warnings.
   viewport uses the same state as basic scene config; each collection child
   can specify viewport independently, including plugin-uri children.
-  components: [{id,uri,label,component?,placement?,member?,group?,position?,size?}].
+  components: [{id,uri,label,component?,quality?,placement?,member?,group?,position?,size?}].
   panels: [{id,label,members:[RESOURCE_ID,...],group?}], flat geometry assemblies,
   not independent collection scenes. If present, they cover every geometry
   resource; members within one panel are distinct existing resource IDs.
   attachments use the same {id,uri,label?} schema as resources.
+  quality is raw|lod on geometry resources/components only, never attachments.
+  Omission selects LOD and reports LOD_SELECTED per geometry entity to stderr
+  and JSON warnings. Collection diagnostics identify each child scene.
   warnings: [{code,message,resource_id?}].
   requires advertises capabilities: layout.panels for panels; layout.panel-groups
   for panel.group; components.v1 for components; archive.members for component
@@ -271,6 +279,13 @@ enum ClientCommand {
             conflicts_with = "config"
         )]
         components: Vec<String>,
+        /// Geometry fidelity: derived LOD (default) or exact source raw; repeat per resource.
+        #[arg(
+            long = "quality",
+            value_name = "INDEX=raw|lod",
+            conflicts_with = "config"
+        )]
+        qualities: Vec<String>,
         /// Enable an installed plugin ID or a package directory (./, ../, or absolute).
         #[arg(long = "plugin", value_name = "ID|DIRECTORY")]
         plugins: Vec<String>,
@@ -320,6 +335,7 @@ pub async fn run() -> Result<()> {
             title,
             labels,
             components,
+            qualities,
             plugins,
             host,
             ttl,
@@ -334,6 +350,7 @@ pub async fn run() -> Result<()> {
                 ShareOptions {
                     recursive,
                     plugins,
+                    qualities,
                     host,
                     ttl_days: ttl,
                     format,

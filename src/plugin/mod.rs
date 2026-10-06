@@ -126,6 +126,8 @@ pub struct Resource {
     pub id: String,
     pub uri: String,
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<crate::scene::MeshQuality>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Panel {
@@ -266,6 +268,18 @@ impl ShareManifest {
             "share manifest exceeds expanded mesh instance limit"
         );
         let mut ids = HashSet::new();
+        ensure!(
+            self.attachments.iter().all(|r| r.quality.is_none()),
+            "quality applies only to geometry, not attachments"
+        );
+        for resource in &self.resources {
+            if resource.quality.is_some() {
+                ensure!(
+                    crate::scene::component::ComponentKind::infer(&resource.uri)?.geometry(),
+                    "quality applies only to geometry"
+                );
+            }
+        }
         for r in self.resources.iter().chain(&self.attachments) {
             ensure!(
                 !r.id.is_empty() && r.id.len() <= 128 && ids.insert(&r.id),
@@ -352,6 +366,7 @@ mod tests {
                 id: format!("r{i}"),
                 uri: "oss://x/b/a.ply".into(),
                 label: None,
+                quality: None,
             })
             .collect();
         let panels: Vec<_> = (0..42)

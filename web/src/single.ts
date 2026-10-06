@@ -283,7 +283,8 @@ async function start(): Promise<void> {
     const notices = (scene.warnings?.length ?? 0) + loadProgress.failed;
     if (notices > 0) {
       const notice = $('#scene-notice'); notice.hidden = false;
-      notice.textContent = `场景部分可用 · ${notices} 项提示`;
+      const partial = loadProgress.failed > 0 || scene.warnings?.some(warning => warning.code !== 'LOD_SELECTED');
+      notice.textContent = `${partial ? '场景部分可用' : 'LOD 为派生近似'} · ${notices} 项提示`;
       if (loadProgress.failed) {
         const row = document.createElement('p'); row.textContent = `${loadProgress.failed} 个模型加载失败；请检查网络或稍后重试。`; artifactList.prepend(row);
       }

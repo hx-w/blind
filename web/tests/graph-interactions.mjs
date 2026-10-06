@@ -27,6 +27,16 @@ test('shared graph consumer uses real same-origin workers, rejects expansion, st
     await page.goto(origin);
     const result = await page.evaluate(async () => {
       const {renderDiagram,graphTargets} = await import('/src/graph.ts');
+      await import('/src/styles.css');
+      const {installIcons} = await import('/src/icons.ts');
+      const iconHost = document.createElement('div');
+      iconHost.innerHTML = '<i data-lucide="eye"></i>';
+      document.body.append(iconHost); installIcons(iconHost);
+      const iconStroke = getComputedStyle(iconHost.querySelector('svg')).stroke;
+      const mermaid = await renderDiagram('mermaid', 'flowchart LR\n a["中文阅读"] --> b["Normal text"]\n classDef framed stroke:#004488,stroke-width:3px\n class a framed');
+      document.body.append(mermaid);
+      const mermaidText = [...mermaid.querySelectorAll('text')].map(text => ({text: text.textContent, stroke: getComputedStyle(text).stroke}));
+      const framedStroke = getComputedStyle(mermaid.querySelector('.node.framed rect')).strokeWidth;
       const NativeWorker = window.Worker;
       const workers = [];
       window.Worker = class extends NativeWorker {
@@ -38,6 +48,7 @@ test('shared graph consumer uses real same-origin workers, rejects expansion, st
       const heartbeat = setInterval(() => { if (pendingLayout) layoutTicks++; }, 1);
       try {
         const valid = [];
+        const dotText = [];
         for (const source of [
           'digraph {a -> b}',
           'digraph {subgraph cluster_team {a b} a -> b}',
@@ -50,6 +61,9 @@ test('shared graph consumer uses real same-origin workers, rejects expansion, st
           try { svg = await renderDiagram('dot',source); }
           finally { pendingLayout = false; }
           valid.push(svg.querySelectorAll('g.node').length);
+          document.body.append(svg);
+          dotText.push(...[...svg.querySelectorAll('text')].map(text => getComputedStyle(text).stroke));
+          svg.remove();
         }
         const names = (prefix,count) => Array.from({length:count},(_,i)=>`${prefix}${i}`).join(' ');
         const expansion = [];
@@ -71,10 +85,15 @@ test('shared graph consumer uses real same-origin workers, rejects expansion, st
         svg.innerHTML = Array.from({length:100},(_,i)=>`<path id="edge${i}" class="flowchart-link" d="M 0 ${i} L 100 ${i}"/><g class="edgeLabel"><text data-id="edge${i}" x="50" y="${i}">label ${i}</text></g>`).join('');
         document.body.append(svg);
         const targets = graphTargets(svg,'mermaid').targets;
-        return {valid,expansion,cancelled,recovered:recovered.querySelectorAll('g.node').length,layoutTicks,workers,labels:targets.map(target=>({edge:target.element.id,labels:target.related.map(label=>label.textContent)}))};
+        return {valid,expansion,cancelled,recovered:recovered.querySelectorAll('g.node').length,layoutTicks,workers,labels:targets.map(target=>({edge:target.element.id,labels:target.related.map(label=>label.textContent)})),mermaidText,dotText,framedStroke,iconStroke};
       } finally {clearInterval(heartbeat); window.Worker = NativeWorker;}
     });
     assert.deepEqual(result.valid,[2,2,2,2,2]);
+    assert.deepEqual(result.mermaidText.map(label => label.text), ['中文阅读', 'Normal text']);
+    assert.ok(result.mermaidText.every(label => label.stroke === 'none'), 'diagram labels must not inherit UI-icon outlines');
+    assert.ok(result.dotText.every(stroke => stroke === 'none'), 'Graphviz text must preserve its fill-only source paint');
+    assert.equal(result.framedStroke, '3px', 'explicit diagram borders retain their source styling');
+    assert.notEqual(result.iconStroke, 'none', 'UI icons retain their own outlines');
     for (const error of result.expansion) assert.match(error,/10000/);
     assert.equal(result.cancelled,'AbortError');
     assert.equal(result.recovered,2);

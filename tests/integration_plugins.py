@@ -56,6 +56,7 @@ secret = true
 r=json.loads(sys.stdin.readline());p=r['params'];assert os.environ['DEBUG_TOKEN']=='PRIVATE';assert p['protocol_version']==2;assert 'config' not in p
 uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing','grouped','collision','many']
 result={'schema_version':1,'requires':['layout.panels','attachments'],'title':'Plugin scene','resources':[{'id':'a','uri':'oss://test/bucket/a.ply','label':'First'},{'id':'b','uri':'oss://test/bucket/b.ply','label':'Second'}],'panels':[{'id':'one','label':'One','members':['a']},{'id':'two','label':'Two','members':['a','b']}],'attachments':[{'id':'zip','uri':'oss://test/bucket/log.zip','label':'Log'}],'new_optional_field':'ignored'}
+result['resources'][0]['quality']='raw';result['resources'][1]['quality']='lod'
 if uri=='grouped':
  result['requires'].append('layout.panel-groups');result['panels']=[{'id':'m1','label':'16','group':'Stage one','members':['a','b']},{'id':'m2','label':'46','group':'Stage one','members':['a','b']},{'id':'c1','label':'16','group':'Stage two','members':['a','b']}]
 if uri=='collision':
@@ -143,6 +144,9 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   assert scene['state']['viewport']=={'mode':'auto'}
   assert len(scene['meshes'])==3 and scene['meshes'][0]['translation']!=scene['meshes'][1]['translation']
   assert scene['meshes'][1]['translation']==scene['meshes'][2]['translation']
+  assert [m['quality'] for m in scene['meshes']]==['raw','raw','lod']
+  assert shared['status']=='complete'
+  assert [(w['code'],w['resource_id']) for w in shared['warnings']]==[('LOD_SELECTED','mesh-2')]
   assert 'oss://' not in json.dumps(scene) and 'PRIVATE' not in json.dumps(scene)
   assert http(origin+'/'+scene['attachments'][0]['url'])[1]==b'attachment-data'
   raw=http(origin+'/'+scene['meshes'][0]['source_url'])[1];assert raw==PLY

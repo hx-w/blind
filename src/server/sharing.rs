@@ -124,11 +124,12 @@ pub(super) async fn client_scene(
             .collect::<Vec<_>>()
     );
     response["warnings"] = serde_json::to_value(&scene.warnings).map_err(anyhow::Error::from)?;
-    response["status"] = serde_json::json!(if scene.warnings.is_empty() {
-        "complete"
-    } else {
-        "partial"
-    });
+    response["status"] =
+        serde_json::json!(if scene.warnings.iter().all(|w| w.code == "LOD_SELECTED") {
+            "complete"
+        } else {
+            "partial"
+        });
     response["attachments"] = serde_json::json!(scene.attachments.len());
     response["source"] = serde_json::to_value(&scene.source).map_err(anyhow::Error::from)?;
     Ok((no_store(), Json(response)))
@@ -286,7 +287,7 @@ async fn create_collection_scene(
     }).collect::<Vec<_>>());
     response["status"] = serde_json::json!(if entries
         .iter()
-        .any(|(_, part)| !part.warnings.is_empty())
+        .any(|(_, part)| part.warnings.iter().any(|w| w.code != "LOD_SELECTED"))
     {
         "partial"
     } else {

@@ -45,7 +45,7 @@ button { color: inherit; touch-action: manipulation; }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 button:active { transform: scale(0.96); }
 button:disabled { cursor: wait; opacity: 0.58; }
-svg { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+svg.lucide { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 [hidden] { display: none !important; }
 
 .skip-link { position: fixed; z-index: 200; top: 8px; left: 8px; padding: 10px 14px; transform: translateY(-150%); border-radius: var(--radius-sm); background: var(--accent); color: var(--accent-ink); text-decoration: none; }

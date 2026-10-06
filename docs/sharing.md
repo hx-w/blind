@@ -166,6 +166,20 @@ single-scene input has this strict schema:
 encrypted descriptor, its `members` are 1-based to match CLI indices. Relative
 paths resolve from the config file directory. Unknown fields are errors.
 
+Geometry resources accept `quality: "raw"|"lod"` independently, including
+repeated references to the same source and each Collection child's resources.
+Omission retains LOD. LOD is a derived approximation generated when requested,
+not exact source geometry; each LOD-selected geometry entity produces a
+`LOD_SELECTED` warning in the share result and CLI stderr. Collection warnings
+remain per child. Native documents, images and plugin surfaces have no geometry
+quality and reject this field. Raw uses original geometry for initial viewing
+and PNG export without invoking derived LOD generation. Selection changes neither
+source bytes nor revision validation. Informational `LOD_SELECTED` warnings alone
+do not make a result partial; unavailable resources still do.
+Resharing after a quality change refreshes these selection warnings for the new
+snapshot; the original link and its quality/warnings remain unchanged.
+
+
 ## Scene collections
 
 A collection shares 2 to 16 independent scenes under one short link. Each

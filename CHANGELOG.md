@@ -3,6 +3,29 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] - 2026-10-06
+
+### Added
+
+- Per-entity geometry fidelity in `blind share`: repeatable
+  `--quality INDEX=lod|raw` and resource `quality` fields in scene, Collection
+  and resolver manifests. Default LOD emits an informational approximation
+  warning; Raw opens the original geometry without requesting derived LOD.
+- Resize fixed sidebars by dragging their boundary or using keyboard controls;
+  keep the chosen width while hiding and showing panels, bounded by the viewport.
+
+### Fixed
+
+- Scope SVG icon outlines to icons so Mermaid and Graphviz labels no longer
+  inherit strokes that make normal-weight text look bold.
+- Preserve renderer-owned CSS3D transforms when moving content from a fixed
+  panel back into the spatial scene, retaining its size, camera and reading state.
+
+### Upgrade
+
+- Keep scene schema 8. Updating from 2.2.0 preserves existing links,
+  registrations and configuration; no registry clear is required.
+
 ## [2.2.0] - 2026-10-06
 
 ### Added

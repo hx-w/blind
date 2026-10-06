@@ -62,6 +62,10 @@ pub(in crate::server) async fn scene_from_manifest(
                 )
             })
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        component
+            .display
+            .validate_quality(&kind)
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
         if kind.geometry()
             && component.display.placement == crate::scene::component::Placement::Panel
         {
@@ -137,6 +141,7 @@ pub(in crate::server) async fn scene_from_manifest(
         }
         if let Some(Some((mesh, bounds))) = cached.get(&r.uri) {
             let mut mesh = mesh.clone();
+            mesh.quality = r.quality.unwrap_or_default();
             mesh.label = r.label.as_ref().map(|text| crate::scene::MeshLabel {
                 text: text.clone(),
                 anchor: None,
@@ -407,5 +412,6 @@ pub(in crate::server) async fn scene_from_manifest(
     scene
         .validate_viewport()
         .map_err(|e| AppError::bad_request(&e.to_string()))?;
+    super::warn_lod_selection(&mut scene);
     Ok(scene)
 }

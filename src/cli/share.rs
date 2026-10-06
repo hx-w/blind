@@ -16,6 +16,7 @@ use std::{
 pub(super) struct ShareOptions {
     pub(super) recursive: bool,
     pub(super) plugins: Vec<String>,
+    pub(super) qualities: Vec<String>,
     pub(super) host: Option<String>,
     pub(super) ttl_days: u32,
     pub(super) format: OutputFormat,
@@ -66,6 +67,7 @@ struct ShareResource {
     path: PathBuf,
     label: Option<String>,
     component: Option<crate::scene::component::ComponentKind>,
+    quality: Option<crate::scene::MeshQuality>,
     group: Option<String>,
     position: Option<[f32; 3]>,
     size: Option<[f32; 2]>,
@@ -255,6 +257,7 @@ impl ShareRenderers {
                     && input.labels.groups.is_empty()
                     && input.display.iter().all(|o| o.component.is_none()
                         && o.member.is_none()
+                        && o.quality.is_none()
                         && o.group.is_none()
                         && o.position.is_none()
                         && o.size.is_none()),
@@ -526,6 +529,7 @@ fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
         let options = crate::scene::component::DisplayOptions {
             placement: resource.placement,
             component: resource.component,
+            quality: resource.quality,
             member: resource.member,
             group: resource.group,
             position: resource.position,
@@ -624,6 +628,7 @@ pub(super) async fn share(
     let ShareOptions {
         recursive,
         plugins,
+        qualities,
         host,
         ttl_days,
         format,
@@ -638,7 +643,8 @@ pub(super) async fn share(
             let meshes =
                 super::discovery::expand_inputs(meshes, recursive, &renderers.extensions())?;
             let labels = parse_labels(&labels, meshes.len())?;
-            let display = parse_components(&components, meshes.len())?;
+            let mut display = parse_components(&components, meshes.len())?;
+            parse_qualities(&qualities, &mut display)?;
             SharePlan::Scene(Box::new(ShareInput {
                 viewport: None,
                 display,
@@ -732,6 +738,16 @@ fn print_share_payload(payload: Value, format: OutputFormat, ttl_days: u32) -> R
             eprintln!("Blind: {message}");
         }
     }
+    for part in payload["scenes"].as_array().into_iter().flatten() {
+        for warning in part["warnings"].as_array().into_iter().flatten() {
+            if let Some(message) = warning["message"].as_str() {
+                eprintln!(
+                    "Blind [{}]: {message}",
+                    part["id"].as_str().unwrap_or("scene")
+                );
+            }
+        }
+    }
     match format {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&payload)?),
         OutputFormat::View => println!(
@@ -780,6 +796,36 @@ fn parse_components(
         );
     }
     Ok(display)
+}
+
+fn parse_qualities(
+    values: &[String],
+    display: &mut [crate::scene::component::DisplayOptions],
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for value in values {
+        let (index, quality) = if let Some((index, quality)) = value.split_once('=') {
+            (index.parse::<usize>()?, quality)
+        } else if display.len() == 1 {
+            (1, value.as_str())
+        } else {
+            bail!("use --quality INDEX=raw|lod for multiple resources");
+        };
+        anyhow::ensure!(
+            index > 0 && index <= display.len(),
+            "quality index out of range"
+        );
+        anyhow::ensure!(
+            seen.insert(index),
+            "quality specified twice for resource {index}"
+        );
+        display[index - 1].quality = Some(
+            serde_json::from_value(Value::String(quality.into()))
+                .context("quality must be raw or lod")?,
+        );
+        display[index - 1].validate()?;
+    }
+    Ok(())
 }
 
 pub fn parse_labels(labels: &[String], count: usize) -> Result<ParsedLabels> {

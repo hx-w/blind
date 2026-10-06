@@ -255,6 +255,9 @@ impl ComponentKind {
 #[serde(deny_unknown_fields)]
 pub struct DisplayOptions {
     pub component: Option<ComponentKind>,
+    /// Explicit geometry fidelity; omission retains the scene's LOD default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality: Option<super::MeshQuality>,
     #[serde(default)]
     pub placement: Placement,
     /// Exact ZIP member path. Extraction belongs to the source layer, not renderers.
@@ -267,6 +270,9 @@ pub struct DisplayOptions {
 }
 impl DisplayOptions {
     pub fn validate(&self) -> Result<()> {
+        if let Some(kind) = &self.component {
+            self.validate_quality(kind)?;
+        }
         ensure!(
             self.placement != Placement::Panel
                 || !self.component.as_ref().is_some_and(ComponentKind::geometry),
@@ -290,6 +296,13 @@ impl DisplayOptions {
                 "component size must be between 1 and 10000"
             );
         }
+        Ok(())
+    }
+    pub fn validate_quality(&self, kind: &ComponentKind) -> Result<()> {
+        ensure!(
+            self.quality.is_none() || kind.geometry(),
+            "quality applies only to mesh or points geometry"
+        );
         Ok(())
     }
 }

@@ -209,6 +209,17 @@ geometry resources. Reusing one resource across panels is supported. Limits:
 4,096 geometry references, 4,096 attachments, 64 panels, 120 characters per label.
 Warnings carry `code`, `message`, and optional `resource_id`.
 
+Geometry `resources` and geometry `components` accept optional `quality` with
+`"raw"` or `"lod"`; omission retains the LOD default. Repeated source URIs can
+have different selections under distinct resource IDs. Panel instances inherit
+their referenced resource's selection. Attachments and nongeometry components
+reject quality. Raw uses original geometry on initial viewer load and PNG export;
+LOD can generate a derived approximation on demand. Each final LOD geometry
+entity reports `LOD_SELECTED`, without claiming generation has already happened
+or changing source bytes/revisions. These selection warnings are informational:
+only other warnings make a share partial.
+
+
 Without panels, original coordinates are used. With panels, original relative
 coordinates are retained within each panel. The Server computes union bounds,
 centers each panel in a grid of at most four columns with a 10% gap, then stores

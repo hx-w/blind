@@ -34,14 +34,18 @@ pub(in crate::server) async fn scene_from_sources(
     let mut attachments = Vec::new();
     let mut entities = Vec::new();
     for (i, path) in paths.iter().enumerate() {
-        let options = display.get(i).cloned().unwrap_or_default();
+        let mut options = display.get(i).cloned().unwrap_or_default();
         options
             .validate()
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
         let kind = options
             .component
+            .take()
             .map(Ok)
             .unwrap_or_else(|| ComponentKind::infer(options.member.as_deref().unwrap_or(path)))
+            .map_err(|e| AppError::bad_request(&e.to_string()))?;
+        options
+            .validate_quality(&kind)
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
         let renderer = if let ComponentKind::Plugin(name) = &kind {
             Some(
@@ -152,7 +156,7 @@ pub(in crate::server) async fn scene_from_sources(
             color: crate::scene::default_color(format, i).into(),
             opacity: 1.0,
             visible: true,
-            quality: MeshQuality::Lod,
+            quality: options.quality.unwrap_or_default(),
             label: None,
             translation: options.position.unwrap_or([0.0; 3]),
         });
@@ -164,7 +168,7 @@ pub(in crate::server) async fn scene_from_sources(
             format!("{} elements", entities.len())
         }
     });
-    Ok(SceneDescriptor {
+    let mut scene = SceneDescriptor {
         source,
         schema: 8,
         title,
@@ -177,7 +181,45 @@ pub(in crate::server) async fn scene_from_sources(
         collection: None,
         label_groups: Vec::new(),
         state: Default::default(),
-    })
+    };
+    warn_lod_selection(&mut scene);
+    Ok(scene)
+}
+
+pub(super) fn warn_lod_selection(scene: &mut SceneDescriptor) {
+    scene
+        .warnings
+        .retain(|warning| warning.code != "LOD_SELECTED");
+    let mut append = |id: &str, label: &str| {
+        scene.warnings.push(crate::scene::Warning {
+            code: "LOD_SELECTED".into(),
+            message: format!(
+                "{label} ({id}): LOD selected; viewing/export may generate a derived approximation, not exact source geometry. Select raw for the original geometry; source bytes and revision are unchanged."
+            ),
+            resource_id: Some(id.to_owned()),
+        });
+    };
+    if scene.entities.is_empty() {
+        for (index, mesh) in scene.meshes.iter().enumerate() {
+            if mesh.quality == MeshQuality::Lod {
+                append(
+                    &format!("mesh-{index}"),
+                    mesh.label
+                        .as_ref()
+                        .map(|l| l.text.as_str())
+                        .unwrap_or(&mesh.name),
+                );
+            }
+        }
+    } else {
+        for entity in &scene.entities {
+            if let crate::scene::component::ComponentSource::Mesh(index) = &entity.source {
+                if scene.meshes[*index].quality == MeshQuality::Lod {
+                    append(&entity.id, &entity.label);
+                }
+            }
+        }
+    }
 }
 
 /// Metadata-only selections let collection children share browser documents

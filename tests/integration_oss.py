@@ -176,9 +176,17 @@ with tempfile.TemporaryDirectory(prefix='blind-oss-test-') as temp:
               ('executed' if image_renderer else 'SKIP (image_renderer unavailable)'))
 
         manifest = tmp/'scene.json'
-        manifest.write_text(json.dumps({'resources': [{'path': first, 'label': 'Crown'}], 'title': 'Config test'}))
+        manifest.write_text(json.dumps({'resources': [
+            {'path': first, 'label': 'Crown', 'quality': 'raw'},
+            {'path': first, 'quality': 'lod'}], 'title': 'Config test'}))
         result = json.loads(run('share', '--config', manifest, '--format', 'json'))
         assert result['resources'][0]['path'] == first
+        quality_token = result['viewer_url'].rsplit('/', 1)[1]
+        quality_scene = json.loads(api('/api/v1/scenes/'+quality_token)[1])
+        assert [m['quality'] for m in quality_scene['meshes']] == ['raw', 'lod']
+        assert quality_scene['meshes'][0]['revision'] == quality_scene['meshes'][1]['revision']
+        assert [w['resource_id'] for w in result['warnings']] == ['resource-2']
+        assert api(f'/api/v1/scenes/{quality_token}/meshes/0') == (200, PAYLOAD)
         pat = json.loads((tmp/'server/config.json').read_text())['pat']
         assert api('/api/v1/scenes', pat, {'paths': [first]})[0] == 200
         (tmp/'local.ply').write_bytes(PAYLOAD)

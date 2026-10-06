@@ -33,7 +33,14 @@ const spatial = {
   entities: [{id: 'geometry', component: 'mesh', source: {kind: 'mesh', index: 0}, placement: 'world', label: 'Reference geometry', group: null, position: [0, 0, 0], size: null, visible: true, opacity: 1}],
   state: {...structuredClone(state), camera: {position: [3, 3, 5], target: [0, 0, 0], up: [0, 1, 0], fov: 34, zoom: 1, orthographic_height: 2}},
 };
-const scenes = new Map([['board', board], ['spatial', spatial]]);
+const spatialDocument = {
+  ...structuredClone(board), title: 'Spatial document placement regression',
+  state: {...structuredClone(state), viewport: {mode: 'spatial'},
+    camera: {position: [0, 0, 2400], target: [0, 0, 0], up: [0, 1, 0], fov: 34, zoom: 1, orthographic_height: 1600}},
+  entities: board.entities.map(entity => ({...structuredClone(entity),
+    ...(entity.id === 'document' ? {size: [1600, 1000]} : {placement: 'panel'})})),
+};
+const scenes = new Map([['board', board], ['spatial', spatial], ['spatial-document', spatialDocument]]);
 const sourceRequests = [];
 let browser, server, origin, shareSequence = 0;
 
@@ -239,6 +246,129 @@ test('pinned DOM stays fixed while board API, title drag and pointer zoom move o
     assert.deepEqual(await page.evaluate(() => window.gpuContexts), []);
     assert.deepEqual(errors, []);
   } finally {await page.close();}
+});
+
+test('sidebar edge resizing reserves real viewport space without resizing sources or navigating the camera', async () => {
+  const {page, errors} = await openScene('board');
+  try {
+    await operation(page, 'entity:set-placement', {id: 'notes', placement: 'panel'});
+    await operation(page, 'ui:scene-list', {open: true});
+    const camera = (await operation(page, 'view:get')).camera;
+    const entity = await operation(page, 'entity:get', {id: 'document'});
+    const world = await page.locator(documentSurface).boundingBox();
+    const sourceLayout = await page.locator(`${documentSurface} .component-content`).evaluate(element => ({width: element.offsetWidth, height: element.offsetHeight}));
+    const edge = page.getByRole('separator', {name: '调整固定面板宽度'});
+    const panel = page.locator('.component-fixed-panels');
+    const initial = await panel.boundingBox(), handle = await edge.boundingBox();
+    await edge.evaluate(element => element.addEventListener('pointerdown', event => {window.resizePointer = event.pointerId;}, {once: true}));
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    assert.equal(await edge.evaluate(element => element.hasPointerCapture(window.resizePointer)), true);
+    await page.mouse.move(handle.x + handle.width / 2 - 140, handle.y + handle.height / 2, {steps: 6}); await page.mouse.up();
+    await rendered(page);
+    approximately((await panel.boundingBox()).width, initial.width + 140, 1);
+    await edge.press('ArrowLeft');
+    await edge.press('Shift+ArrowRight');
+    await rendered(page);
+    approximately((await panel.boundingBox()).width, initial.width + 110, 1);
+    approximately(Number(await edge.getAttribute('aria-valuenow')), (await panel.boundingBox()).width, 1);
+    const touchEdge = await edge.boundingBox();
+    const touch = await page.context().newCDPSession(page);
+    await touch.send('Input.dispatchTouchEvent', {type: 'touchStart', touchPoints: [{x: touchEdge.x + touchEdge.width / 2, y: 300}]});
+    await touch.send('Input.dispatchTouchEvent', {type: 'touchMove', touchPoints: [{x: touchEdge.x + touchEdge.width / 2 - 80, y: 300}]});
+    await touch.send('Input.dispatchTouchEvent', {type: 'touchEnd', touchPoints: []}); await touch.detach();
+    await rendered(page);
+    const resized = await panel.boundingBox();
+    approximately(resized.width, initial.width + 190, 1);
+    const movedWorld = await page.locator(documentSurface).boundingBox();
+    approximately(movedWorld.width, world.width, .1);
+    approximately(movedWorld.x - world.x, -(resized.width - initial.width) / 2, .1);
+    assert.deepEqual((await operation(page, 'view:get')).camera, camera);
+    assert.deepEqual(await operation(page, 'entity:get', {id: 'document'}), entity);
+    assert.deepEqual(await page.locator(`${documentSurface} .component-content`).evaluate(element => ({width: element.offsetWidth, height: element.offsetHeight})), sourceLayout);
+    for (const selector of ['.scene-panels', '.topbar']) if (await page.locator(selector).isVisible()) {
+      const chrome = await page.locator(selector).boundingBox();
+      assert.ok(chrome.x + chrome.width <= resized.x + .1, `${selector} remains outside the resized sidebar`);
+    }
+    const beforeReading = (await operation(page, 'content:get', {id: 'notes'})).state.reading;
+    const body = await page.locator(`${notesSurface} .component-content`).boundingBox();
+    await page.mouse.move(body.x + body.width / 2, body.y + body.height / 2); await page.mouse.wheel(0, 240);
+    await rendered(page);
+    assert.notEqual((await operation(page, 'content:get', {id: 'notes'})).state.reading.target, beforeReading.target, 'the resized panel still reads native source content');
+    assert.deepEqual((await operation(page, 'view:get')).camera, camera);
+    await operation(page, 'entity:set-style', {id: 'notes', visible: false});
+    assert.equal(await edge.isVisible(), false);
+    await operation(page, 'entity:set-style', {id: 'notes', visible: true}); await rendered(page);
+    approximately((await panel.boundingBox()).width, resized.width, .1);
+    await operation(page, 'content:present', {id: 'notes', presentation: 'fullscreen'});
+    await page.setViewportSize({width: 700, height: 800});
+    await operation(page, 'content:present', {id: 'notes', presentation: 'spatial'});
+    await rendered(page);
+    assert.ok((await panel.boundingBox()).width <= 380, 'expanded content returns to the safely clamped sidebar');
+    await page.setViewportSize({width: 1200, height: 800}); await rendered(page);
+    approximately((await panel.boundingBox()).width, resized.width, .1);
+    await edge.press('Home'); await rendered(page);
+    approximately((await panel.boundingBox()).width, Number(await edge.getAttribute('aria-valuemin')), 1);
+    await edge.press('End'); await rendered(page);
+    approximately((await panel.boundingBox()).width, Number(await edge.getAttribute('aria-valuemax')), 1);
+    await page.setViewportSize({width: 700, height: 800}); await rendered(page);
+    const narrowPanel = await panel.boundingBox(), root = await page.locator('#canvas-root').boundingBox();
+    assert.ok(root.width - narrowPanel.width >= 320, 'viewport shrink retains usable world space');
+    assert.deepEqual((await operation(page, 'entity:get', {id: 'document'})).size, entity.size);
+    assert.deepEqual((await operation(page, 'view:get')).camera, camera);
+    assert.deepEqual(errors, []);
+  } finally {await page.close();}
+});
+
+test('board and spatial panel cycles preserve projected native text, same DOM, reading and marks without refitting', async () => {
+  for (const token of ['board', 'spatial-document']) {
+    const {page, errors} = await openScene(token);
+    try {
+      await operation(page, 'ui:scene-list', {open: false});
+      await operation(page, 'entity:set-placement', {id: 'notes', placement: 'panel'});
+      await page.evaluate(selector => {window.originalContent = document.querySelector(`${selector} .component-content`);}, documentSurface);
+      await operation(page, 'content:scroll', {id: 'document', x: 0, y: 1200});
+      const reading = (await operation(page, 'content:get', {id: 'document'})).state.reading;
+      const marked = await operation(page, 'content:annotation-create', {id: 'document', kind: 'point', label: 'Placement reading mark', color: '#ff6b5e', anchors: [reading]});
+      await operation(page, 'content:annotation-open', {id: 'document', open: false});
+      const entity = await operation(page, 'entity:get', {id: 'document'});
+      for (const projection of token === 'board' ? ['board'] : ['perspective', 'orthographic']) {
+        if (projection !== 'board') await operation(page, 'view:settings', {projection});
+        await rendered(page);
+        const camera = (await operation(page, 'view:get')).camera;
+        const measure = () => page.locator(documentSurface).evaluate(element => {
+          const content = element.querySelector('.component-content'), rect = element.getBoundingClientRect();
+          const text = document.createTreeWalker(content.querySelector('pre'), NodeFilter.SHOW_TEXT).nextNode();
+          const range = document.createRange(); range.setStart(text, 0); range.setEnd(text, Math.min(24, text.length));
+          const glyph = range.getBoundingClientRect();
+          return {x: rect.x, y: rect.y, width: rect.width, height: rect.height, glyphWidth: glyph.width, glyphHeight: glyph.height,
+            nativeWidth: content.offsetWidth, nativeHeight: content.offsetHeight};
+        });
+        const before = await measure();
+        for (const presentation of ['spatial', 'fullscreen', 'focus']) {
+          if (presentation !== 'spatial') await operation(page, 'content:present', {id: 'document', presentation});
+          await operation(page, 'entity:set-placement', {id: 'document', placement: 'panel'});
+          if (presentation !== 'spatial') {
+            assert.equal(await page.evaluate(() => !!window.originalContent.closest('dialog[open]')), true, 'placement changes do not dismiss expanded content');
+            await operation(page, 'content:present', {id: 'document', presentation: 'spatial'});
+          }
+          assert.equal(await page.evaluate(() => !!window.originalContent.closest('.component-fixed-panels')), true);
+          await operation(page, 'entity:set-placement', {id: 'document', placement: 'world'}); await rendered(page);
+          const after = await measure();
+          for (const key of ['x', 'y', 'width', 'height', 'glyphWidth', 'glyphHeight']) approximately(after[key], before[key], .5);
+          assert.equal(after.nativeWidth, before.nativeWidth); assert.equal(after.nativeHeight, before.nativeHeight);
+          assert.equal(await page.evaluate(selector => document.querySelector(`${selector} .component-content`) === window.originalContent, documentSurface), true);
+          const restored = await operation(page, 'content:get', {id: 'document'});
+          assert.equal(restored.state.reading.source, reading.source); assert.equal(restored.state.reading.target, reading.target);
+          assert.deepEqual(restored.state.marks, marked.state.marks);
+          const returned = await operation(page, 'entity:get', {id: 'document'});
+          assert.deepEqual(returned.position, entity.position); assert.deepEqual(returned.size, entity.size);
+          assert.deepEqual((await operation(page, 'view:get')).camera, camera);
+        }
+      }
+      assert.deepEqual(errors, []);
+    } finally {await page.close();}
+  }
 });
 
 test('source reading and same-DOM presentations survive an immutable board share and saved camera restore', async () => {

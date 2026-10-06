@@ -41,6 +41,19 @@ body to 64 MiB. It validates versions, bindings, document paths and bounded
 content before atomically registering scenes and snapshot references. See
 [snapshot identity, conflicts and lifecycle](plugins.md#sharing-and-snapshot-storage).
 
+Scene creation `display` entries accept optional `quality: "raw"|"lod"`.
+Entries align with `paths`; the server rejects quality unless the resolved
+component is mesh or points (including inferred types). Omission preserves LOD.
+Basic CLI configs carry the same field per resource and Collection child;
+advanced/plugin manifests accept it on geometry `resources` and `components`,
+never attachments. Public scene `meshes[].quality` records the initial selection:
+raw loads source geometry directly in the viewer and PNG path, while LOD may
+request derived approximation generation. Source identity remains unchanged.
+Share JSON exposes `LOD_SELECTED` warnings per geometry entity; Collection
+results preserve them in each child's `warnings`. These informational warnings
+alone leave `status: "complete"`; unavailable resources still make it partial.
+
+
 For Agent integration, prefer the [CLI JSON contract](cli.md#agent-interface).
 
 For a running viewer, use the [public operation catalog](components.md#public-operations):

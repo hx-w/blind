@@ -68,6 +68,9 @@ export class ComponentViewer {
   readonly panelRoot = document.createElement('aside');
   private operations?: OperationHost;
   private panelResize?: ResizeObserver;
+  private readonly panelEdge = document.createElement('div');
+  private panelWidth?: number;
+  private panelDrag?: {id: number; x: number; width: number};
   private readonly planes = new Map<number, {scene: THREE.Scene; renderer: CSS3DRenderer}>();
   private readonly bands: HTMLCanvasElement[] = [];
   private readonly entries: Entry[] = [];
@@ -125,13 +128,54 @@ export class ComponentViewer {
   get entities(): readonly SceneEntity[] { return this.entries.map(e => e.spec); }
   bindOperations(host: OperationHost): void { this.operations = host; }
   private changed(): void { this.onChange?.(); this.operations?.notify('entity', {entities: this.listEntities(), selected: this.selected?.spec.id ?? null}); }
-  private updatePanelSpace(): void {
-    const visible = this.entries.some(entry => entry.spec.placement === 'panel' && effectiveVisibility(entry.spec));
-    this.panelRoot.hidden = !visible; this.root.classList.toggle('has-fixed-panels', visible);
-    const width = visible ? this.panelRoot.getBoundingClientRect().width : 0;
-    this.viewer.setReservedSpace(width);
-    this.root.closest<HTMLElement>('.app-shell')?.style.setProperty('--fixed-panel-space', `${width}px`);
+  private panelWidthRange(): {min: number; max: number} {
+    const width = this.root.clientWidth;
+    const max = Math.max(0, width - Math.min(320, width / 2));
+    return {min: Math.min(240, max), max};
   }
+  private updatePanelSpace = (): void => {
+    const visible = this.entries.some(entry => entry.spec.placement === 'panel' && effectiveVisibility(entry.spec));
+    this.panelRoot.hidden = !visible; this.panelEdge.hidden = !visible; this.root.classList.toggle('has-fixed-panels', visible);
+    const {min, max} = this.panelWidthRange();
+    const width = Math.min(max, Math.max(min, this.panelWidth ?? Math.min(360, this.root.clientWidth * .4)));
+    this.panelRoot.style.width = `${width}px`;
+    this.panelEdge.style.right = `${width - 6}px`;
+    this.panelEdge.setAttribute('aria-valuemin', String(Math.round(min)));
+    this.panelEdge.setAttribute('aria-valuemax', String(Math.round(max)));
+    this.panelEdge.setAttribute('aria-valuenow', String(Math.round(width)));
+    this.panelEdge.setAttribute('aria-valuetext', `${Math.round(width)} 像素`);
+    this.viewer.setReservedSpace(visible ? width : 0);
+    this.root.closest<HTMLElement>('.app-shell')?.style.setProperty('--fixed-panel-space', `${visible ? width : 0}px`);
+  };
+  private resizePanel(width: number): void {
+    const {min, max} = this.panelWidthRange();
+    this.panelWidth = Math.min(max, Math.max(min, width)); this.updatePanelSpace();
+  }
+  private panelPointerDown = (event: PointerEvent): void => {
+    if (!event.isPrimary || event.button !== 0 || this.panelDrag) return;
+    event.preventDefault(); event.stopPropagation();
+    this.panelDrag = {id: event.pointerId, x: event.clientX, width: this.panelRoot.getBoundingClientRect().width};
+    this.panelEdge.focus({preventScroll: true}); this.panelEdge.setPointerCapture(event.pointerId);
+  };
+  private panelPointerMove = (event: PointerEvent): void => {
+    const drag = this.panelDrag;
+    if (!drag || event.pointerId !== drag.id) return;
+    event.preventDefault(); event.stopPropagation();
+    this.resizePanel(drag.width + drag.x - event.clientX);
+  };
+  private panelPointerEnd = (event: PointerEvent): void => {
+    if (event.pointerId !== this.panelDrag?.id) return;
+    this.panelDrag = undefined;
+    if (this.panelEdge.hasPointerCapture(event.pointerId)) this.panelEdge.releasePointerCapture(event.pointerId);
+  };
+  private panelKeyDown = (event: KeyboardEvent): void => {
+    const {min, max} = this.panelWidthRange(), width = this.panelRoot.getBoundingClientRect().width;
+    const step = event.shiftKey ? 40 : 10;
+    const next = event.key === 'ArrowLeft' ? width + step : event.key === 'ArrowRight' ? width - step
+      : event.key === 'Home' ? min : event.key === 'End' ? max : undefined;
+    if (next === undefined) return;
+    event.preventDefault(); event.stopPropagation(); this.resizePanel(next);
+  };
   private requireEntry(id: string): Entry {
     const entry = this.entries.find(entry => entry.spec.id === id);
     if (!entry) throw new OperationError('UNKNOWN_ENTITY', 'Unknown entity', {target: id});
@@ -274,7 +318,18 @@ export class ComponentViewer {
     this.operations = factoryContext.operations;
     this.compositor.className = 'component-compositor'; if (viewer.kind === 'spatial') root.append(this.compositor);
     this.panelRoot.className = 'component-fixed-panels'; this.panelRoot.setAttribute('aria-label', '固定内容面板'); root.append(this.panelRoot);
-    this.panelResize = new ResizeObserver(() => this.updatePanelSpace()); this.panelResize.observe(this.panelRoot);
+    this.panelRoot.id = 'component-fixed-panels';
+    this.panelEdge.className = 'component-panel-resize'; this.panelEdge.tabIndex = 0;
+    this.panelEdge.setAttribute('role', 'separator'); this.panelEdge.setAttribute('aria-orientation', 'vertical');
+    this.panelEdge.setAttribute('aria-label', '调整固定面板宽度'); this.panelEdge.setAttribute('aria-controls', this.panelRoot.id);
+    this.panelEdge.setAttribute('data-viewer-chrome', '');
+    this.panelEdge.addEventListener('pointerdown', this.panelPointerDown);
+    this.panelEdge.addEventListener('pointermove', this.panelPointerMove);
+    this.panelEdge.addEventListener('pointerup', this.panelPointerEnd);
+    this.panelEdge.addEventListener('pointercancel', this.panelPointerEnd);
+    this.panelEdge.addEventListener('lostpointercapture', this.panelPointerEnd);
+    this.panelEdge.addEventListener('keydown', this.panelKeyDown); root.append(this.panelEdge);
+    this.panelResize = new ResizeObserver(this.updatePanelSpace); this.panelResize.observe(this.panelRoot); this.panelResize.observe(root);
     this.groupLabels.className = 'component-group-labels'; root.append(this.groupLabels);
     const customTypes = new Set<string>();
     for (const spec of sceneEntities(scene)) {
@@ -324,6 +379,7 @@ export class ComponentViewer {
   private routePointer = (event: PointerEvent): void => {
     // Forwarded canvas events already belong to ArcballControls.
     if (!event.isTrusted && event.target instanceof HTMLCanvasElement) return;
+    if (event.target === this.panelEdge) return;
     if (event.pointerType === 'touch') {
       const element = event.target instanceof Element ? event.target.closest('.scene-surface') : null;
       const runtime = this.entries.find(entry => entry.runtime.element === element)?.runtime;
@@ -755,7 +811,7 @@ export class ComponentViewer {
       }
     }
   };
-  dispose(): void { document.removeEventListener('click', this.dismissColorPicker); window.removeEventListener('pointerup', this.releaseTouch, true); window.removeEventListener('pointercancel', this.releaseTouch, true); this.root.classList.remove('has-spatial-content', 'has-fixed-panels'); this.root.removeEventListener('pointerdown', this.routePointer, true); this.root.removeEventListener('click', this.routeClick, true); this.root.removeEventListener('wheel', this.routeWheel, true); this.close(); this.treeResize?.disconnect(); this.panelResize?.disconnect(); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.entityUpdates = undefined; this.viewer.setReservedSpace(0); this.root.closest<HTMLElement>('.app-shell')?.style.removeProperty('--fixed-panel-space'); this.root.classList.remove('composited-content'); this.compositor.remove(); this.panelRoot.remove(); this.planes.clear(); this.bands.length = 0; this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
+  dispose(): void { document.removeEventListener('click', this.dismissColorPicker); window.removeEventListener('pointerup', this.releaseTouch, true); window.removeEventListener('pointercancel', this.releaseTouch, true); this.root.classList.remove('has-spatial-content', 'has-fixed-panels'); this.root.removeEventListener('pointerdown', this.routePointer, true); this.root.removeEventListener('click', this.routeClick, true); this.root.removeEventListener('wheel', this.routeWheel, true); this.close(); this.treeResize?.disconnect(); this.panelResize?.disconnect(); this.entries.forEach(e => e.runtime.dispose()); this.viewer.renderListeners.delete(this.render); this.viewport.removeEventListener('change', this.viewportChanged); this.viewer.entityUpdates = undefined; this.viewer.setReservedSpace(0); this.root.closest<HTMLElement>('.app-shell')?.style.removeProperty('--fixed-panel-space'); this.root.classList.remove('composited-content'); this.compositor.remove(); this.panelRoot.remove(); this.panelEdge.remove(); this.planes.clear(); this.bands.length = 0; this.groupLabels.remove(); this.tree.remove(); this.toggle.remove(); this.dialog.remove(); }
 }
 
 export class SurfaceRuntime implements ComponentRuntime {
@@ -1224,7 +1280,9 @@ export class SurfaceRuntime implements ComponentRuntime {
     const [w,h] = this.spec.size ?? [110,70], p = this.worldPosition;
     this.wrapper.style.width = '800px'; this.wrapper.style.height = `${800 * h / w}px`;
     this.panelWrapper.style.height = 'min(65vh, 520px)';
-    this.wrapper.style.transform = this.context.viewer.kind === 'board' && this.spec.placement === 'world'
+    // CSS3DRenderer owns and caches the spatial wrapper matrix, even while its
+    // content is in a panel/dialog. Clearing it leaves the next render unscaled.
+    if (this.context.viewer.kind === 'board') this.wrapper.style.transform = this.spec.placement === 'world'
       ? `translate(${p.x - w / 2}px,${p.y + h / 2}px) scale(${w / 800},${-w / 800})` : '';
     this.object?.scale.setScalar(w / 800); this.context.viewer.invalidate();
   }

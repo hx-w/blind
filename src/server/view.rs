@@ -365,6 +365,7 @@ pub(super) async fn reshare(
             target
                 .apply_update(update)
                 .map_err(|e| AppError::bad_request(&e.to_string()))?;
+            super::scenes::warn_lod_selection(target);
         }
         let collection = scene.collection.as_mut().unwrap();
         if let Some(value) = body.get("strokes") {
@@ -391,6 +392,7 @@ pub(super) async fn reshare(
         scene
             .apply_update(request.update)
             .map_err(|error| AppError::bad_request(&error.to_string()))?;
+        super::scenes::warn_lod_selection(&mut scene);
     }
     let current_origin = request_origin(&headers, &state.config)?;
     let hosts = share_hosts(&state.config, &current_origin)?;

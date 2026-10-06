@@ -23,12 +23,14 @@ with tempfile.TemporaryDirectory(prefix='blind-components-') as temp:
         sock.bind(('127.0.0.1', 0))
         port = sock.getsockname()[1]
     origin = f'http://127.0.0.1:{port}'
-    def cli(*args, ok=True, cwd=None, environment=None):
+    def cli(*args, ok=True, cwd=None, environment=None, diagnostics=False):
         result = subprocess.run([str(BIN), *map(str,args)], env=environment or env, cwd=cwd, text=True, capture_output=True, timeout=90)
         assert (result.returncode == 0) == ok, result.stderr
-        return result.stdout
-    def api(path, body=None):
-        request = urllib.request.Request(origin+path, data=None if body is None else json.dumps(body).encode(), headers={'Content-Type':'application/json'})
+        return result if diagnostics else result.stdout
+    def api(path, body=None, credential=None):
+        headers = {'Content-Type':'application/json'}
+        if credential: headers['Authorization'] = 'Bearer '+credential
+        request = urllib.request.Request(origin+path, data=None if body is None else json.dumps(body).encode(), headers=headers)
         try:
             with urllib.request.urlopen(request, timeout=90) as response:
                 return response.status, response.read(), response.headers
@@ -84,6 +86,83 @@ frame_origins = ["https://example.org"]
             {'kind': 'mesh', 'index': index} for index in range(65)]
         assert len({entity['id'] for entity in capacity_scene['entities']}) == 65
         markdown = ROOT/'tests/fixtures/review.md'
+        # Fidelity is per geometry instance, not per source URI or a later style update.
+        selected = cli('share', mesh, tmp/'run.log', '--quality', '1=raw', '--format', 'json', diagnostics=True)
+        raw_share = json.loads(selected.stdout)
+        raw_token = raw_share['viewer_url'].rsplit('/',1)[1]
+        raw_scene = json.loads(api(f'/api/v1/scenes/{raw_token}')[1])
+        assert raw_scene['meshes'][0]['quality'] == 'raw'
+        assert not raw_share['warnings'] and not selected.stderr
+        assert api('/'+raw_scene['meshes'][0]['source_url'])[1] == mesh.read_bytes()
+        assert api(f'/i/{raw_token}.png')[0] == 200
+        default_result = cli('share', mesh, '--format', 'json', diagnostics=True)
+        default_share = json.loads(default_result.stdout)
+        assert default_share['status'] == 'complete'
+        assert [(w['code'], w['resource_id']) for w in default_share['warnings']] == [('LOD_SELECTED','resource-1')]
+        assert 'resource-1' in default_result.stderr
+        for args in [
+            (mesh, '--quality', 'invalid'), (mesh, '--quality', '2=raw'),
+            (mesh, '--quality', 'raw', '--quality', 'lod'),
+            (tmp/'run.log', '--quality', 'raw'),
+            (mesh, '--component', 'text', '--quality', 'lod'),
+            (tmp/'trace.json', '--plugin', 'example', '--quality', 'raw'),
+        ]:
+            assert cli('share', *args, '--format', 'json', ok=False) == ''
+        quality_path = tmp/'quality.json'
+        repeated = [{'path':str(mesh),'quality':'raw'}, {'path':str(mesh),'quality':'lod'}]
+        quality_path.write_text(json.dumps({'resources':repeated}))
+        quality_token, quality_scene = share('--config', quality_path)
+        assert [m['quality'] for m in quality_scene['meshes']] == ['raw','lod']
+        assert quality_scene['meshes'][0]['revision'] == quality_scene['meshes'][1]['revision'] == raw_scene['meshes'][0]['revision']
+        assert [w['resource_id'] for w in quality_scene['warnings']] == ['resource-2']
+        quality_update = {'meshes':[{key:m[key] for key in ['color','opacity','visible','quality']} for m in quality_scene['meshes']],
+                          'state':quality_scene['state']}
+        quality_update['meshes'][0]['quality'] = 'lod'
+        quality_update['meshes'][1]['quality'] = 'raw'
+        status, updated_body, _ = api(f'/api/v1/scenes/{quality_token}/share',quality_update)
+        assert status == 200, updated_body
+        updated_token = json.loads(updated_body)['viewer_url'].rsplit('/',1)[1]
+        updated_quality = json.loads(api(f'/api/v1/scenes/{updated_token}')[1])
+        assert [m['quality'] for m in updated_quality['meshes']] == ['lod','raw']
+        assert [w['resource_id'] for w in updated_quality['warnings']] == ['resource-1']
+        assert [w['resource_id'] for w in json.loads(api(f'/api/v1/scenes/{quality_token}')[1])['warnings']] == ['resource-2']
+        quality_path.write_text(json.dumps({'kind':'collection','schema_version':1,'title':'Quality','scenes':[
+            {'id':'exact','title':'Exact','resources':[repeated[0]]},
+            {'id':'derived','title':'Derived','resources':[repeated[1]]}]}))
+        collection_result = cli('share','--config',quality_path,'--format','json',diagnostics=True)
+        collection_share = json.loads(collection_result.stdout)
+        assert not collection_share['scenes'][0]['warnings']
+        assert collection_share['scenes'][1]['warnings'][0]['code'] == 'LOD_SELECTED'
+        assert '[derived]' in collection_result.stderr and '[exact]' not in collection_result.stderr
+        collection_token = collection_share['viewer_url'].rsplit('/',1)[1]
+        for child, expected in [('exact','raw'),('derived','lod')]:
+            child_scene = json.loads(api(f'/api/v1/scenes/{collection_token}?scene={child}')[1])
+            assert child_scene['meshes'][0]['quality'] == expected
+        advanced = {'schema_version':1,'requires':['components.v1'],'resources':[
+            {'id':'exact','uri':str(mesh),'quality':'raw'},
+            {'id':'derived','uri':str(mesh),'quality':'lod'}],
+            'components':[{'id':'another','label':'Exact component','uri':str(mesh),'quality':'raw'}]}
+        quality_path.write_text(json.dumps(advanced))
+        _, advanced_scene = share('--config',quality_path)
+        assert [m['quality'] for m in advanced_scene['meshes']] == ['raw','lod','raw']
+        for invalid_config in [
+            {'resources':[{'path':str(mesh),'quality':'invalid'}]},
+            {'resources':[{'path':str(tmp/'run.log'),'quality':'lod'}]},
+            {'schema_version':1,'resources':[{'id':'bad','uri':str(tmp/'run.log'),'quality':'raw'}]},
+            {'schema_version':1,'requires':['attachments'],'resources':[{'id':'mesh','uri':str(mesh)}],
+             'attachments':[{'id':'notes','uri':str(tmp/'run.log'),'quality':'lod'}]},
+        ]:
+            quality_path.write_text(json.dumps(invalid_config))
+            assert cli('share','--config',quality_path,'--format','json',ok=False) == ''
+        assert len(advanced_scene['warnings']) == 1
+        pat = json.loads((tmp/'server/config.json').read_text())['pat']
+        for body in [
+            {'paths':[str(tmp/'run.log')],'display':[{'quality':'raw'}]},
+            {'paths':[str(mesh)],'display':[{'component':'text','quality':'lod'}]},
+            {'manifest':{'schema_version':1,'requires':['components.v1'],'resources':[],
+                         'components':[{'id':'bad','uri':str(tmp/'run.log'),'label':'Bad','quality':'raw'}]}},
+        ]:
+            assert api('/api/v1/scenes',body,pat)[0] == 400
         # Directory discovery runs on the source machine and yields one normal scene.
         directory = tmp/'directory'; directory.mkdir()
         (directory/'nested').mkdir(); (directory/'.hidden').mkdir()
@@ -98,6 +177,8 @@ frame_origins = ["https://example.org"]
         (directory/'cycle').symlink_to(directory, target_is_directory=True)
         directory_token, direct = share('./', '--plugin', 'example', cwd=directory)
         assert [c['component'] for c in direct['entities']] == ['mesh','markdown','example:panel']
+        _, discovered_raw = share(directory, '--plugin', 'example', '--quality', '1=raw')
+        assert discovered_raw['meshes'][0]['quality'] == 'raw'
         assert api(f'/s/{directory_token}')[0] == 200
         assert api('/'+direct['attachments'][1]['url'])[1] == b'plugin-only extension'
         _, recursive = share(directory, directory/'b.md', '--plugin', 'example', '--recursive', '--label', '4=Nested', '--component', '2=text')

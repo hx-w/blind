@@ -17,9 +17,10 @@ image links preserve the review state without changing the original files.
   preset below the row. Long names show their beginning and end; 信息 reveals
   the full name in a scrollable area. Mesh quality sits in the
   scene list's 信息 tab.
-- Each Mesh loads as LOD by default. 信息 can switch it to Raw without
-  changing the camera and reports Raw size, LOD size, saved bytes, and the
-  saving percentage.
+- Meshes use LOD unless the share selects Raw with `--quality` or resource
+  `quality`. LOD sharing reports that the displayed geometry is a derived
+  approximation. 信息 can switch quality without changing the camera and reports
+  Raw size, LOD size, saved bytes and the saving percentage.
 - Shared view snapshots preserve the selected Raw or LOD quality for every Mesh.
 - The first cold load shows completed Mesh count while the server generates
   LODs. At most four Meshes are requested concurrently, and a single large Mesh
@@ -68,8 +69,14 @@ See [components and layout](components.md#groups-and-layout).
 
 `placement: "panel"` keeps a component in a fixed sidebar outside the world
 layout. Its body owns native input and remains fixed while panning or zooming;
-the host reserves sidebar space from scene controls. Placement is independent
-of focus/fullscreen presentation and survives sharing.
+the host reserves sidebar space from scene controls. Drag the sidebar's left
+edge with a mouse or touch to resize it, or focus the edge and use Left/Right
+arrows (Shift for larger steps), Home for minimum width and End for maximum.
+The width is bounded to leave usable world space, survives hiding/showing during
+the session, and adapts to viewport changes; it is not saved in shares or config.
+Placement is independent of focus/fullscreen presentation and survives sharing.
+Returning content to the world preserves its world position, surface size,
+camera, source reading and annotations rather than refitting the scene.
 
 Agents and components use the [public operation catalog](components.md#public-operations)
 for the same controls. Typed operations cover native reading and review tools;

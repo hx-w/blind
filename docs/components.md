@@ -103,6 +103,8 @@ a 20-second execution deadline and an 8 MiB SVG output limit. Disposing a surfac
 cancels its queued or running DOT work. These bounds are not a total-memory sandbox.
 External images, active SVG and resource-bearing diagram styles are rejected.
 Syntax and complexity failures remain explicit and fail image export.
+UI icon styles are scoped to icons, not native diagrams; SVG label text retains
+its renderer's fill and stroke, including when embedded in Markdown.
 
 Grouped standalone diagrams additionally offer **语义深度**: an orthographic
 projection of deterministic planes derived from real source groups, with
@@ -130,7 +132,9 @@ blind share --config scene.json
 
 `member` selects an exact ZIP member path (no recursive unpacking, maximum 64 MiB).
 `path` is required. Optional resource fields are `component`, `label`, `group`,
-`position: [x,y,z]`, `size: [width,height]` and `placement: "world"|"panel"`.
+`position: [x,y,z]`, `size: [width,height]`, `placement: "world"|"panel"` and
+geometry-only `quality: "lod"|"raw"`. Geometry defaults to LOD and sharing warns
+that it is a derived approximation; Raw uses the original geometry directly.
 Placement defaults to `world`; geometry cannot use `panel`. Paths resolve relative to the config;
 absolute local paths and configured `oss://ALIAS/BUCKET/KEY` references work too.
 Unknown fields are rejected. Labels and group names contain 1 to 120 characters.

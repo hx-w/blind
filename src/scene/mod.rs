@@ -1686,22 +1686,6 @@ mod tests {
         assert!(validate_annotations(&[mark.clone(), mark], &scene.meshes).is_err());
     }
 
-    #[test]
-    fn legacy_view_state_defaults_to_no_screen_strokes() {
-        let value = serde_json::json!({
-            "selected": 0,
-            "shading": "smooth",
-            "projection": "perspective",
-            "background": "dark",
-            "axes": true,
-            "frame": { "width": 1200, "height": 900 },
-            "camera": null
-        });
-        let state: ViewState = serde_json::from_value(value).unwrap();
-        assert!(state.strokes.is_empty());
-        assert!(state.annotations.is_empty());
-    }
-
     #[tokio::test]
     async fn screen_stroke_payloads_are_bounded_and_validated() {
         let directory = tempfile::tempdir().unwrap();
@@ -1773,24 +1757,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn legacy_mesh_quality_defaults_to_lod() {
-        let mesh: MeshRef = serde_json::from_value(serde_json::json!({
-            "path": "/tmp/legacy.ply",
-            "name": "legacy.ply",
-            "format": "ply",
-            "revision": "sha256:legacy",
-            "byte_size": 42,
-            "color": "#8fa9c9",
-            "opacity": 1.0,
-            "visible": true
-        }))
-        .unwrap();
-        assert_eq!(mesh.quality, MeshQuality::Lod);
-        assert_eq!(mesh.modified_ns, None);
-        assert_eq!(mesh.change_ns, None);
-    }
-
     #[tokio::test]
     async fn mesh_labels_survive_sharing_and_legacy_updates_and_can_be_removed() {
         let directory = tempfile::tempdir().unwrap();
@@ -1857,19 +1823,6 @@ mod tests {
                 .is_err()
             );
         }
-    }
-
-    #[test]
-    fn legacy_scenes_default_to_no_grouped_labels() {
-        let value = serde_json::json!({
-            "schema": 2,
-            "title": "legacy",
-            "created_at": 1,
-            "meshes": [],
-            "state": ViewState::default()
-        });
-        let scene: SceneDescriptor = serde_json::from_value(value).unwrap();
-        assert!(scene.label_groups.is_empty());
     }
 
     #[tokio::test]

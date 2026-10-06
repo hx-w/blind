@@ -49,7 +49,7 @@ are skipped. An explicitly supplied directory may itself be a symbolic link.
 
 Arguments retain their order. Each directory's files are sorted by path, with
 duplicate canonical paths removed across the expanded inputs (first occurrence
-wins). `--label` and `--component` indices refer to this final order. Explicit
+wins). `--label`, `--component` and `--quality` indices refer to this final order. Explicit
 files are retained even with unknown extensions, allowing component overrides.
 Empty results, unreadable directories, missing inputs, or more than 256 resources
 fail before creating a link; oversized scans are never silently truncated.
@@ -82,6 +82,35 @@ Open the scene list and choose its **ⓘ 信息** tab. Messages preserve line br
 wrap long words and scroll without truncation. The same tab shows the selected
 entity and Mesh Raw/LOD controls.
 
+
+## Geometry fidelity
+
+Geometry defaults to **LOD**, a derived approximation generated on demand, not
+exact source geometry. Sharing reports `LOD_SELECTED` for each geometry entity
+in JSON `warnings` and on stderr; documents, images and plugin surfaces do not
+produce fidelity warnings. This informational selection does not mark an otherwise
+complete share as partial, and does not claim LOD generation has already occurred.
+
+```sh
+blind share model.ply --quality raw
+blind share model.ply reference.stl notes.md --quality 1=raw --quality 2=lod --format json
+```
+
+Repeat `--quality INDEX=raw|lod` to choose geometry instances independently.
+Indices are 1-based in the final expanded resource list, including nongeometry
+resources. One resource also accepts `--quality raw|lod`. Duplicate/out-of-range
+indices, invalid values, and quality on a resolved nongeometry component fail.
+Raw bypasses derived LOD loading for the initial viewer and PNG export; it does
+not modify source bytes, revision identity, or an existing immutable link.
+
+In basic scene configs and each Collection child's `resources`, use
+`"quality":"raw"` or `"quality":"lod"`. Configs can repeat the same source with
+different quality selections. Collection JSON preserves warnings per child,
+and stderr identifies the corresponding child scene. Advanced/plugin manifests
+accept quality on geometry `resources` and geometry `components`, not attachments.
+ZIP member sharing remains limited to surface components; archive geometry is
+not supported, and a quality selection does not change that boundary.
+
 ## Labels and groups
 
 Attach labels with repeated `--label INDEX[,INDEX...]=TEXT` options. Indices
@@ -113,8 +142,8 @@ from the config file's directory; group members are 1-based resource indices:
 }
 ```
 
-`--config` is mutually exclusive with positional Meshes, `--title`, and
-`--label`; `--host` and `--format` still apply. Unknown JSON
+`--config` is mutually exclusive with positional Meshes, `--title`,
+`--label`, `--component`, `--quality` and `--recursive`; `--host` and `--format` still apply. Unknown JSON
 fields, empty resources, bad labels, duplicate group members, and out-of-range
 indices fail before any scene is registered. See `blind share --help` for the
 complete contract.
