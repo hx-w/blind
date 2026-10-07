@@ -47,7 +47,7 @@ export const annotationOperations={
 export function registerAnnotationOperations(host:OperationHost,editor:AnnotationEditor,viewport:SceneViewport,markup:MarkupCanvas):void {
  const surfaceAvailable=()=>!!editor.surface&&viewport.kind==='spatial';
  host.register(annotationOperations.get,()=>editor.toolbarState);
- host.register(annotationOperations.list,({kind})=>({surface:kind==='screen'?[]:editor.surfaceAnnotations().map(mark=>({...mark,entityId:viewport.kind==='spatial'?viewport.sectionSource(mark.mesh)?.entityId??null:null})),screen:kind==='surface'?[]:markup.exportStrokes()}));
+ host.register(annotationOperations.list,({kind})=>({surface:kind==='screen'?[]:editor.surfaceAnnotations().map(mark=>({...mark,entityId:viewport.kind==='spatial'?viewport.getMeshEntityId(mark.mesh)??null:null})),screen:kind==='surface'?[]:markup.exportStrokes()}));
  host.register(annotationOperations.coordinates,({kind,id}):AnnotationCoordinates=>{
    if(kind==='screen'){
      const strokes=markup.exportStrokes(),index=strokes.findIndex(stroke=>stroke.id===id);
@@ -57,7 +57,7 @@ export function registerAnnotationOperations(host:OperationHost,editor:Annotatio
    if(viewport.kind!=='spatial')throw new OperationError('UNSUPPORTED','Board has no surface coordinates');
    const mark=editor.surfaceAnnotations().find(mark=>mark.id===id);
    if(!mark)throw new OperationError('INVALID_ARGUMENT','Surface mark not found',{target:id});
-   return {id,entityId:viewport.sectionSource(mark.mesh)?.entityId??null,revision:mark.revision,space:'source-world',points:mark.points,normals:mark.normals,controls:mark.controls,displayPoints:mark.points.map(point=>viewport.projectSurface(point))};
+   return {id,entityId:viewport.getMeshEntityId(mark.mesh)??null,revision:mark.revision,space:'source-world',points:mark.points,normals:mark.normals,controls:mark.controls,displayPoints:mark.points.map(point=>viewport.projectSurface(point))};
  });
  host.register(annotationOperations.pick,({point,entityId})=>{
    if(viewport.kind!=='spatial')throw new OperationError('UNSUPPORTED','Board has no Mesh surface picking');
@@ -65,7 +65,7 @@ export function registerAnnotationOperations(host:OperationHost,editor:Annotatio
    if(entityId!==undefined&&mesh===undefined)throw new OperationError('UNKNOWN_ENTITY','Mesh entity does not exist',{target:entityId});
    if(mesh!==undefined&&viewport.modelInfos[mesh]?.format==='pts')throw new OperationError('UNSUPPORTED','Point clouds have no annotatable surface',{target:entityId});
    const hit=viewport.pickSurface(point[0],point[1],mesh);
-   return hit?{entityId:viewport.sectionSource(hit.mesh)?.entityId??null,revision:viewport.modelInfos[hit.mesh].revision,quality:viewport.modelInfos[hit.mesh].quality,space:'source-world',point:hit.point,normal:hit.normal}:null;
+   return hit?{entityId:viewport.getMeshEntityId(hit.mesh)??null,revision:viewport.modelInfos[hit.mesh].revision,quality:viewport.modelInfos[hit.mesh].quality,space:'source-world',point:hit.point,normal:hit.normal}:null;
  },()=>viewport.kind==='spatial');
  host.register(annotationOperations.setTool,({mode})=>{editor.setTool(mode);return editor.toolbarState;});
  host.register(annotationOperations.setColor,({color})=>{editor.setColor(color);return editor.toolbarState;});

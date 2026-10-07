@@ -117,7 +117,7 @@ pub(in crate::server) async fn scene_from_sources(
             group: options.group,
             position: options.position,
             size: options.size,
-            visible: true,
+            visible: options.visible.unwrap_or(true),
             opacity: 1.0,
         });
         if !kind.geometry() {
@@ -155,7 +155,7 @@ pub(in crate::server) async fn scene_from_sources(
             change_ns: observed.change_ns,
             color: crate::scene::default_color(format, i).into(),
             opacity: 1.0,
-            visible: true,
+            visible: options.visible.unwrap_or(true),
             quality: options.quality.unwrap_or_default(),
             label: None,
             translation: options.position.unwrap_or([0.0; 3]),

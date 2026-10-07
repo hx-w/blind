@@ -53,6 +53,15 @@ Share JSON exposes `LOD_SELECTED` warnings per geometry entity; Collection
 results preserve them in each child's `warnings`. These informational warnings
 alone leave `status: "complete"`; unavailable resources still make it partial.
 
+Scene creation `display` entries also accept optional boolean `visible`, defaulting
+to `true`, for both geometry and surfaces. Basic config resources, Collection child
+resources and advanced/plugin `resources` and `components` carry the same field.
+The initial value is reflected in both `meshes[].visible` and `entities[].visible`
+for geometry, and `entities[].visible` for surfaces. Repeated sources may differ
+per instance. Hidden sources still have complete revision metadata and capability
+endpoints, with unchanged registration, source identity and revocation checks.
+Download-only manifest `attachments` reject `visible` rather than ignoring it.
+
 
 For Agent integration, prefer the [CLI JSON contract](cli.md#agent-interface).
 

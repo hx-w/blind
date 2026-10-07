@@ -128,6 +128,8 @@ pub struct Resource {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<crate::scene::MeshQuality>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Panel {
@@ -272,6 +274,10 @@ impl ShareManifest {
             self.attachments.iter().all(|r| r.quality.is_none()),
             "quality applies only to geometry, not attachments"
         );
+        ensure!(
+            self.attachments.iter().all(|r| r.visible.is_none()),
+            "visible applies only to scene geometry or components, not attachments"
+        );
         for resource in &self.resources {
             if resource.quality.is_some() {
                 ensure!(
@@ -367,6 +373,7 @@ mod tests {
                 uri: "oss://x/b/a.ply".into(),
                 label: None,
                 quality: None,
+                visible: None,
             })
             .collect();
         let panels: Vec<_> = (0..42)

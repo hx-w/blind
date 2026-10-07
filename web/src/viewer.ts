@@ -9,7 +9,7 @@ import { createObjectMaterial, updateObjectMaterial } from './material';
 import { MeshLabels } from './labels';
 import { SurfaceInk } from './surface-render';
 import type { SurfaceAnnotation, Vec3 } from './api';
-import { mapConcurrent } from './load-queue';
+import { LoadQueue } from './load-queue';
 import { OperationError } from './operations/core';
 import shader from '../../shaders/matte.json';
 
@@ -29,7 +29,9 @@ declare module 'three/addons/controls/ArcballControls.js' {
 export interface ViewerMesh extends PublicMesh {
   raw_bytes: number;
   lod_bytes?: number;
+  loadState: 'unloaded' | 'loading' | 'ready' | 'error';
   loading: boolean;
+  load_error?: string;
   lod_error?: string;
 }
 
@@ -37,6 +39,16 @@ interface Model {
   info: ViewerMesh;
   object: THREE.Object3D;
   bounds: THREE.Box3;
+  residentQuality?: MeshQuality;
+  task?: ModelLoad;
+  fallbackBytes?: number;
+}
+
+interface ModelLoad {
+  quality: MeshQuality;
+  explicit: boolean;
+  controller: AbortController;
+  promise: Promise<void>;
 }
 
 interface LoadedObject {
@@ -50,6 +62,10 @@ export interface MeshLoadProgress {
   total: number;
   rawFallbacks: number;
   failed: number;
+  /** Admitted resource requests by quality; fallback fetches are counted separately. */
+  raw: number;
+  lod: number;
+  pending: number;
 }
 export interface SectionSource {
   object: THREE.Object3D;
@@ -65,6 +81,12 @@ export class MeshViewer {
   private pendingMaterials = false;
   private pendingLayout = false;
   private pendingModelChange = false;
+  private readonly loadQueue = new LoadQueue(LOAD_CONCURRENCY);
+  private loadLifecycle = new AbortController();
+  private disposed = false;
+  private rawFallbackBytes = 0;
+  private loadProgress: MeshLoadProgress = {completed: 0, total: 0, rawFallbacks: 0, failed: 0, raw: 0, lod: 0, pending: 0};
+  private readonly pendingDemands = new Set<number>();
   private transition: Promise<'committed' | 'interrupted'> = Promise.resolve('committed');
   private finishTransition?: (status: 'committed' | 'interrupted') => void;
   private reservedRight = 0;
@@ -91,6 +113,7 @@ export class MeshViewer {
   entityUpdates?: () => SceneUpdate['entities'];
   get activeCamera(): THREE.PerspectiveCamera | THREE.OrthographicCamera { return this.camera; }
   invalidate(): void {
+    if (this.disposed) return;
     this.dirty = true;
     if (!this.frameRequested) {
       this.frameRequested = true;
@@ -172,6 +195,7 @@ export class MeshViewer {
     model.info.opacity = opacity; this.applyMaterials();
     if (wasVisible !== (opacity > 0)) this.relayout();
     this.modelChanged();
+    this.demandGeometry(index);
   }
   batchStyles<T>(apply: () => T): T {
     this.styleBatchDepth++;
@@ -183,6 +207,9 @@ export class MeshViewer {
         if (materials) this.applyMaterials();
         if (layout) this.relayout();
         if (changed) this.onModelChange?.();
+        const demands = [...this.pendingDemands];
+        this.pendingDemands.clear();
+        for (const index of demands) this.demandGeometry(index);
       }
     }
   }
@@ -258,8 +285,16 @@ export class MeshViewer {
     this.invalidate();
   }
 
-  async load(scene: PublicScene, skipHidden = false): Promise<void> {
+  initialize(scene: PublicScene): void {
+    if (this.disposed) throw new OperationError('DISPOSED', 'Geometry viewer is disposed');
+    this.loadLifecycle.abort(new OperationError('CANCELLED', 'Scene was reinitialized'));
+    this.loadLifecycle = new AbortController();
+    this.cancelFit();
     this.disposeModels();
+    this.componentBounds.makeEmpty();
+    this.pendingDemands.clear();
+    this.rawFallbackBytes = 0;
+    this.loadProgress = {completed: 0, total: 0, rawFallbacks: 0, failed: 0, raw: 0, lod: 0, pending: 0};
     const entities = scene.entities;
     this.entityIdsByMesh = new Map(entities.filter(entity => entity.source.kind === 'mesh').map(entity => [entity.source.index, entity.id]));
     this.labelGroups = scene.label_groups;
@@ -268,63 +303,200 @@ export class MeshViewer {
     this.state.light ??= {azimuth: 45, elevation: 20, intensity: 1};
     this.state.strokes ??= [];
     this.state.annotations ??= [];
+    this.annotationSelection = undefined;
+    this.annotationPreview = undefined;
     this.selected = Math.min(scene.state.selected, Math.max(scene.meshes.length - 1, 0));
-    let completed = 0;
-    let rawFallbacks = 0;
-    let rawFallbackBytes = 0;
-    let failed = 0;
-    this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
-    const loaded = await mapConcurrent(scene.meshes, LOAD_CONCURRENCY, async (info) => {
-      let result;
-      const requestedQuality = this.annotations.some(mark => mark.mesh === scene.meshes.indexOf(info)) ? 'raw' : info.quality ?? 'lod';
-      if (skipHidden && (!info.visible || info.opacity === 0)) {
-        completed += 1;
-        this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
-        return {quality: requestedQuality};
-      }
-      try {
-        result = { quality: requestedQuality, asset: await loadObject(info, requestedQuality) };
-      } catch (error) {
-        const lodError = error instanceof Error ? error.message : 'Mesh 不可用';
-        if (
-          requestedQuality === 'lod'
-          && info.byte_size <= RAW_FALLBACK_BYTES
-          && rawFallbackBytes + info.byte_size <= RAW_FALLBACK_SCENE_BYTES
-        ) {
-          rawFallbackBytes += info.byte_size;
-          try {
-            result = { quality: 'raw' as const, asset: await loadObject(info, 'raw'), lodError };
-            rawFallbacks += 1;
-          } catch (rawError) {
-            failed += 1;
-            result = { quality: requestedQuality, lodError: rawError instanceof Error ? rawError.message : lodError };
-          }
-        } else {
-          failed += 1;
-          result = { quality: requestedQuality, lodError };
-        }
-      }
-      completed += 1;
-      this.onLoadProgress?.({ completed, total: scene.meshes.length, rawFallbacks, failed });
-      return result;
-    });
-    loaded.forEach(({ quality, asset, lodError }, index) => {
-      const source = scene.meshes[index];
-      const info: ViewerMesh = { ...source, raw_bytes: source.byte_size, loading: false, lod_error: lodError };
-      const object = asset?.object ?? new THREE.Group();
-      if (asset) this.applyLoadedInfo(info, quality, asset);
-      this.prepareObject(object, index, info);
-      this.models.push({ info, object, bounds: new THREE.Box3().setFromObject(object) });
+    this.models = scene.meshes.map((source, index) => {
+      const info: ViewerMesh = {
+        ...structuredClone(source),
+        visible: source.visible ?? true,
+        quality: this.annotations.some(mark => mark.mesh === index) ? 'raw' : source.quality ?? 'lod',
+        raw_bytes: source.byte_size,
+        loadState: 'unloaded',
+        loading: false,
+      };
+      const object = new THREE.Group();
+      object.position.fromArray(info.translation ?? [0, 0, 0]);
+      object.userData.modelIndex = index;
       this.scene.add(object);
+      return {info, object, bounds: new THREE.Box3()};
     });
-    this.applyState();
+    this.perspective.position.fromArray(shader.camera.default_view_direction);
+    this.perspective.up.set(0, 1, 0);
+    this.perspective.fov = shader.camera.fov_degrees;
+    this.perspective.zoom = 1;
+    this.perspective.updateProjectionMatrix();
+    this.orthographic.position.copy(this.perspective.position);
+    this.orthographic.up.copy(this.perspective.up);
+    this.orthographic.zoom = 1;
+    this.orthographic.userData.height = this.perspective.position.length() * 1.05;
+    this.controls.target.set(0, 0, 0);
     this.refreshVisibleBounds();
+    // Metadata, state and saved framing are usable before the first fetch.
+    this.applyState();
     this.resize();
-    await settledLayout();
     if (scene.state.camera) this.restoreCamera(scene.state);
-    else this.fitAll(false);
     this.labels.invalidateLayout();
     this.resizeHelpers();
+    this.emitLoadProgress();
+    this.modelChanged();
+  }
+
+  async ensureLoaded(indices: readonly number[]): Promise<void> {
+    if (this.disposed) throw new OperationError('DISPOSED', 'Geometry viewer is disposed');
+    await this.waitForLoads(indices.map(index => this.requestModel(index, this.desiredQuality(index), true)));
+  }
+
+  async loadVisible(): Promise<void> {
+    if (this.disposed) throw new OperationError('DISPOSED', 'Geometry viewer is disposed');
+    const requests: Promise<void>[] = [];
+    this.models.forEach((model, index) => {
+      if (this.effectiveVisible(model)) requests.push(this.requestModel(index, this.desiredQuality(index), false));
+    });
+    await this.waitForLoads(requests);
+  }
+
+  private desiredQuality(index: number): MeshQuality {
+    return this.annotations.some(mark => mark.mesh === index) ? 'raw' : this.models[index]?.info.quality ?? 'lod';
+  }
+
+  private effectiveVisible(model: Model): boolean { return model.info.visible && model.info.opacity > 0; }
+
+  private async waitForLoads(requests: readonly Promise<void>[]): Promise<void> {
+    const results = await Promise.allSettled(requests);
+    const failure = results.find(result => result.status === 'rejected');
+    if (failure?.status === 'rejected') throw failure.reason;
+  }
+
+  private emitLoadProgress(): void {
+    this.loadProgress.pending = this.loadProgress.total - this.loadProgress.completed;
+    this.onLoadProgress?.({...this.loadProgress});
+  }
+
+  private demandGeometry(index: number): void {
+    if (this.styleBatchDepth) { this.pendingDemands.add(index); return; }
+    const model = this.models[index];
+    if (!model || this.disposed || !this.effectiveVisible(model) || model.info.loadState === 'error') return;
+    // Automatic visibility demands report failures through metadata, never as
+    // unhandled promise rejections. Explicit consumers still receive the error.
+    void this.requestModel(index, this.desiredQuality(index), false).catch(() => {});
+  }
+
+  private requestModel(index: number, quality: MeshQuality, explicit: boolean): Promise<void> {
+    if (this.disposed) return Promise.reject(new OperationError('DISPOSED', 'Geometry viewer is disposed'));
+    const model = this.models[index];
+    if (!model) return Promise.reject(new OperationError('UNKNOWN_ENTITY', 'Unknown geometry resource', {target: String(index)}));
+    if (quality === 'lod' && this.annotations.some(mark => mark.mesh === index)) {
+      return Promise.reject(new OperationError('CONFLICT', '含表面标记的 Mesh 保持 Raw，以保证位置一致', {target: this.entityIdsByMesh.get(index)}));
+    }
+    const previous = model.task;
+    if (previous?.quality === quality && !previous.controller.signal.aborted) {
+      previous.explicit ||= explicit;
+      return previous.promise;
+    }
+    previous?.controller.abort(new OperationError('CANCELLED', 'Geometry quality request was superseded', {target: this.entityIdsByMesh.get(index)}));
+    model.task = undefined;
+    model.info.quality = quality;
+    model.info.load_error = undefined;
+    if (model.residentQuality === quality) {
+      model.info.loadState = 'ready';
+      model.info.loading = false;
+      this.modelChanged();
+      return Promise.resolve();
+    }
+    const lifecycle = this.loadLifecycle.signal;
+    const controller = new AbortController();
+    const cancel = () => controller.abort(lifecycle.reason);
+    lifecycle.addEventListener('abort', cancel, {once: true});
+    model.info.loadState = 'loading';
+    model.info.loading = true;
+    model.info.lod_error = undefined;
+    let request!: ModelLoad;
+    const finish = (installed: boolean, error?: unknown): void => {
+      lifecycle.removeEventListener('abort', cancel);
+      if (lifecycle !== this.loadLifecycle.signal || this.disposed) return;
+      this.loadProgress.completed++;
+      if (error !== undefined && !controller.signal.aborted) this.loadProgress.failed++;
+      if (model.task === request && this.models[index] === model) {
+        model.task = undefined;
+        model.info.loading = false;
+        if (error !== undefined && !controller.signal.aborted) {
+          model.info.loadState = 'error';
+          model.info.load_error = error instanceof Error ? error.message : 'Mesh 不可用';
+        } else {
+          model.info.loadState = installed || model.residentQuality === model.info.quality ? 'ready' : 'unloaded';
+        }
+        this.modelChanged();
+      }
+      this.emitLoadProgress();
+    };
+    const promise = this.loadQueue.enqueue(() => this.loadModel(index, model, request), controller.signal).then(
+      installed => { finish(installed); },
+      error => { finish(false, error); throw error; },
+    );
+    request = {quality, explicit, controller, promise};
+    model.task = request;
+    this.loadProgress.total++;
+    this.loadProgress[quality]++;
+    this.emitLoadProgress();
+    this.modelChanged();
+    return promise;
+  }
+
+  private async loadModel(index: number, model: Model, request: ModelLoad): Promise<boolean> {
+    const signal = request.controller.signal;
+    signal.throwIfAborted();
+    // A visible snapshot can be hidden while waiting for the global queue.
+    // An explicit geometry/quality consumer upgrades the shared request.
+    if (!request.explicit && !this.effectiveVisible(model)) return false;
+    let loaded: LoadedObject | undefined;
+    let quality = request.quality;
+    let fallback = false;
+    let installed = false;
+    try {
+      try {
+        loaded = await loadObject(model.info, quality, signal);
+      } catch (error) {
+        signal.throwIfAborted();
+        if (quality !== 'lod') throw error;
+        model.info.lod_error = 'LOD 资源不可用';
+        this.modelChanged();
+        signal.throwIfAborted();
+        const bytes = model.info.byte_size;
+        if (bytes > RAW_FALLBACK_BYTES || (model.fallbackBytes === undefined && this.rawFallbackBytes + bytes > RAW_FALLBACK_SCENE_BYTES)) throw error;
+        if (model.fallbackBytes === undefined) {
+          model.fallbackBytes = bytes;
+          this.rawFallbackBytes += bytes;
+        }
+        quality = 'raw';
+        loaded = await loadObject(model.info, quality, signal);
+        fallback = true;
+      }
+      signal.throwIfAborted();
+      if (this.models[index] !== model || model.task !== request) throw new OperationError('CANCELLED', 'Geometry request is no longer current');
+      if (quality === 'lod' && this.annotations.some(mark => mark.mesh === index)) throw new OperationError('CONFLICT', '含表面标记的 Mesh 保持 Raw，以保证位置一致');
+      this.prepareObject(loaded.object, index, model.info);
+      signal.throwIfAborted();
+      loaded.object.visible = model.info.visible;
+      const previous = model.object;
+      this.scene.add(loaded.object);
+      this.scene.remove(previous);
+      model.object = loaded.object;
+      model.bounds.setFromObject(loaded.object);
+      model.residentQuality = quality;
+      this.applyLoadedInfo(model.info, quality, loaded);
+      installed = true;
+      disposeObject(previous);
+      if (fallback) this.loadProgress.rawFallbacks++;
+      this.relayout();
+      return true;
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error instanceof OperationError && (error.code === 'CANCELLED' || error.code === 'CONFLICT')) throw error;
+      throw new OperationError('RESOURCE_UNAVAILABLE', `${quality === 'raw' ? 'Raw' : 'LOD'} geometry is unavailable`, {target: this.entityIdsByMesh.get(index) ?? `mesh-${index}`, retryable: true});
+    } finally {
+      if (loaded && !installed) disposeObject(loaded.object);
+    }
   }
 
   get selectedIndex(): number { return this.selected; }
@@ -335,6 +507,7 @@ export class MeshViewer {
     for (const [index, id] of this.entityIdsByMesh) if (id === entityId) return index;
     return undefined;
   }
+  getMeshEntityId(index: number): string | undefined { return this.entityIdsByMesh.get(index); }
   sectionSource(index: number): SectionSource | null {
     const model = this.models[index];
     return model && this.hasSurface(index)
@@ -349,7 +522,7 @@ export class MeshViewer {
     const target = this.sectionTarget(index); if (!target) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.setPickRay();
     return this.raycaster.intersectObject(target.object, true)[0]?.point.clone() ?? null;
   }
   sectionCameraBasis(): {right: THREE.Vector3; up: THREE.Vector3; forward: THREE.Vector3} {
@@ -411,7 +584,21 @@ export class MeshViewer {
   setInteractionEnabled(enabled: boolean): void { this.controls.enabled = enabled; this.interactionEnabled = enabled; this.pointerStart = null; }
   get annotations(): SurfaceAnnotation[] { return this.state?.annotations ?? []; }
   setAnnotations(marks: SurfaceAnnotation[], selected?: string, preview?: Vec3): void {
-    this.state.annotations = marks; this.annotationSelection = selected; this.annotationPreview = preview; this.invalidate();
+    this.state.annotations = marks;
+    this.annotationSelection = selected;
+    this.annotationPreview = preview;
+    this.models.forEach((model, index) => {
+      if (model.info.quality === 'raw' || !marks.some(mark => mark.mesh === index)) return;
+      model.task?.controller.abort(new OperationError('CANCELLED', 'Surface annotations require Raw geometry', {target: this.entityIdsByMesh.get(index)}));
+      model.task = undefined;
+      model.info.quality = 'raw';
+      model.info.loading = false;
+      model.info.load_error = undefined;
+      model.info.loadState = model.residentQuality === 'raw' ? 'ready' : 'unloaded';
+      this.modelChanged();
+      this.demandGeometry(index);
+    });
+    this.invalidate();
   }
   hasSurface(index: number): boolean {
     let found = false;
@@ -426,10 +613,17 @@ export class MeshViewer {
   pickSurface(x: number, y: number, target?: number): {point: Vec3; normal: Vec3; mesh: number} | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set((x - rect.left) / rect.width * 2 - 1, 1 - (y - rect.top) / rect.height * 2);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.setPickRay();
     const hit = this.raycaster.intersectObjects(this.models.filter(m => m.info.visible && m.info.opacity > 0).map(m => m.object), true)[0];
     if (!hit || (target !== undefined && hit.object.userData.modelIndex !== target) || !(hit.object instanceof THREE.Mesh) || !hit.face) return null;
     return {mesh: hit.object.userData.modelIndex, point: hit.point.toArray() as Vec3, normal: hit.face.normal.clone().transformDirection(hit.object.matrixWorld).toArray() as Vec3};
+  }
+  private setPickRay(): void {
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    if (this.camera instanceof THREE.OrthographicCamera) {
+      // Orthographic bounds may cross the saved eye without changing its pose.
+      this.raycaster.ray.origin.set(this.pointer.x, this.pointer.y, -1).unproject(this.camera);
+    }
   }
   geometryOccludes(x: number, y: number, point: Vec3): boolean {
     // Input must follow painted coverage, including wireframe gaps and points.
@@ -504,44 +698,11 @@ export class MeshViewer {
     model.object.visible = visible;
     this.relayout();
     this.modelChanged();
+    this.demandGeometry(index);
   }
 
-  private readonly qualityLoads = new Map<number, Promise<void>>();
-  async setQuality(index: number, quality: MeshQuality): Promise<void> {
-    while(this.qualityLoads.has(index)) await this.qualityLoads.get(index)!.catch(()=>{});
-    const request=this.loadQuality(index,quality); this.qualityLoads.set(index,request);
-    try {await request;} finally {if(this.qualityLoads.get(index)===request)this.qualityLoads.delete(index);}
-  }
-  private async loadQuality(index: number, quality: MeshQuality): Promise<void> {
-    if (quality === 'lod' && this.annotations.some(mark => mark.mesh === index)) throw new Error('含表面标记的 Mesh 保持 Raw，以保证位置一致');
-    const model = this.models[index];
-    if (!model || model.info.quality === quality || model.info.loading) return;
-    model.info.loading = true;
-    model.info.lod_error = undefined;
-    this.onModelChange?.();
-    try {
-      const loaded = await loadObject(model.info, quality);
-      if(quality==='lod' && this.annotations.some(mark=>mark.mesh===index)) {
-        disposeObject(loaded.object); throw new Error('含表面标记的 Mesh 保持 Raw，以保证位置一致');
-      }
-      this.prepareObject(loaded.object, index, model.info);
-      loaded.object.visible = model.info.visible;
-      this.scene.add(loaded.object);
-      this.scene.remove(model.object);
-      disposeObject(model.object);
-      model.object = loaded.object;
-      model.bounds.setFromObject(loaded.object);
-      this.applyLoadedInfo(model.info, quality, loaded);
-      this.relayout();
-    } catch (error) {
-      if (quality === 'lod') {
-        model.info.lod_error = error instanceof Error ? error.message : 'LOD 不可用';
-      }
-      throw error;
-    } finally {
-      model.info.loading = false;
-      this.onModelChange?.();
-    }
+  setQuality(index: number, quality: MeshQuality): Promise<void> {
+    return this.requestModel(index, quality, true);
   }
 
   setMeshColor(index: number, color: string): void {
@@ -686,7 +847,6 @@ export class MeshViewer {
     if (this.styleBatchDepth) { this.pendingLayout = true; return; }
     this.refreshVisibleBounds();
     this.resizeHelpers();
-    this.prepareOrbit();
     this.updateClipping();
     this.invalidate();
   }
@@ -694,7 +854,8 @@ export class MeshViewer {
   private applyState(): void {
     this.setBackground(this.state.background); this.axes.visible = this.state.axes;
     this.models.forEach((model) => { model.object.visible = model.info.visible; });
-    if (this.state.projection === 'orthographic') { this.state.projection = 'perspective'; this.setProjection('orthographic'); }
+    this.camera = this.state.projection === 'orthographic' ? this.orthographic : this.perspective;
+    this.syncCamera();
     this.applyMaterials();
     this.setSection(this.state.section ?? null);
   }
@@ -711,6 +872,8 @@ export class MeshViewer {
       child.renderOrder = index;
       const geometry = child.geometry as THREE.BufferGeometry;
       normalizeGeometry(geometry);
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of materials) material.dispose();
       child.material = createObjectMaterial(child, {
         color: info.color,
         opacity: info.opacity,
@@ -866,7 +1029,7 @@ export class MeshViewer {
     return true;
   }
 
-  // Cross-renderer contract with clip_planes in src/render.rs; change both in lockstep.
+  // Cross-renderer contract with clip_planes in src/render/gpu.rs.
   private updateClipping(): void {
     const box = this.visibleBounds;
     if (box.isEmpty()) return;
@@ -878,7 +1041,8 @@ export class MeshViewer {
     const span = Math.abs(half.x * forward.x) + Math.abs(half.y * forward.y) + Math.abs(half.z * forward.z);
     const centerDepth = center.sub(this.camera.position).dot(forward);
     const padding = Math.max(radius * shader.camera.clip_padding_factor, 1e-6);
-    const near = Math.max(radius * shader.camera.near_floor_factor, centerDepth - span - padding);
+    const closest = centerDepth - span - padding;
+    const near = this.camera instanceof THREE.OrthographicCamera ? closest : Math.max(radius * shader.camera.near_floor_factor, closest);
     // far must clear near by a full slack window even when the near floor wins.
     const far = Math.max(near + padding * 2, centerDepth + span + padding);
     this.camera.near = near;
@@ -924,7 +1088,7 @@ export class MeshViewer {
       return pixel[3] > 0;
     })) return;
     this.pointer.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.setPickRay();
     const hit = this.raycaster.intersectObjects(this.models.filter(model => model.info.visible && model.info.opacity > 0).map(model => model.object), true)[0];
     const index = hit?.object.userData.modelIndex as number | undefined;
     if (index === undefined) return;
@@ -936,9 +1100,29 @@ export class MeshViewer {
     this.lastTap = { index, time: now }; this.select(index);
   };
   private disposeModels(): void { for (const model of this.models) { this.scene.remove(model.object); disposeObject(model.object); } this.models = []; }
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.loadLifecycle.abort(new OperationError('DISPOSED', 'Geometry viewer is disposed'));
+    this.cancelFit();
+    this.resizeObserver.disconnect();
+    this.renderer.domElement.removeEventListener('pointerdown', this.pointerDown);
+    this.renderer.domElement.removeEventListener('pointerup', this.pointerUp);
+    this.controls.dispose();
+    this.disposeModels();
+    if (this.state) this.setSectionSegments([]);
+    disposeObject(this.surfaceInk.object);
+    this.axes.geometry.dispose();
+    for (const material of Array.isArray(this.axes.material) ? this.axes.material : [this.axes.material]) material.dispose();
+    this.renderListeners.clear();
+    this.pendingDemands.clear();
+    this.renderer.dispose();
+    this.renderer.domElement.remove();
+    this.labelRoot.remove();
+  }
   private animate = (): void => {
     this.frameRequested = false;
-    if (!this.dirty) return;
+    if (this.disposed || !this.dirty) return;
     this.dirty = false;
     const width = this.viewportWidth; const height = Math.max(this.root.clientHeight, 1);
     this.renderer.getSize(this.rendererSize);
@@ -959,9 +1143,11 @@ function meshUrl(info: PublicMesh, quality: MeshQuality): string {
   return `${path}/lod${query ? `?${query}` : ''}`;
 }
 
-async function loadObject(info: PublicMesh, quality: MeshQuality): Promise<LoadedObject> {
-  const response = await fetch(meshUrl(info, quality), { cache: 'no-store' }); if (!response.ok) throw await apiError(response);
+async function loadObject(info: PublicMesh, quality: MeshQuality, signal: AbortSignal): Promise<LoadedObject> {
+  const response = await fetch(meshUrl(info, quality), {cache: 'no-store', signal});
+  if (!response.ok) throw await apiError(response);
   const buffer = await response.arrayBuffer();
+  signal.throwIfAborted();
   // The server owns the container decision — LOD and PTS raw ship as binary
   // PLY — so pick the loader from the response content type instead of
   // mirroring those rules here.
@@ -972,6 +1158,10 @@ async function loadObject(info: PublicMesh, quality: MeshQuality): Promise<Loade
   else {
     const geometry = new PLYLoader().parse(buffer);
     object = geometry.index?.count ? new THREE.Mesh(geometry) : new THREE.Points(geometry);
+  }
+  if (signal.aborted) {
+    disposeObject(object);
+    signal.throwIfAborted();
   }
   return {
     object,
@@ -1003,11 +1193,6 @@ function isDrawable(child: THREE.Object3D): child is Drawable {
   return child instanceof THREE.Mesh || child instanceof THREE.Points;
 }
 
-function settledLayout(): Promise<void> {
-  return new Promise((resolve) => {
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-  });
-}
 
 function normalizeGeometry(geometry: THREE.BufferGeometry): void {
   for (const [name, attribute] of Object.entries(geometry.attributes)) {

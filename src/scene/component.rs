@@ -258,6 +258,9 @@ pub struct DisplayOptions {
     /// Explicit geometry fidelity; omission retains the scene's LOD default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality: Option<super::MeshQuality>,
+    /// Initial instance visibility; omission keeps geometry and surfaces visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visible: Option<bool>,
     #[serde(default)]
     pub placement: Placement,
     /// Exact ZIP member path. Extraction belongs to the source layer, not renderers.
@@ -471,5 +474,19 @@ mod tests {
             .is_err()
         );
         assert!(serde_json::from_str::<DisplayOptions>(r#"{"componnet":"trace"}"#).is_err());
+    }
+    #[test]
+    fn initial_visibility_is_optional_and_preserves_false() {
+        let default: DisplayOptions = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.visible, None);
+        assert!(
+            serde_json::to_value(&default)
+                .unwrap()
+                .get("visible")
+                .is_none()
+        );
+        let hidden: DisplayOptions = serde_json::from_str(r#"{"visible":false}"#).unwrap();
+        assert_eq!(hidden.visible, Some(false));
+        assert_eq!(serde_json::to_value(&hidden).unwrap()["visible"], false);
     }
 }

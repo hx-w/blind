@@ -190,7 +190,7 @@ metadata; Blind alone reads artifact bytes and signs OSS requests.
   "title": "Case review",
   "resources": [
     {"id": "jaw", "uri": "oss://team/models/jaw.ply", "label": "Jaw"},
-    {"id": "crown", "uri": "oss://team/models/crown.ply", "label": "Crown"}
+    {"id": "crown", "uri": "oss://team/models/crown.ply", "label": "Crown", "visible": false}
   ],
   "panels": [
     {"id": "assembled", "label": "Assembly", "members": ["jaw", "crown"]},
@@ -208,6 +208,15 @@ member IDs must exist and cannot repeat within a panel. Panels must cover all
 geometry resources. Reusing one resource across panels is supported. Limits:
 4,096 geometry references, 4,096 attachments, 64 panels, 120 characters per label.
 Warnings carry `code`, `message`, and optional `resource_id`.
+
+Geometry `resources` and all `components` accept optional boolean `visible`;
+omission means `true`. Each panel instance inherits its referenced resource's
+visibility. Distinct IDs can reference the same URI with different visibility,
+without allowing a cached source read to overwrite either instance's selection.
+Native and plugin surfaces can also start hidden. Hidden resources still undergo
+source observation, registration and revision pinning, and retain complete scene
+metadata. Download-only `attachments` reject `visible`, including `true`, because
+they have no scene visibility. Collection plugin children preserve these fields.
 
 Geometry `resources` and geometry `components` accept optional `quality` with
 `"raw"` or `"lod"`; omission retains the LOD default. Repeated source URIs can

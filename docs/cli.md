@@ -133,7 +133,7 @@ from the config file's directory; group members are 1-based resource indices:
   "title": "Case review",
   "resources": [
     { "path": "meshes/crown.ply", "label": "生成牙冠" },
-    { "path": "meshes/donor-a.ply" },
+    { "path": "meshes/donor-a.ply", "visible": false },
     { "path": "meshes/donor-b.ply" }
   ],
   "groups": [
@@ -147,6 +147,14 @@ from the config file's directory; group members are 1-based resource indices:
 fields, empty resources, bad labels, duplicate group members, and out-of-range
 indices fail before any scene is registered. See `blind share --help` for the
 complete contract.
+
+Each resource accepts optional `visible: true|false`, defaulting to `true`, for
+geometry, native documents and plugin surfaces. This applies to each Collection
+child's resources and to advanced/plugin manifest `resources` and `components`.
+Repeated sources can have different visibility and quality per instance; neither
+changes source identity. Hidden sources are still observed, registered and pinned
+to their revisions, with complete metadata retained. Download-only manifest
+`attachments` reject `visible` instead of silently ignoring it.
 
 ## Collections
 

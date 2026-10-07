@@ -18,6 +18,7 @@ export const entitySnapshotSchema = s.object({
     input: s.object({spatial: s.enum(['scene', 'content']), focus: s.enum(['scene', 'content']), fullscreen: s.enum(['scene', 'content'])}),
     geometry: s.optional(s.enum(['mesh', 'points'])), host_space: s.optional(s.enum(['planar', 'spatial'])), operations: s.optional(s.array(s.string()))}),
   color: s.optional(s.string()), quality: s.optional(s.enum(['raw', 'lod'])), loading: s.optional(s.boolean()), unavailable: s.optional(s.string()),
+  loadState: s.optional(s.enum(['unloaded', 'loading', 'ready', 'error'])),
 });
 const label = s.object({id, label: s.string({min: 1, max: 120})});
 const style = s.object({id, visible: s.optional(s.boolean()), opacity: s.optional(s.number({min: 0, max: 1})), color: s.optional(s.string({pattern: '^#[0-9a-fA-F]{6}$'}))});
@@ -49,11 +50,11 @@ export function registerEntityOperations(host: OperationHost, components: Compon
     host.register(entityOperations.get, ({id}) => components.getEntity(id)),
     host.register(entityOperations.select, ({id}) => components.selectEntity(id)),
     host.register(entityOperations.label, ({id, label}) => components.labelEntity(id, label)),
-    host.register(entityOperations.style, async ({id, ...style}) => { const result = components.styleEntity(id, style); await components.whenSettled(); return result; }),
-    host.register(entityOperations.isolate, async ({id, fit}) => { const result = components.isolateEntity(id, fit); await components.whenSettled(); return result; }),
+    host.register(entityOperations.style, ({id, ...style}) => components.styleEntity(id, style)),
+    host.register(entityOperations.isolate, ({id, fit}) => components.isolateEntity(id, fit)),
     host.register(entityOperations.quality, ({id, quality}) => components.qualityEntity(id, quality)),
     host.register(entityOperations.placement, async ({id, placement}) => { components.placementEntity(id, placement); await components.whenSettled(); return components.getEntity(id); }),
-    host.register(entityOperations.show, async ({ids, opacity, fit}) => { const result = components.showEntities(ids, opacity, fit); await components.whenSettled(); return result; }),
+    host.register(entityOperations.show, ({ids, opacity, fit}) => components.showEntities(ids, opacity, fit)),
     host.register(entityOperations.focus, ({ids, animate}) => components.focusEntities(ids, animate)),
     host.register(entityOperations.sceneList, params => components.setSceneList(params)),
     host.register(entityOperations.sceneListGet, () => components.sceneListState),

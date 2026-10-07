@@ -350,4 +350,7 @@ svg.lucide { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap
 
 .scene-notice { position: absolute; z-index: 8; top: max(18px, env(safe-area-inset-top)); left: 16px; max-width: calc(100% - 158px); padding: 9px 12px; border: 1px solid #aa8b58; border-radius: 8px; color: #ffe0ae; background: #343028; text-align: left; font: inherit; font-size: 12px; cursor: pointer; }
 .scene-notice[hidden] { display: none; }
+.geometry-progress { position: absolute; z-index: 8; top: max(18px, env(safe-area-inset-top)); left: 16px; max-width: calc(100% - var(--fixed-panel-space, 0px) - 32px); padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--text-secondary); background: var(--canvas); font-size: 12px; line-height: 1.5; font-variant-numeric: tabular-nums; pointer-events: none; }
+.geometry-progress[hidden] { display: none; }
+.viewer:has(.scene-notice:not([hidden])) .geometry-progress { top: calc(max(18px, env(safe-area-inset-top)) + 46px); }
 .scene-artifacts p { margin: 10px 0; line-height: 1.5; overflow-wrap: anywhere; }

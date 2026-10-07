@@ -779,7 +779,7 @@ fn load_scene_geometry_bytes(
     let horizontal_fov = 2.0 * ((default_fov * 0.5).tan() * aspect).atan();
     let fit_fov = default_fov.min(horizontal_fov);
     let default_distance = diagonal * 0.5 / (fit_fov * 0.5).sin() * camera_spec.fit_padding;
-    let mut position = camera
+    let position = camera
         .map(|value| Vec3::from_array(value.position))
         .unwrap_or(
             center
@@ -789,9 +789,6 @@ fn load_scene_geometry_bytes(
     let target = camera
         .map(|value| Vec3::from_array(value.target))
         .unwrap_or(center);
-    if matches!(scene.state.projection, Projection::Orthographic) {
-        position = orthographic_position(position, target, center, extent * 0.5, camera_spec);
-    }
     let up = camera
         .map(|value| Vec3::from_array(value.up))
         .unwrap_or(Vec3::Y);
@@ -813,7 +810,14 @@ fn load_scene_geometry_bytes(
             .total_cmp(&left.center.distance_squared(position)),
         (false, false) => std::cmp::Ordering::Equal,
     });
-    let (near, far) = clip_planes(center, extent * 0.5, position, forward, camera_spec);
+    let (near, far) = clip_planes(
+        center,
+        extent * 0.5,
+        position,
+        forward,
+        camera_spec,
+        scene.state.projection,
+    );
     let projection = match scene.state.projection {
         Projection::Perspective => Mat4::perspective_rh(
             camera
@@ -1168,24 +1172,6 @@ fn surface_anchor_visible(origin: Vec3, point: Vec3, occluders: &Occluders) -> b
     occluders.visible(origin, point)
 }
 
-// Orthographic framing is independent of eye distance. Match the Viewer orbit safety.
-fn orthographic_position(
-    position: Vec3,
-    target: Vec3,
-    center: Vec3,
-    half: Vec3,
-    camera: &CameraSpec,
-) -> Vec3 {
-    let offset = position - target;
-    let safe_distance =
-        center.distance(target) + half.length().max(1e-6) * (1.0 + camera.clip_padding_factor);
-    if offset.length() < safe_distance {
-        target + offset.try_normalize().unwrap_or(Vec3::Z) * safe_distance
-    } else {
-        position
-    }
-}
-
 /// Mirrors `MeshViewer.updateClipping` in web/src/viewer.ts; change both in lockstep.
 fn clip_planes(
     center: Vec3,
@@ -1193,13 +1179,18 @@ fn clip_planes(
     camera_position: Vec3,
     forward: Vec3,
     camera: &CameraSpec,
+    projection: Projection,
 ) -> (f32, f32) {
     let radius = half.length().max(1e-6);
     // Corner depths of an AABB span the center depth by the summed per-axis projections.
     let span = forward.abs().dot(half);
     let center_depth = (center - camera_position).dot(forward);
     let padding = (radius * camera.clip_padding_factor).max(1e-6);
-    let near = (radius * camera.near_floor_factor).max(center_depth - span - padding);
+    let closest = center_depth - span - padding;
+    let near = match projection {
+        Projection::Orthographic => closest,
+        Projection::Perspective => (radius * camera.near_floor_factor).max(closest),
+    };
     // far must clear near by a full slack window even when the near floor wins.
     let far = (near + padding * 2.0).max(center_depth + span + padding);
     (near, far)
@@ -1738,27 +1729,21 @@ mod tests {
             Vec3::new(0.0, 0.0, 6.8),
             Vec3::NEG_Z,
             &material.camera,
+            Projection::Perspective,
         );
 
-        // A saved orthographic eye inside the scene must be moved back without
-        // changing its target or viewing direction; the entire box then fits.
-        let eye = orthographic_position(
-            Vec3::new(0.0, 0.0, 0.2),
-            Vec3::ZERO,
-            Vec3::ZERO,
-            Vec3::splat(1.0),
-            &material.camera,
-        );
+        // Bounds may cross a saved orthographic eye without moving that eye.
+        let eye = Vec3::new(0.0, 0.0, 0.2);
         let (ortho_near, ortho_far) = clip_planes(
             Vec3::ZERO,
             Vec3::splat(1.0),
             eye,
             Vec3::NEG_Z,
             &material.camera,
+            Projection::Orthographic,
         );
         assert!(eye.z - 1.0 > ortho_near && eye.z + 1.0 < ortho_far);
-        assert_eq!(eye.x, 0.0);
-        assert_eq!(eye.y, 0.0);
+        assert!(ortho_near < 0.0 && ortho_far > 0.0);
 
         assert!(near > 5.0, "near plane was too loose: {near}");
         assert!(far < 8.0, "far plane was too loose: {far}");

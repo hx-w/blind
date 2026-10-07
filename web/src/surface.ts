@@ -235,7 +235,7 @@ export class SurfaceEditor implements AnnotationEditor {
   private async restore(snapshot: Snapshot,notify=true): Promise<boolean> {
     if(snapshot.marks.some(mark=>this.viewer.modelInfos[mark.mesh]?.revision!==mark.revision))throw new OperationError('CONFLICT','Annotation history refers to a changed source revision');
     const targets=[...new Set(snapshot.marks.map(mark=>mark.mesh))];
-    const needsRaw=targets.filter(index=>this.viewer.modelInfos[index]?.quality!=='raw' || this.viewer.modelInfos[index]?.loading);
+    const needsRaw=targets.filter(index=>this.viewer.modelInfos[index]?.quality!=='raw' || this.viewer.modelInfos[index]?.loadState!=='ready');
     if(needsRaw.length) {
       this.busy=true;this.status='正在恢复精细表面…';this.sync(false);
       try {for(const index of needsRaw) await this.viewer.setQuality(index,'raw');}
@@ -560,7 +560,7 @@ export class SurfaceEditor implements AnnotationEditor {
     if(this.viewer.modelInfos[mesh].revision!==input.revision)throw new OperationError('CONFLICT','Source revision changed',{field:'revision',target:input.entityId});
     const {entityId:_,...data}=input,mark:SurfaceAnnotation={...structuredClone(data),mesh,id:crypto.randomUUID()};
     validateSurfaces([...this.viewer.annotations,mark]);
-    if(this.viewer.modelInfos[mesh].quality!=='raw'||this.viewer.modelInfos[mesh].loading){this.busy=true;this.sync(false);try{await this.viewer.setQuality(mesh,'raw');}catch{throw new OperationError('RESOURCE_UNAVAILABLE','Raw surface could not be loaded',{target:input.entityId,retryable:true});}finally{this.busy=false;this.sync(false);}}
+    if(this.viewer.modelInfos[mesh].quality!=='raw'||this.viewer.modelInfos[mesh].loadState!=='ready'){this.busy=true;this.sync(false);try{await this.viewer.setQuality(mesh,'raw');}catch{throw new OperationError('RESOURCE_UNAVAILABLE','Raw surface could not be loaded',{target:input.entityId,retryable:true});}finally{this.busy=false;this.sync(false);}}
     if(this.viewer.getMeshIndex(input.entityId)!==mesh||this.viewer.modelInfos[mesh]?.revision!==mark.revision)throw new OperationError('CONFLICT','Entity or source revision changed during Raw load',{field:'revision',target:input.entityId});
     if(this.viewer.modelInfos[mesh].quality!=='raw'||!this.viewer.hasSurface(mesh))throw new OperationError('RESOURCE_UNAVAILABLE','Raw surface geometry is unavailable',{target:input.entityId,retryable:true});
     validateSurfaces([...this.viewer.annotations,mark]);this.remember();this.viewer.setAnnotations([...this.viewer.annotations,mark]);this.selected=mark.id;this.selectedScreen=undefined;this.sync();return structuredClone(mark);

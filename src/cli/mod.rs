@@ -35,7 +35,7 @@ SCENE CONFIG
   "title": "Model and review documents",
   "resources": [
     {"path": "jaw.ply"},
-    {"path": "reference.ply"},
+    {"path": "reference.ply", "visible": false},
     {"path": "review.md", "label": "Review", "group": "Documents",
      "position": [140, 0, 0], "size": [120, 90]},
     {"path": "bundle.zip", "member": "reports/report.json",
@@ -60,6 +60,8 @@ RESOURCE FIELDS
   quality    Optional raw|lod for mesh/points only; default lod. LOD is a derived
              approximation generated on demand, not exact source geometry.
              Raw uses original geometry on initial load and PNG export.
+  visible    Optional boolean for geometry and surfaces; default true. Hidden
+             instances retain their source/revision metadata and can be revealed.
   member     Optional exact ZIP member path, e.g. reports/report.json. Use "/",
              no absolute paths, empty segments, "." or ".."; no recursive unpack.
              The extracted member is limited to 64 MiB.
@@ -128,15 +130,15 @@ PLUGINS AND ADVANCED MANIFESTS
   --component INDEX=PLUGIN:NAME selects only that resource's renderer.
   Run blind plugin --help or blind oss --help for configuration commands.
   Plugins may return a versioned resolver manifest, also accepted by --config:
-  schema_version: 1; resources: [{id,uri,label?,quality?}]; optional title, requires,
+  schema_version: 1; resources: [{id,uri,label?,quality?,visible?}]; optional title, requires,
   components, panels, attachments and warnings.
   viewport uses the same state as basic scene config; each collection child
   can specify viewport independently, including plugin-uri children.
-  components: [{id,uri,label,component?,quality?,placement?,member?,group?,position?,size?}].
+  components: [{id,uri,label,component?,quality?,visible?,placement?,member?,group?,position?,size?}].
   panels: [{id,label,members:[RESOURCE_ID,...],group?}], flat geometry assemblies,
   not independent collection scenes. If present, they cover every geometry
   resource; members within one panel are distinct existing resource IDs.
-  attachments use the same {id,uri,label?} schema as resources.
+  attachments: [{id,uri,label?}]; download-only attachments reject quality/visible.
   quality is raw|lod on geometry resources/components only, never attachments.
   Omission selects LOD and reports LOD_SELECTED per geometry entity to stderr
   and JSON warnings. Collection diagnostics identify each child scene.

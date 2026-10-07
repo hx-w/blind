@@ -40,8 +40,24 @@ const spatialDocument = {
   entities: board.entities.map(entity => ({...structuredClone(entity),
     ...(entity.id === 'document' ? {size: [1600, 1000]} : {placement: 'panel'})})),
 };
-const scenes = new Map([['board', board], ['spatial', spatial], ['spatial-document', spatialDocument]]);
+const demand = {
+  ...structuredClone(spatial), title: 'Demand-driven geometry',
+  meshes: Array.from({length: 6}, (_, index) => ({...structuredClone(spatial.meshes[0]),
+    name: `Geometry ${index}`, visible: index === 0 || index === 5, opacity: index === 5 ? 0 : 1, source_url: `/mesh/demand/${index}`})),
+  entities: [
+    ...Array.from({length: 6}, (_, index) => ({...structuredClone(spatial.entities[0]),
+      id: `geometry-${index}`, label: `Geometry ${index}`, source: {kind: 'mesh', index}, visible: index === 0 || index === 5, opacity: index === 5 ? 0 : 1})),
+    {...structuredClone(board.entities[1]), id: 'notes', source: {kind: 'attachment', index: 0}, placement: 'panel'},
+  ],
+  attachments: [{...structuredClone(board.attachments[1]), url: '/source/notes'}],
+};
+const scenes = new Map([['board', board], ['spatial', spatial], ['spatial-document', spatialDocument], ['demand', demand]]);
 const sourceRequests = [];
+const geometryRequests = [];
+const geometryGates = new Map();
+const geometryFailures = new Set();
+let activeGeometry = 0, peakGeometry = 0;
+let requestedGeometry;
 let browser, server, origin, shareSequence = 0;
 
 before(async () => {
@@ -72,6 +88,18 @@ before(async () => {
         if (request.method !== 'GET') {response.writeHead(405); response.end(); return;}
         response.setHeader('Content-Type', path.endsWith('/notes') ? 'text/markdown' : 'text/plain');
         response.end(path.endsWith('/notes') ? notes : source);
+      } else if (path.startsWith('/mesh/demand/')) {
+        geometryRequests.push(path);
+        activeGeometry++; peakGeometry = Math.max(peakGeometry, activeGeometry);
+        requestedGeometry?.(path);
+        await geometryGates.get(path)?.promise;
+        if (geometryFailures.has(path)) {
+          response.writeHead(503, {'Content-Type': 'application/json'});
+          response.end(JSON.stringify({error: 'Geometry source unavailable'}));
+        } else {
+          response.setHeader('Content-Type', 'application/ply'); response.end(geometry);
+        }
+        activeGeometry--;
       } else if (path === '/mesh/reference') {
         response.setHeader('Content-Type', 'application/ply'); response.end(geometry);
       } else if (path.startsWith('/assets/') && !path.includes('..')) {
@@ -99,6 +127,13 @@ async function openScene(token) {
   const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.addInitScript(() => {
     window.operationEvents = []; window.gpuContexts = [];
+    window.abortedGeometry = [];
+    const originalFetch = window.fetch;
+    window.fetch = function(input, options) {
+      const url = typeof input === 'string' ? input : input.url;
+      if (url.startsWith('/mesh/demand/')) options?.signal?.addEventListener('abort', () => window.abortedGeometry.push(url), {once: true});
+      return originalFetch.call(this, input, options);
+    };
     const original = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function(type, ...args) {
       if (type === 'webgl' || type === 'webgl2' || type === 'experimental-webgl' || type === 'webgpu') window.gpuContexts.push(type);
@@ -566,4 +601,263 @@ test('spatial camera operations commit real poses and native observation control
     sameCamera((await operation(page, 'view:get')).camera, interrupted.pan.value.view.camera);
     assert.deepEqual(errors, []);
   } finally {await page.close();}
+});
+
+test('geometry demand never blocks host UI; transitions reuse loads and preserve the latest selection and camera', async () => {
+  geometryRequests.length = 0;
+  const first = Promise.withResolvers(); geometryGates.set('/mesh/demand/0', first);
+  const second = Promise.withResolvers(); geometryGates.set('/mesh/demand/1', second);
+  let page;
+  try {
+    ({page} = await openScene('demand'));
+    await page.locator('.component-fixed-panels .component-content').getByText('A fixed panel stays in screen space.').waitFor();
+    const initial = await operation(page, 'entity:list');
+    assert.equal(initial.find(entity => entity.id === 'geometry-0').loadState, 'loading');
+    assert.equal(initial.find(entity => entity.id === 'geometry-1').loadState, 'unloaded');
+    assert.deepEqual(geometryRequests, ['/mesh/demand/0'], 'hidden resources must not be fetched');
+    const camera = (await operation(page, 'view:get')).camera;
+    first.resolve();
+    await page.waitForFunction(async () => {
+      const result = await window.blind.execute('entity:get', {id: 'geometry-0'});
+      return result.ok && result.value.loadState === 'ready';
+    });
+    sameCamera((await operation(page, 'view:get')).camera, camera);
+    await page.evaluate(() => {
+      window.pendingDemand = window.blind.execute('scene:show', {ids: ['geometry-1', 'notes'], fit: true});
+    });
+    await page.waitForFunction(async () => {
+      const result = await window.blind.execute('entity:get', {id: 'geometry-1'});
+      return result.ok && result.value.loadState === 'loading';
+    });
+    await operation(page, 'scene:show', {ids: ['geometry-0', 'notes']});
+    const selectedCamera = (await operation(page, 'view:get')).camera;
+    second.resolve();
+    const obsolete = await page.evaluate(() => window.pendingDemand);
+    assert.equal(obsolete.ok, true, JSON.stringify(obsolete.error));
+    assert.equal((await operation(page, 'entity:get', {id: 'geometry-1'})).visible, false);
+    sameCamera((await operation(page, 'view:get')).camera, selectedCamera);
+    await operation(page, 'scene:show', {ids: ['geometry-1', 'notes']});
+    assert.equal(geometryRequests.filter(path => path === '/mesh/demand/1').length, 1);
+    await operation(page, 'entity:set-style', {id: 'geometry-2', visible: false, opacity: 0});
+    assert.equal(geometryRequests.includes('/mesh/demand/2'), false);
+    const shared = await operation(page, 'share:create');
+    const saved = scenes.get(new URL(shared.viewer_url).pathname.split('/').at(-1));
+    assert.equal(saved.meshes.length, 6);
+    assert.equal(saved.meshes[1].visible, true);
+    assert.equal(saved.meshes[2].visible, false);
+    assert.equal(saved.meshes[2].source_url, '/mesh/demand/2');
+    geometryFailures.add('/mesh/demand/3');
+    await failure(page, 'scene:show', {ids: ['geometry-3', 'notes']}, 'RESOURCE_UNAVAILABLE');
+    assert.equal((await operation(page, 'entity:get', {id: 'geometry-3'})).loadState, 'error');
+    assert.equal((await operation(page, 'content:get', {id: 'notes'})).ready, true);
+    geometryFailures.delete('/mesh/demand/3');
+    await operation(page, 'entity:set-quality', {id: 'geometry-3', quality: 'raw'});
+    assert.equal((await operation(page, 'entity:get', {id: 'geometry-3'})).loadState, 'ready');
+    const mark = await operation(page, 'annotation:create-surface', {
+      entityId: 'geometry-4', revision: 'fixture', kind: 'point', label: 'Pinned source sample',
+      color: '#ff6b5e', visible: true, closed: false, points: [[0, 0, 0]], normals: [[0, 0, 1]], controls: [0],
+    });
+    assert.equal((await operation(page, 'entity:get', {id: 'geometry-4'})).loadState, 'ready');
+    assert.equal((await operation(page, 'entity:get', {id: 'geometry-4'})).visible, false);
+    assert.equal(geometryRequests.filter(path => path === '/mesh/demand/4').length, 1);
+    await failure(page, 'entity:set-quality', {id: 'geometry-4', quality: 'lod'}, 'CONFLICT');
+    const annotated = await operation(page, 'share:create');
+    const annotatedScene = scenes.get(new URL(annotated.viewer_url).pathname.split('/').at(-1));
+    assert.equal(annotatedScene.state.annotations[0].id, mark.id);
+    assert.equal(annotatedScene.meshes[4].quality, 'raw');
+    const {page: reopened} = await openScene(new URL(annotated.viewer_url).pathname.split('/').at(-1));
+    try {
+      assert.equal((await operation(reopened, 'entity:get', {id: 'geometry-4'})).loadState, 'unloaded');
+      const listed = (await operation(reopened, 'annotation:list', {kind: 'surface'})).surface[0];
+      assert.equal(listed.entityId, 'geometry-4', 'saved annotation identity must not depend on resident geometry');
+      const coordinates = await operation(reopened, 'annotation:coordinates', {kind: 'surface', id: mark.id});
+      assert.equal(coordinates.entityId, 'geometry-4'); assert.deepEqual(coordinates.points, mark.points);
+    } finally {await reopened.close();}
+  } finally {
+    first.resolve(); second.resolve(); geometryGates.clear(); geometryFailures.clear(); await page?.close();
+  }
+});
+
+test('render completion demands visible geometry only and rejects visible source errors', async () => {
+  geometryRequests.length = 0;
+  geometryFailures.add('/mesh/demand/5');
+  const page = await browser.newPage();
+  try {
+    await page.goto(`${origin}/s/demand?render`);
+    await page.waitForFunction(() => document.documentElement.dataset.renderStatus === 'ready');
+    assert.deepEqual(geometryRequests, ['/mesh/demand/0']);
+    await page.screenshot();
+    const broken = structuredClone(demand); broken.meshes[0].source_url = '/mesh/demand/5';
+    scenes.set('demand-broken', broken);
+    await page.goto(`${origin}/s/demand-broken?render`);
+    await page.waitForFunction(() => document.documentElement.dataset.renderStatus === 'error');
+    assert.match(await page.locator('html').getAttribute('data-render-error'), /geometry|Geometry/);
+  } finally {geometryFailures.clear(); scenes.delete('demand-broken'); await page.close();}
+});
+
+test('simultaneous initial, visibility and quality demands share one four-request queue', async () => {
+  geometryRequests.length = 0; peakGeometry = 0;
+  const gates = Array.from({length: 6}, () => Promise.withResolvers());
+  gates.forEach((gate, index) => geometryGates.set(`/mesh/demand/${index}`, gate));
+  const fourRequested = Promise.withResolvers();
+  requestedGeometry = () => {if (geometryRequests.length === 4) fourRequested.resolve();};
+  let page, requestTimeout;
+  try {
+    ({page} = await openScene('demand'));
+    await page.evaluate(() => {
+      window.allDemand = window.blind.execute('scene:show', {ids: ['geometry-0', 'geometry-1', 'geometry-2', 'geometry-3', 'geometry-4', 'geometry-5', 'notes']});
+      window.sameDemand = window.blind.execute('entity:set-quality', {id: 'geometry-0', quality: 'raw'});
+    });
+    await Promise.race([fourRequested.promise, new Promise((_, reject) => {
+      requestTimeout = setTimeout(() => reject(new Error('Four geometry requests did not start')), 30000);
+    })]);
+    clearTimeout(requestTimeout);
+    assert.equal(activeGeometry, 4);
+    gates.slice(0, 4).forEach(gate => gate.resolve());
+    gates.slice(4).forEach(gate => gate.resolve());
+    const results = await page.evaluate(() => Promise.all([window.allDemand, window.sameDemand]));
+    assert.ok(results.every(result => result.ok), JSON.stringify(results));
+    assert.equal(peakGeometry, 4);
+    assert.equal(geometryRequests.length, 6);
+    assert.equal(new Set(geometryRequests).size, 6);
+  } finally {
+    clearTimeout(requestTimeout);
+    requestedGeometry = undefined; gates.forEach(gate => gate.resolve()); geometryGates.clear(); await page?.close();
+  }
+});
+
+test('a superseded quality request cannot install stale geometry or change source identity', async () => {
+  geometryRequests.length = 0;
+  const raw = Promise.withResolvers(); geometryGates.set('/mesh/demand/4', raw);
+  let page;
+  try {
+    ({page} = await openScene('demand'));
+    await page.evaluate(() => {window.oldQuality = window.blind.execute('entity:set-quality', {id: 'geometry-4', quality: 'raw'});});
+    await page.waitForFunction(async () => {
+      const result = await window.blind.execute('entity:get', {id: 'geometry-4'});
+      return result.ok && result.value.loadState === 'loading';
+    });
+    const latest = await operation(page, 'entity:set-quality', {id: 'geometry-4', quality: 'lod'});
+    assert.equal(latest.quality, 'lod'); assert.equal(latest.loadState, 'ready');
+    const old = await page.evaluate(() => window.oldQuality);
+    assert.equal(old.ok, false); assert.equal(old.error.code, 'CANCELLED');
+    raw.resolve();
+    const shared = await operation(page, 'share:create');
+    const saved = scenes.get(new URL(shared.viewer_url).pathname.split('/').at(-1));
+    assert.equal(saved.meshes[4].quality, 'lod');
+    assert.equal(saved.meshes[4].source_url, '/mesh/demand/4');
+    assert.equal(saved.meshes[4].revision, 'fixture');
+    await operation(page, 'entity:set-quality', {id: 'geometry-4', quality: 'lod'});
+    assert.equal(geometryRequests.filter(path => path === '/mesh/demand/4/lod').length, 1);
+  } finally {raw.resolve(); geometryGates.clear(); await page?.close();}
+});
+
+test('teardown aborts active geometry, rejects consumers and never installs a late response', async () => {
+  const gate = Promise.withResolvers(); geometryGates.set('/mesh/demand/4', gate);
+  let page;
+  try {
+    ({page} = await openScene('demand'));
+    await page.evaluate(() => {
+      window.retainedHost = window.blind;
+      window.disposedDemand = window.blind.execute('entity:set-quality', {id: 'geometry-4', quality: 'raw'});
+    });
+    await page.waitForFunction(async () => {
+      const result = await window.blind.execute('entity:get', {id: 'geometry-4'});
+      return result.ok && result.value.loadState === 'loading';
+    });
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent('pagehide', {persisted: false})));
+    const result = await page.evaluate(() => window.disposedDemand);
+    assert.equal(result.ok, false); assert.equal(result.error.code, 'DISPOSED');
+    assert.ok(await page.evaluate(() => window.abortedGeometry.includes('/mesh/demand/4')));
+    gate.resolve(); await rendered(page);
+    assert.equal(await page.locator('#canvas-root canvas').count(), 0);
+    assert.equal(await page.locator('.scene-surface').count(), 0);
+    const later = await page.evaluate(() => window.retainedHost.execute('entity:list'));
+    assert.equal(later.ok, false); assert.equal(later.error.code, 'DISPOSED');
+  } finally {gate.resolve(); geometryGates.clear(); await page?.close();}
+});
+
+test('the latest pending focus supersedes earlier focus and default framing before geometry arrives', async () => {
+  const unframed = structuredClone(demand); unframed.state.camera = null;
+  unframed.meshes[1].visible = unframed.entities[1].visible = true;
+  unframed.meshes[1].translation = unframed.entities[1].position = [30, 0, 0];
+  scenes.set('unframed-demand', unframed);
+  const first = Promise.withResolvers(), latest = Promise.withResolvers();
+  geometryGates.set('/mesh/demand/0', first); geometryGates.set('/mesh/demand/1', latest);
+  let page;
+  try {
+    ({page} = await openScene('unframed-demand'));
+    const before = (await operation(page, 'view:get')).camera;
+    await page.evaluate(() => {
+      window.earlierFocus = window.blind.execute('entity:focus', {ids: ['geometry-0']});
+      window.latestFocus = window.blind.execute('entity:focus', {ids: ['geometry-1']});
+    });
+    first.resolve();
+    const earlier = await page.evaluate(() => window.earlierFocus);
+    assert.equal(earlier.ok, true, JSON.stringify(earlier.error)); assert.equal(earlier.value.status, 'interrupted');
+    sameCamera((await operation(page, 'view:get')).camera, before);
+    latest.resolve();
+    const focused = await page.evaluate(() => window.latestFocus);
+    assert.equal(focused.ok, true, JSON.stringify(focused.error)); assert.equal(focused.value.status, 'committed');
+    assert.ok(focused.value.view.camera.target[0] > 20, 'latest focus must frame the translated entity');
+  } finally {first.resolve(); latest.resolve(); geometryGates.clear(); scenes.delete('unframed-demand'); await page?.close();}
+});
+
+test('section opening awaits selected nonresident geometry and drawing cancellation prevents a late open', async () => {
+  const held = Promise.withResolvers(); geometryGates.set('/mesh/demand/0', held);
+  let page;
+  try {
+    ({page} = await openScene('demand'));
+    await page.evaluate(() => {
+      window.sectionOpeningSettled = false;
+      window.sectionOpening = window.blind.execute('section:open').then(result => {window.sectionOpeningSettled = true; return result;});
+    });
+    await rendered(page);
+    assert.equal(await page.evaluate(() => window.sectionOpeningSettled), false, 'section opening must wait for selected geometry, not reject an unloaded surface');
+    await operation(page, 'section:cancel');
+    held.resolve();
+    const cancelled = await page.evaluate(() => window.sectionOpening);
+    assert.equal(cancelled.ok, false); assert.equal(cancelled.error.code, 'CANCELLED');
+    assert.equal((await operation(page, 'section:get')).drawing, false);
+    await page.locator('#observe-trigger').click();
+    await page.locator('#section-trigger').click();
+    await page.locator('.section-draw-overlay').waitFor({state: 'visible'});
+    assert.equal((await operation(page, 'section:get')).drawing, true);
+    await operation(page, 'section:cancel');
+  } finally {held.resolve(); geometryGates.clear(); await page?.close();}
+});
+
+test('saved section identity and measurements survive unavailable geometry and restore real contours after retry', async () => {
+  const held = Promise.withResolvers(); geometryGates.set('/mesh/demand/0', held);
+  geometryFailures.add('/mesh/demand/0'); geometryRequests.length = 0;
+  const saved = structuredClone(demand);
+  saved.state.section = {
+    entity_id: 'geometry-0', mesh: 0, revision: 'fixture',
+    origin: [0, 0, .25], normal: [0, 0, 1], axis: [1, 0, 0], radius: 2, offset: 0,
+    fit: false, pan: [.1, .2], panel_size: [500, 380],
+    targets: [{entity_id: 'geometry-0', mesh: 0, revision: 'fixture'}, {entity_id: 'geometry-1', mesh: 1, revision: 'fixture'}],
+    measurements: [{a: [0, 0], b: [1, 0]}],
+  };
+  scenes.set('saved-section-demand', saved);
+  let page;
+  try {
+    ({page} = await openScene('saved-section-demand'));
+    const initial = await operation(page, 'section:get');
+    assert.equal(initial.active, true); assert.deepEqual(initial.state, saved.state.section);
+    assert.deepEqual(initial.contours, []); assert.equal(initial.measurements[0].distance, 1);
+    assert.deepEqual(geometryRequests, ['/mesh/demand/0'], 'saved hidden section targets must not load at startup');
+    held.resolve();
+    await page.waitForFunction(async () => (await window.blind.execute('entity:get', {id: 'geometry-0'})).value.loadState === 'error');
+    assert.deepEqual((await operation(page, 'section:get')).state, saved.state.section, 'a transient geometry failure must not erase the captured section');
+    geometryFailures.delete('/mesh/demand/0');
+    await operation(page, 'entity:set-quality', {id: 'geometry-0', quality: 'raw'});
+    const restored = await operation(page, 'section:get');
+    assert.deepEqual(restored.state, saved.state.section); assert.equal(restored.measurements[0].distance, 1);
+    assert.deepEqual(restored.contours.map(contour => contour.entityId), ['geometry-0']);
+    const endpoints = restored.contours[0].segments.flatMap(segment => [segment.a, segment.b]);
+    for (const expected of [[0, 0], [.75, 0], [0, .75]]) {
+      assert.ok(endpoints.some(point => point.every((value, index) => Math.abs(value - expected[index]) < 1e-6)), `missing tetrahedron intersection ${expected}`);
+    }
+    assert.equal((await operation(page, 'entity:get', {id: 'geometry-1'})).loadState, 'unloaded');
+  } finally {held.resolve(); geometryGates.clear(); geometryFailures.clear(); scenes.delete('saved-section-demand'); await page?.close();}
 });

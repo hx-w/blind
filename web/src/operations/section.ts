@@ -32,15 +32,27 @@ export function registerSectionOperations(host:OperationHost,section:SectionView
  section?.bindOperations(host);
  const available=()=>!!section&&!!meshViewer;
  const requireSection=():SectionViewer=>{if(!section||!meshViewer)throw new OperationError('UNSUPPORTED','Sections require a spatial Mesh viewport; board does not support sections');return section;};
+ const loadTargets=async(targets:readonly {entityId:string;revision?:string}[])=>{
+  requireSection();
+  const indices=targets.map(target=>{
+   const index=meshViewer!.getMeshIndex(target.entityId),info=index===undefined?undefined:meshViewer!.modelInfos[index];
+   if(index===undefined||!info)throw new OperationError('UNKNOWN_ENTITY','Mesh entity does not exist',{target:target.entityId});
+   if(target.revision!==undefined&&info.revision!==target.revision)throw new OperationError('CONFLICT','Section source revision changed',{field:'revision',target:target.entityId});
+   if(info.format==='pts')throw new OperationError('UNSUPPORTED','Point clouds have no section surface',{target:target.entityId});
+   if(!info.visible||info.opacity===0)throw new OperationError('CONFLICT','Section target must be visible with nonzero opacity',{target:target.entityId});
+   return index;
+  });
+  await meshViewer!.ensureLoaded(indices);
+ };
  host.register(sectionOperations.get,()=>requireSection().snapshot(),available);
  host.register(sectionOperations.contours,()=>requireSection().snapshot().contours,available);
  host.register(sectionOperations.snap,({point,tolerance})=>requireSection().snap(point,tolerance),available);
- host.register(sectionOperations.open,()=>{const current=requireSection();current.open();return current.snapshot();},available);
- host.register(sectionOperations.redraw,()=>{const current=requireSection();current.startDraw();return current.snapshot();},available);
+ host.register(sectionOperations.open,async()=>{const current=requireSection();await current.open();return current.snapshot();},available);
+ host.register(sectionOperations.redraw,async()=>{const current=requireSection();await current.startDraw();return current.snapshot();},available);
  host.register(sectionOperations.close,()=>{const current=requireSection();current.close();return current.snapshot();},available);
  host.register(sectionOperations.cancel,()=>{const current=requireSection();current.cancel();return current.snapshot();},available);
- host.register(sectionOperations.setPlane,input=>{const current=requireSection();current.setPlane(input);return current.snapshot();},available);
- host.register(sectionOperations.setTargets,({targets})=>{const current=requireSection();current.setTargets(targets);return current.snapshot();},available);
+ host.register(sectionOperations.setPlane,async input=>{const current=requireSection();await loadTargets([input,...input.targets??[]]);current.setPlane(input);return current.snapshot();},available);
+ host.register(sectionOperations.setTargets,async({targets})=>{const current=requireSection();await loadTargets(targets);current.setTargets(targets);return current.snapshot();},available);
  host.register(sectionOperations.setOffset,({offset})=>{const current=requireSection();current.setOffset(offset);return current.snapshot();},available);
  host.register(sectionOperations.setPlot,input=>{const current=requireSection();current.setPlot(input);return current.snapshot();},available);
  host.register(sectionOperations.setRuler,({active})=>{const current=requireSection();current.setMeasuring(active);return current.snapshot();},available);

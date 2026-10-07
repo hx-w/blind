@@ -154,7 +154,7 @@ single-scene input has this strict schema:
 {
   "title": "optional scene title",
   "resources": [
-    { "path": "required/path.ply", "label": "optional per-Mesh label" }
+    { "path": "required/path.ply", "label": "optional per-Mesh label", "visible": false }
   ],
   "groups": [
     { "label": "group label", "members": [1, 2] }
@@ -165,6 +165,15 @@ single-scene input has this strict schema:
 `resources` is required and non-empty. `groups` is optional; unlike the
 encrypted descriptor, its `members` are 1-based to match CLI indices. Relative
 paths resolve from the config file directory. Unknown fields are errors.
+
+`visible` is an optional boolean on geometry and surface resources; omission
+means `true`. Each instance retains its own initial visibility, including repeated
+sources and resources in Collection children. Advanced/plugin manifests support
+the same field on geometry `resources` and all `components`, but reject it on
+download-only `attachments`. Hidden sources are still observed and registered:
+their source/revision metadata and capability endpoints remain complete, and
+normal revision checks and revocation still apply. Visibility does not change
+source identity, registration ownership, or scene schema 8.
 
 Geometry resources accept `quality: "raw"|"lod"` independently, including
 repeated references to the same source and each Collection child's resources.

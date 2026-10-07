@@ -54,9 +54,12 @@ secret = true
  (package/'.env').write_text('OSS_ALIAS=test\nBUCKET=bucket\nDEBUG_TOKEN=PRIVATE\n')
  (package/'resolver.py').write_text('''import json,os,sys
 r=json.loads(sys.stdin.readline());p=r['params'];assert os.environ['DEBUG_TOKEN']=='PRIVATE';assert p['protocol_version']==2;assert 'config' not in p
-uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing','grouped','collision','many']
+uri=p['input'];assert uri in ['https://example.test/a?x=1','bad','future','partial','all-missing','failed-order','missing-order','attachment-missing','grouped','collision','many','visibility']
 result={'schema_version':1,'requires':['layout.panels','attachments'],'title':'Plugin scene','resources':[{'id':'a','uri':'oss://test/bucket/a.ply','label':'First'},{'id':'b','uri':'oss://test/bucket/b.ply','label':'Second'}],'panels':[{'id':'one','label':'One','members':['a']},{'id':'two','label':'Two','members':['a','b']}],'attachments':[{'id':'zip','uri':'oss://test/bucket/log.zip','label':'Log'}],'new_optional_field':'ignored'}
 result['resources'][0]['quality']='raw';result['resources'][1]['quality']='lod'
+if uri=='visibility':
+ result['resources'][0]['visible']=False;result['resources'][1]['uri']=result['resources'][0]['uri']
+ result['requires'].append('components.v1');result['components']=[{'id':'notes','uri':'oss://test/bucket/log.zip','component':'text','label':'Hidden notes','visible':False}]
 if uri=='grouped':
  result['requires'].append('layout.panel-groups');result['panels']=[{'id':'m1','label':'16','group':'Stage one','members':['a','b']},{'id':'m2','label':'46','group':'Stage one','members':['a','b']},{'id':'c1','label':'16','group':'Stage two','members':['a','b']}]
 if uri=='collision':
@@ -133,10 +136,16 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   shared=json.loads(cli('share','demo://https://example.test/a?x=1','--format','json',environment=remote).stdout)
   collection={'kind':'collection','schema_version':1,'title':'Plugin comparison','scenes':[
    {'id':'first','title':'First','uri':'demo://grouped'},
-   {'id':'second','title':'Second','uri':'demo://collision'}]}
+   {'id':'second','title':'Second','uri':'demo://visibility'}]}
   combined=json.loads(cli('share','--config','-','--format','json',input=json.dumps(collection),environment=remote).stdout)
   combined_code=combined['viewer_url'].rsplit('/',1)[1]
   assert len(json.loads(http(origin+'/api/v1/scenes/'+combined_code)[1])['scenes'])==2
+  vscene=json.loads(http(origin+'/api/v1/scenes/'+combined_code+'?scene=second')[1])
+  assert [m['visible'] for m in vscene['meshes']]==[False,False,True]
+  assert [c['visible'] for c in vscene['entities']]==[False,False,True,False]
+  assert len({m['revision'] for m in vscene['meshes']})==1
+  assert http(origin+'/'+vscene['meshes'][0]['source_url'])[1]==PLY
+  assert http(origin+'/'+vscene['attachments'][1]['url'])[1]==b'attachment-data'
   collection['scenes'][0]['uri']='demo://many'
   cli('share','--config','-',input=json.dumps(collection),environment=remote,ok=False)
   code=shared['viewer_url'].rsplit('/',1)[1]
@@ -145,6 +154,8 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   assert len(scene['meshes'])==3 and scene['meshes'][0]['translation']!=scene['meshes'][1]['translation']
   assert scene['meshes'][1]['translation']==scene['meshes'][2]['translation']
   assert [m['quality'] for m in scene['meshes']]==['raw','raw','lod']
+  assert all(m['visible'] for m in scene['meshes'])
+  assert all(c['visible'] for c in scene['entities'])
   assert shared['status']=='complete'
   assert [(w['code'],w['resource_id']) for w in shared['warnings']]==[('LOD_SELECTED','mesh-2')]
   assert 'oss://' not in json.dumps(scene) and 'PRIVATE' not in json.dumps(scene)
@@ -161,6 +172,11 @@ print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}))
   assert positions[0]==positions[1] and positions[2]==positions[3] and positions[4]==positions[5]
   assert len({tuple(positions[i]) for i in [0,2,4]})==3
   collision=json.loads(cli('share','demo://collision','--format','json',environment=remote).stdout)
+  visibility=json.loads(cli('share','demo://visibility','--format','json',environment=remote).stdout)
+  visible_scene=json.loads(http(origin+'/api/v1/scenes/'+visibility['viewer_url'].rsplit('/',1)[1])[1])
+  assert [m['visible'] for m in visible_scene['meshes']]==[False,False,True]
+  assert [c['visible'] for c in visible_scene['entities']]==[False,False,True,False]
+  assert visibility['status']=='complete' and len(visibility['resources'])==3
   ccode=collision['viewer_url'].rsplit('/',1)[1]
   cscene=json.loads(http(origin+'/api/v1/scenes/'+ccode)[1])
   assert len({c['id'] for c in cscene['entities']})==len(cscene['entities'])

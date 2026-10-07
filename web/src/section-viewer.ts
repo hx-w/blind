@@ -38,6 +38,7 @@ export class SectionViewer {
   private contourGraph: ContourGraph = buildContourGraph([]);
   private drawing = false;
   private measuring = false;
+  private drawGeneration = 0;
   private measureAnchor?: PlanePoint;
   private measureHover?: ContourHit & {opposite: OppositeHit | null};
   private hoverFrame = 0;
@@ -74,7 +75,7 @@ export class SectionViewer {
     this.scopeButton.addEventListener('click', () => { this.scopeList.hidden = !this.scopeList.hidden; this.scopeButton.setAttribute('aria-expanded', String(!this.scopeList.hidden)); });
     this.scopeList.className = 'section-scope'; this.scopeList.hidden = true; this.scopeList.setAttribute('role', 'group'); this.scopeList.setAttribute('aria-label', '剖面中的 Mesh');
     const redraw = document.createElement('button'); redraw.type = 'button'; redraw.innerHTML = '<i data-lucide="rotate-ccw" aria-hidden="true"></i>'; redraw.setAttribute('aria-label', '重新划线');
-    redraw.addEventListener('click', () => {try{this.startDraw();}catch(error){this.notify(error instanceof Error?error.message:String(error));}});
+    redraw.addEventListener('click', () => {void this.startDraw().catch(error => this.notify(error instanceof Error ? error.message : String(error)));});
     this.ruler.type = 'button'; this.ruler.innerHTML = '<i data-lucide="ruler" aria-hidden="true"></i>';
     this.ruler.setAttribute('aria-label', '测量剖面距离，单位为模型坐标单位'); this.ruler.setAttribute('aria-pressed', 'false');
     this.ruler.addEventListener('click', () => {
@@ -114,7 +115,7 @@ export class SectionViewer {
       const extent=this.viewer.sectionTarget(this.state.mesh)?.bounds.getSize(new THREE.Vector3()).length()??this.state.radius*2;
       this.setOffset(Number(this.offset.value)/100*extent/2);
     });
-    this.trigger.addEventListener('click', () => {try{if(this.drawing||this.state&&!this.panel.hidden)this.close();else this.open();}catch(error){this.notify(error instanceof Error?error.message:String(error));}});
+    this.trigger.addEventListener('click', () => {if(this.drawing||this.state&&!this.panel.hidden)this.close();else void this.open().catch(error => this.notify(error instanceof Error ? error.message : String(error)));});
     new ResizeObserver(() => this.drawPlot()).observe(this.plot);
     window.addEventListener('resize', () => this.applyPanelSize());
     window.addEventListener('keydown', event => {
@@ -136,16 +137,18 @@ export class SectionViewer {
     this.renderScope(); this.recompute();
   }
   private valid(state: SectionState): boolean {
-    const target = this.viewer.sectionSource(state.mesh);
-    return !!target && target.entityId === state.entity_id && target.revision === state.revision
-      && (state.targets ?? []).every(item => { const source = this.viewer.sectionSource(item.mesh); return !!source && source.entityId === item.entity_id && source.revision === item.revision; })
+    const infos = this.viewer.modelInfos;
+    const matches = (mesh: number, entityId: string, revision: string): boolean => {
+      const info = infos[mesh];
+      return this.viewer.getMeshIndex(entityId) === mesh && !!info && info.revision === revision && info.format !== 'pts';
+    };
+    return matches(state.mesh, state.entity_id, state.revision)
+      && (state.targets ?? []).every(item => matches(item.mesh, item.entity_id, item.revision))
       && Number.isFinite(state.radius) && state.radius > 0;
   }
-  open(): void {
+  async open(): Promise<void> {
     if (this.drawing || this.state && !this.panel.hidden) return;
-    const selected = this.viewer.selectedIndex;
-    if (!this.viewer.sectionTarget(selected)) throw new OperationError('CONFLICT','Select a visible surface Mesh before opening a section');
-    this.startDraw();
+    await this.startDraw();
   }
   private show(): void {
     this.onShow?.();
@@ -160,6 +163,7 @@ export class SectionViewer {
     this.drawPlot();
   }
   close(): void {
+    this.drawGeneration++;
     if(!this.state&&!this.drawing&&this.panel.hidden)return;
     this.lastPanelSize = this.state?.panel_size ?? this.lastPanelSize;
     this.cancelDraw(); this.state = null; this.segments = []; this.sections = []; this.planeSections = [];
@@ -171,15 +175,22 @@ export class SectionViewer {
     this.trigger.classList.remove('active'); this.trigger.setAttribute('aria-expanded', 'false');
     this.operations?.notify('section',this.snapshot());
   }
-  deactivate(): void { if(this.drawing)this.cancel(); }
-  startDraw(): void {
+  deactivate(): void { this.drawGeneration++; if(this.drawing)this.cancel(); }
+  async startDraw(): Promise<void> {
     if(this.drawing)return;
-    if (!this.viewer.sectionTarget(this.viewer.selectedIndex)) throw new OperationError('CONFLICT','Select a visible surface Mesh before drawing a section');
+    const selected = this.viewer.selectedIndex, info = this.viewer.modelInfos[selected];
+    if (!info || !info.visible || info.opacity <= 0) throw new OperationError('CONFLICT', 'Select a visible surface Mesh before drawing a section');
+    if (info.format === 'pts') throw new OperationError('UNSUPPORTED', 'Point clouds have no section surface');
+    const generation = ++this.drawGeneration;
+    await this.viewer.ensureLoaded([selected]);
+    if (generation !== this.drawGeneration) throw new OperationError('CANCELLED', 'Section drawing request was superseded');
+    if (selected !== this.viewer.selectedIndex || !this.viewer.sectionTarget(selected)) throw new OperationError('CONFLICT', 'Select a visible surface Mesh before drawing a section');
     this.drawing = true; this.panel.hidden = true; this.overlay.hidden = false;
     this.trigger.classList.add('active'); this.trigger.setAttribute('aria-expanded', 'true');
     this.operations?.notify('section',this.snapshot());
   }
   private cancelDraw(): void {
+    this.drawGeneration++;
     if (this.drawing) this.panel.hidden = !this.state;
     this.drawing = false; this.start = undefined; this.guide.hidden = true; this.overlay.hidden = true;
     if (!this.state) { this.trigger.classList.remove('active'); this.trigger.setAttribute('aria-expanded', 'false'); }

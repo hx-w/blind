@@ -3,6 +3,32 @@
 All notable changes to Blind are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.4.0] - 2026-10-07
+
+### Added
+
+- Initial `visible` resource configuration for ordinary scenes, Collection
+  children and resolver manifests, defaulting to true while retaining hidden
+  source identity and revision validation.
+
+### Fixed
+
+- Make host UI and document/plugin components available before geometry finishes.
+  Load visible Raw/LOD geometry on demand through one bounded queue, share pending
+  work, reuse resident objects, isolate per-entity errors, and cancel stale loads.
+- Keep late geometry from overwriting camera navigation or newer visibility/Fit
+  decisions. Preserve unloaded metadata when sharing and wait only for visible
+  resources in PNG exports.
+- Preserve saved sections, measurements and annotation entity IDs before their
+  geometry loads; wait for the selected surface when opening or redrawing a section.
+- Report actual Raw/LOD loading state rather than showing LOD generation for Raw
+  requests.
+
+### Upgrade
+
+- Keep scene schema 8. Updating from 2.3.0 preserves existing links,
+  registrations and configuration; no registry clear is required.
+
 ## [2.3.0] - 2026-10-06
 
 ### Added

@@ -85,6 +85,8 @@ frame_origins = ["https://example.org"]
         assert [entity['source'] for entity in capacity_scene['entities']] == [
             {'kind': 'mesh', 'index': index} for index in range(65)]
         assert len({entity['id'] for entity in capacity_scene['entities']}) == 65
+        assert all(m['visible'] for m in capacity_scene['meshes'])
+        assert all(c['visible'] for c in capacity_scene['entities'])
         markdown = ROOT/'tests/fixtures/review.md'
         # Fidelity is per geometry instance, not per source URI or a later style update.
         selected = cli('share', mesh, tmp/'run.log', '--quality', '1=raw', '--format', 'json', diagnostics=True)
@@ -109,12 +111,16 @@ frame_origins = ["https://example.org"]
         ]:
             assert cli('share', *args, '--format', 'json', ok=False) == ''
         quality_path = tmp/'quality.json'
-        repeated = [{'path':str(mesh),'quality':'raw'}, {'path':str(mesh),'quality':'lod'}]
+        repeated = [{'path':str(mesh),'quality':'raw','visible':False}, {'path':str(mesh),'quality':'lod'}]
         quality_path.write_text(json.dumps({'resources':repeated}))
         quality_token, quality_scene = share('--config', quality_path)
         assert [m['quality'] for m in quality_scene['meshes']] == ['raw','lod']
         assert quality_scene['meshes'][0]['revision'] == quality_scene['meshes'][1]['revision'] == raw_scene['meshes'][0]['revision']
         assert [w['resource_id'] for w in quality_scene['warnings']] == ['resource-2']
+        assert [m['visible'] for m in quality_scene['meshes']] == [False, True]
+        assert [c['visible'] for c in quality_scene['entities']] == [False, True]
+        assert quality_scene['meshes'][0]['source_url'] != quality_scene['meshes'][1]['source_url']
+        assert all(api('/'+m['source_url'])[1] == mesh.read_bytes() for m in quality_scene['meshes'])
         quality_update = {'meshes':[{key:m[key] for key in ['color','opacity','visible','quality']} for m in quality_scene['meshes']],
                           'state':quality_scene['state']}
         quality_update['meshes'][0]['quality'] = 'lod'
@@ -127,7 +133,7 @@ frame_origins = ["https://example.org"]
         assert [w['resource_id'] for w in updated_quality['warnings']] == ['resource-1']
         assert [w['resource_id'] for w in json.loads(api(f'/api/v1/scenes/{quality_token}')[1])['warnings']] == ['resource-2']
         quality_path.write_text(json.dumps({'kind':'collection','schema_version':1,'title':'Quality','scenes':[
-            {'id':'exact','title':'Exact','resources':[repeated[0]]},
+            {'id':'exact','title':'Exact','resources':[repeated[0],{'path':str(tmp/'run.log'),'visible':False}]},
             {'id':'derived','title':'Derived','resources':[repeated[1]]}]}))
         collection_result = cli('share','--config',quality_path,'--format','json',diagnostics=True)
         collection_share = json.loads(collection_result.stdout)
@@ -138,19 +144,36 @@ frame_origins = ["https://example.org"]
         for child, expected in [('exact','raw'),('derived','lod')]:
             child_scene = json.loads(api(f'/api/v1/scenes/{collection_token}?scene={child}')[1])
             assert child_scene['meshes'][0]['quality'] == expected
+            assert child_scene['meshes'][0]['visible'] == (child == 'derived')
+            assert child_scene['entities'][0]['visible'] == (child == 'derived')
+            if child == 'exact':
+                assert child_scene['entities'][1]['visible'] is False
+                assert api('/'+child_scene['attachments'][0]['url'])[1] == (tmp/'run.log').read_bytes()
         advanced = {'schema_version':1,'requires':['components.v1'],'resources':[
-            {'id':'exact','uri':str(mesh),'quality':'raw'},
+            {'id':'exact','uri':str(mesh),'quality':'raw','visible':False},
             {'id':'derived','uri':str(mesh),'quality':'lod'}],
-            'components':[{'id':'another','label':'Exact component','uri':str(mesh),'quality':'raw'}]}
+            'components':[{'id':'another','label':'Exact component','uri':str(mesh),'quality':'raw','visible':False},
+                          {'id':'notes','label':'Notes','uri':str(tmp/'run.log'),'visible':False}]}
         quality_path.write_text(json.dumps(advanced))
         _, advanced_scene = share('--config',quality_path)
         assert [m['quality'] for m in advanced_scene['meshes']] == ['raw','lod','raw']
+        assert [m['visible'] for m in advanced_scene['meshes']] == [False, True, False]
+        assert [c['visible'] for c in advanced_scene['entities']] == [False, True, False, False]
+        assert len({m['revision'] for m in advanced_scene['meshes']}) == 1
+        assert all(api('/'+m['source_url'])[1] == mesh.read_bytes() for m in advanced_scene['meshes'])
+        assert api('/'+advanced_scene['attachments'][0]['url'])[1] == (tmp/'run.log').read_bytes()
         for invalid_config in [
             {'resources':[{'path':str(mesh),'quality':'invalid'}]},
             {'resources':[{'path':str(tmp/'run.log'),'quality':'lod'}]},
             {'schema_version':1,'resources':[{'id':'bad','uri':str(tmp/'run.log'),'quality':'raw'}]},
             {'schema_version':1,'requires':['attachments'],'resources':[{'id':'mesh','uri':str(mesh)}],
              'attachments':[{'id':'notes','uri':str(tmp/'run.log'),'quality':'lod'}]},
+            {'schema_version':1,'requires':['attachments'],'resources':[{'id':'mesh','uri':str(mesh)}],
+             'attachments':[{'id':'notes','uri':str(tmp/'run.log'),'visible':False}]},
+            {'resources':[{'path':str(mesh),'visible':'false'}]},
+            {'resources':[{'path':str(mesh),'visible':False,'typo':'ignored'}]},
+            {'schema_version':1,'requires':['components.v1'],'resources':[],
+             'components':[{'id':'notes','label':'Notes','uri':str(tmp/'run.log'),'visible':False,'typo':'ignored'}]},
         ]:
             quality_path.write_text(json.dumps(invalid_config))
             assert cli('share','--config',quality_path,'--format','json',ok=False) == ''
@@ -161,8 +184,31 @@ frame_origins = ["https://example.org"]
             {'paths':[str(mesh)],'display':[{'component':'text','quality':'lod'}]},
             {'manifest':{'schema_version':1,'requires':['components.v1'],'resources':[],
                          'components':[{'id':'bad','uri':str(tmp/'run.log'),'label':'Bad','quality':'raw'}]}},
+            {'manifest':{'schema_version':1,'requires':['attachments'],
+                         'resources':[{'id':'mesh','uri':str(mesh)}],
+                         'attachments':[{'id':'notes','uri':str(tmp/'run.log'),'visible':True}]}},
         ]:
-            assert api('/api/v1/scenes',body,pat)[0] == 400
+            status, payload, _ = api('/api/v1/scenes',body,pat)
+            assert status == 400, (body, status, payload)
+        malformed = {'paths':[str(mesh)],'display':[{'visible':False,'typo':'ignored'}]}
+        status, payload, _ = api('/api/v1/scenes',malformed,pat)
+        assert status == 422, (malformed, status, payload)
+        visibility_path = tmp/'visibility.json'
+        hidden_mesh = tmp/'hidden.ply'; hidden_mesh.write_bytes(mesh.read_bytes())
+        visibility_path.write_text(json.dumps({'resources':[
+            {'path':str(hidden_mesh),'visible':False},
+            {'path':str(tmp/'run.log'),'visible':False}]}))
+        hidden_share = json.loads(cli('share','--config',visibility_path,'--format','json'))
+        hidden_token = hidden_share['viewer_url'].rsplit('/',1)[1]
+        hidden_scene = json.loads(api(f'/api/v1/scenes/{hidden_token}')[1])
+        assert hidden_share['status'] == 'complete' and len(hidden_share['resources']) == 1
+        assert hidden_share['resources'][0]['revision'] == hidden_scene['meshes'][0]['revision']
+        assert not hidden_scene['meshes'][0]['visible']
+        assert [c['visible'] for c in hidden_scene['entities']] == [False, False]
+        assert api('/'+hidden_scene['attachments'][0]['url'])[1] == (tmp/'run.log').read_bytes()
+        assert api('/'+hidden_scene['meshes'][0]['source_url'])[1] == hidden_mesh.read_bytes()
+        hidden_mesh.write_bytes(hidden_mesh.read_bytes()+b'\n')
+        assert api('/'+hidden_scene['meshes'][0]['source_url'])[0] == 410
         # Directory discovery runs on the source machine and yields one normal scene.
         directory = tmp/'directory'; directory.mkdir()
         (directory/'nested').mkdir(); (directory/'.hidden').mkdir()

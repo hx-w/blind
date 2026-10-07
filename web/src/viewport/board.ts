@@ -49,7 +49,7 @@ export class BoardViewport {
     this.observer.observe(root);
   }
 
-  async load(scene: PublicScene, _skipHidden = false): Promise<void> {
+  initialize(scene: PublicScene): void {
     this.cancelAnimation(); this.pointers.length = 0;
     this.state = structuredClone(scene.state);
     this.bounds.makeEmpty();
@@ -60,7 +60,7 @@ export class BoardViewport {
     this.centerY = saved?.center[1] ?? 0;
     this.cameraScale = saved?.scale ?? 1;
     this.setBackground(this.state.background);
-    this.onLoadProgress?.({completed: 0, total: 0, rawFallbacks: 0, failed: 0});
+    this.onLoadProgress?.({completed: 0, total: 0, rawFallbacks: 0, failed: 0, raw: 0, lod: 0, pending: 0});
     this.resize();
   }
 

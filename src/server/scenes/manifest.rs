@@ -142,6 +142,7 @@ pub(in crate::server) async fn scene_from_manifest(
         if let Some(Some((mesh, bounds))) = cached.get(&r.uri) {
             let mut mesh = mesh.clone();
             mesh.quality = r.quality.unwrap_or_default();
+            mesh.visible = r.visible.unwrap_or(true);
             mesh.label = r.label.as_ref().map(|text| crate::scene::MeshLabel {
                 text: text.clone(),
                 anchor: None,

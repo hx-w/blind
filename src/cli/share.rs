@@ -68,6 +68,7 @@ struct ShareResource {
     label: Option<String>,
     component: Option<crate::scene::component::ComponentKind>,
     quality: Option<crate::scene::MeshQuality>,
+    visible: Option<bool>,
     group: Option<String>,
     position: Option<[f32; 3]>,
     size: Option<[f32; 2]>,
@@ -258,6 +259,7 @@ impl ShareRenderers {
                     && input.display.iter().all(|o| o.component.is_none()
                         && o.member.is_none()
                         && o.quality.is_none()
+                        && o.visible.is_none()
                         && o.group.is_none()
                         && o.position.is_none()
                         && o.size.is_none()),
@@ -530,6 +532,7 @@ fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
             placement: resource.placement,
             component: resource.component,
             quality: resource.quality,
+            visible: resource.visible,
             member: resource.member,
             group: resource.group,
             position: resource.position,
@@ -881,7 +884,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.json");
         let viewport = json!({"mode":"board","board":{"center":[12.5,-7.25],"scale":2.75}});
-        let resource = json!({"path":"report.md","placement":"panel","size":[120,90]});
+        let resource =
+            json!({"path":"report.md","placement":"panel","size":[120,90],"visible":false});
         fs::write(
             &path,
             serde_json::to_vec(&json!({
@@ -912,6 +916,7 @@ mod tests {
             input.display[0].placement,
             crate::scene::component::Placement::Panel
         );
+        assert_eq!(input.display[0].visible, Some(false));
         fs::write(
             &path,
             serde_json::to_vec(&json!({
@@ -943,9 +948,10 @@ mod tests {
             input.scenes[0].input.display[0].placement,
             crate::scene::component::Placement::Panel
         );
+        assert_eq!(input.scenes[0].input.display[0].visible, Some(false));
         fs::write(&path, serde_json::to_vec(&json!({
             "schema_version":1,"requires":["components.v1"],"viewport":viewport,
-            "resources":[],"components":[{"id":"report","label":"Report","uri":"report.md","placement":"panel"}]
+            "resources":[],"components":[{"id":"report","label":"Report","uri":"report.md","placement":"panel","visible":false}]
         })).unwrap()).unwrap();
         let SharePlan::Scene(input) = read_share_config(&path).unwrap() else {
             panic!("expected manifest");
@@ -956,6 +962,7 @@ mod tests {
             manifest.components[0].display.placement,
             crate::scene::component::Placement::Panel
         );
+        assert_eq!(manifest.components[0].display.visible, Some(false));
         for scale in [0., -1.] {
             fs::write(
                 &path,

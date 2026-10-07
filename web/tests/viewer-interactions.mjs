@@ -541,8 +541,15 @@ async function openPage(viewport, markupResizeDelay = 0, sceneOverride = null, m
   await page.goto(`${origin}/s/fixture`);
   await page.locator('#loading-state').waitFor({state:'hidden'});
   assert.equal(await page.locator('#invalid-state').isVisible(), false);
-  await page.waitForTimeout(350);
+  await waitForGeometry(page);
   return page;
+}
+async function waitForGeometry(page) {
+  await page.waitForFunction(async () => {
+    const result = await window.blind?.execute('entity:list', {});
+    return result?.ok && result.value.every(entity => !entity.loading);
+  });
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 async function eventsDuring(page, action) {
   await page.evaluate(() => { window.paintEvents = []; });
@@ -1376,19 +1383,25 @@ test('partial scenes show a persistent notice and semantic details', async () =>
 });
 
 
-test('all failed mesh downloads show unavailable instead of a partial scene', async () => {
+test('failed geometry keeps host controls available and supports explicit resource retry', async () => {
   const page=await browser.newPage({viewport:{width:390,height:844}});
   try {
-    await page.route('**/mesh/**',route=>route.fulfill({status:503,body:'Unavailable'}));
+    const failDownload = route=>route.fulfill({status:503,body:'Unavailable'});
+    await page.route('**/mesh/**', failDownload);
     await page.goto(`${origin}/s/fixture`);
-    await page.waitForSelector('#invalid-state:not([hidden])');
-    assert.match(await page.locator('#invalid-state h2').textContent(),/暂时无法打开/);
-    assert.equal(await page.locator('#scene-notice').isVisible(),false);
-    assert.equal(await page.locator('#share-view').isVisible(),false);
-    await page.setViewportSize({width:900,height:700});
-    await page.evaluate(() => window.addEventListener('keydown', event => { window.copyIntercepted = event.defaultPrevented; }, {once:true}));
-    await page.keyboard.press(`${process.platform === 'darwin' ? 'Meta' : 'Control'}+c`);
-    assert.equal(await page.evaluate(() => window.copyIntercepted), false);
+    await page.locator('#loading-state').waitFor({state:'hidden'});
+    await waitForGeometry(page);
+    const failed = await viewerOperation(page, 'entity:list');
+    assert.ok(failed.every(entity => entity.loadState === 'error'));
+    assert.equal(await page.locator('#invalid-state').isVisible(), false);
+    assert.equal(await page.locator('#scene-notice').isVisible(), true);
+    assert.equal(await page.locator('#share-view').isVisible(), true);
+    await page.unroute('**/mesh/**', failDownload);
+    await viewerOperation(page, 'entity:set-quality', {id: 'mesh-0', quality: 'raw'});
+    assert.equal((await viewerOperation(page, 'entity:get', {id: 'mesh-0'})).loadState, 'ready');
+    assert.equal((await viewerOperation(page, 'entity:get', {id: 'mesh-1'})).loadState, 'error');
+    await viewerOperation(page, 'scene:show', {ids: ['mesh-0'], fit: true});
+    assert.equal((await viewerOperation(page, 'entity:get', {id: 'mesh-0'})).visible, true);
   } finally { await page.close(); }
 });
 
@@ -1452,6 +1465,9 @@ test('orthographic framing retains geometry behind the saved camera', async () =
     assert.ok(p[0] > p[1]*2 && p[0] > p[2]*2, `clipped orthographic plane: ${p}`);
     const saved = (await captureShare(page)).state;
     assert.equal(saved.camera.zoom,1); assert.equal(saved.camera.orthographic_height,8);
+    assert.deepEqual(saved.camera.position, data.state.camera.position, 'loading cannot relocate a saved orthographic eye');
+    const pick = await viewerOperation(page, 'annotation:pick', {point: [400, 400], entityId: 'mesh-0'});
+    assert.ok(pick, 'geometry behind the orthographic eye remains pickable from the near plane');
     const offset=saved.camera.position.map((v,i)=>v-saved.camera.target[i]);
     const expected=data.state.camera.position.map((v,i)=>v-data.state.camera.target[i]);
     for(let i=0;i<3;i++)assert.ok(Math.abs(offset[i]/Math.hypot(...offset)-expected[i]/Math.hypot(...expected))<1e-5,'restoring an oblique camera must preserve its direction');
@@ -1560,10 +1576,12 @@ test('spatial content respects depth and stays fixed during pointer and keyboard
         data.entities[1].opacity=1;
       }
       await page.goto(`${origin}/s/fixture`);await page.locator('#loading-state').waitFor({state:'hidden'});
+      await waitForGeometry(page);
       if(z<0) {
         await page.mouse.click(650,400);
         assert.equal((await captureShare(page)).state.selected,0,'exposed mesh pixels remain selectable with DOM content present');
         await page.reload();await page.locator('#loading-state').waitFor({state:'hidden'});
+        await waitForGeometry(page);
       }
       await page.mouse.click(400,400);
       assert.equal(await page.locator('.component-dialog').isVisible(),false,'a single click only selects content');

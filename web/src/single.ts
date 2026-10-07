@@ -51,6 +51,7 @@ const loadingTitle = $('#loading-title');
 const loadingMeter = $('#loading-meter');
 const loadingBar = $('#loading-bar');
 const loadingProgress = $('#loading-progress');
+const geometryProgress = $('#geometry-progress');
 const invalid = $('#invalid-state');
 const empty = $('#empty-state');
 const sceneSelectedInfo = $('#scene-selected-info');
@@ -94,7 +95,8 @@ let shareLinks: ShareResponse | undefined;
 let shareRequestGeneration = 0;
 let shortcutCopyGeneration = 0;
 let toastTimer = 0;
-let loadProgress = { completed: 0, total: 0, rawFallbacks: 0, failed: 0 };
+let loadProgress = { completed: 0, total: 0, rawFallbacks: 0, failed: 0, raw: 0, lod: 0, pending: 0 };
+let initialFramePending = false;
 let longLoadTimer = 0;
 const operations = new OperationHost({sceneId: sceneId ?? 'scene', ready: () => sceneReady, exporting: exportMode});
 let viewport: SceneViewport;
@@ -109,7 +111,6 @@ markup.onChange = () => {
 markup.onActiveChange = (active) => shell.classList.toggle('drawing-stroke', active);
 
 installIcons();
-void start();
 
 function saveEmbeddedState(): import('./api').SceneUpdate | null {
   if (!embedded || !sceneReady || !sessionKey) return null;
@@ -142,7 +143,7 @@ operations.subscribe(event => {
 });
 window.addEventListener('pagehide', event => {
   if (event.persisted) return;
-  operations.dispose(); disconnectParent?.(); unpublishOperations(); components?.dispose();
+  operations.dispose(); disconnectParent?.(); unpublishOperations(); components?.dispose(); viewport?.dispose();
 });
 
 $('#scene-notice').addEventListener('click', () => runUI(workbenchOperations.info, {}));
@@ -206,10 +207,14 @@ async function start(): Promise<void> {
     $('#section-trigger').hidden = viewport.kind === 'board';
     axesToggle.closest('label')!.hidden = viewport.kind === 'board';
     viewport.onLoadProgress = progress => {loadProgress = progress; renderLoadProgress();};
-    viewport.onViewChangeStart = invalidateMarkupForViewChange;
+    viewport.onViewChangeStart = () => {initialFramePending = false; components?.cancelPendingFrame(); invalidateMarkupForViewChange();};
     viewport.onViewChangeEnd = () => {if (sceneReady) operations.notify('view', readView(viewport));};
     viewport.onModelChange = () => {
       syncSceneControls(); syncSceneMeta(); surface?.refreshList(); components?.sync(); section?.refresh();
+      if (initialFramePending && viewport.hasVisibleContent) {
+        viewport.fitAll(false);
+        initialFramePending = loadProgress.pending > 0;
+      }
       if (sceneReady && !components?.entityMutationActive) operations.notify('entity');
     };
     if (geometryViewer) geometryViewer.onSelectionChange = () => {
@@ -222,19 +227,18 @@ async function start(): Promise<void> {
     }};
     surface = geometryViewer ? new SurfaceEditor(geometryViewer, markup, shell, annotationCallbacks) : new ScreenAnnotationEditor(viewport, markup, shell, annotationCallbacks);
     section = geometryViewer ? new SectionViewer(geometryViewer, showToast) : undefined;
-    await viewport.load(scene, exportMode);
-    if (loadProgress.total > 0 && loadProgress.failed === loadProgress.total && !scene.entities.some(c => c.source.kind === 'attachment')) {
-      throw new Error('No models could be loaded');
-    }
+    viewport.initialize(scene);
     $('[data-copy="image"]').hidden = false;
     components = new ComponentViewer(root, viewport, scene, undefined, {operations});
+    components.onError = error => showToast(error instanceof Error ? error.message : '操作失败');
+    components.onFrameRequest = () => {initialFramePending = false;};
     components.onSelect = () => syncSceneControls();
     components.onChange = () => syncSceneControls();
     components.onContentViewChange = invalidateMarkupForViewChange;
     components.onScreenAnnotation = () => runUI(workbenchOperations.annotationOpen, {target: 'screen'});
     if (section) section.onShow = () => {components?.setSceneList({open: false});};
     if (!exportMode) void components.ready().catch(() => {});
-    registerViewOperations(operations, viewport);
+    registerViewOperations(operations, viewport, components);
     registerEntityOperations(operations, components);
     registerContentOperations(operations, components);
     registerAnnotationOperations(operations, surface, viewport, markup);
@@ -280,27 +284,23 @@ async function start(): Promise<void> {
     owner = scene.owner ? owner : undefined;
     syncSceneControls(); syncSceneMeta();
     section?.load();
-    const notices = (scene.warnings?.length ?? 0) + loadProgress.failed;
-    if (notices > 0) {
-      const notice = $('#scene-notice'); notice.hidden = false;
-      const partial = loadProgress.failed > 0 || scene.warnings?.some(warning => warning.code !== 'LOD_SELECTED');
-      notice.textContent = `${partial ? '场景部分可用' : 'LOD 为派生近似'} · ${notices} 项提示`;
-      if (loadProgress.failed) {
-        const row = document.createElement('p'); row.textContent = `${loadProgress.failed} 个模型加载失败；请检查网络或稍后重试。`; artifactList.prepend(row);
-      }
-    }
+    renderSceneNotices();
     sceneReady = true;
     if (!embedded && !exportMode) dock.hidden = false;
     finishLoading();
     operations.notify('lifecycle', {ready: true});
     operations.notify('ui', workbenchState());
+    initialFramePending = viewport.kind === 'spatial' && !scene.state.camera;
+    const geometryReady = geometryViewer?.loadVisible() ?? Promise.resolve();
     if (exportMode) {
-      if (loadProgress.failed) throw new Error('Export failed: geometry unavailable');
+      await geometryReady;
       await components.ready(); await document.fonts.ready;
       const settled = Promise.withResolvers<void>();
       requestAnimationFrame(() => requestAnimationFrame(() => settled.resolve()));
       await settled.promise;
       document.documentElement.dataset.renderStatus = 'ready';
+    } else {
+      void geometryReady.catch(() => {}).finally(() => {initialFramePending = false; renderLoadProgress(); renderSceneNotices();});
     }
   } catch (error) {
     operations.notify('lifecycle', {error: error instanceof Error ? error.message : 'Scene failed'});
@@ -317,31 +317,41 @@ async function start(): Promise<void> {
 }
 
 function renderLoadProgress(): void {
-  const { completed, total, rawFallbacks, failed } = loadProgress;
+  const { completed, total, rawFallbacks, failed, raw, lod, pending } = loadProgress;
   const percent = total > 0 ? Math.round(completed / total * 100) : 0;
+  const quality = raw && lod ? 'Raw / LOD' : raw ? 'Raw' : 'LOD';
   loadingMeter.hidden = total === 0;
   loadingMeter.setAttribute('aria-valuenow', String(percent));
   loadingBar.style.setProperty('--loading-progress', `${percent}%`);
-  loadingTitle.textContent = completed >= total && total > 0 ? '正在打开场景' : '正在生成 LOD';
+  loadingTitle.textContent = pending ? `正在加载 ${quality} 几何` : '正在打开场景';
   loadingProgress.textContent = total > 0
     ? `${completed} / ${total} Mesh${rawFallbacks > 0 ? ` · ${rawFallbacks} 个回退 Raw` : ''}${failed > 0 ? ` · ${failed} 个不可用` : ''}`
-    : '正在验证源 Mesh';
+    : '正在读取场景信息';
+  geometryProgress.hidden = !sceneReady || pending === 0;
+  geometryProgress.textContent = `加载 ${quality} · ${completed} / ${total}`;
+  renderSceneNotices();
+}
+function renderSceneNotices(): void {
+  if (!scene) return;
+  const failures = geometryViewer?.modelInfos.filter(info => info.loadState === 'error').length ?? 0;
+  const notices = (scene.warnings?.length ?? 0) + failures;
+  const notice = $('#scene-notice'); notice.hidden = notices === 0;
+  if (!notices) return;
+  const partial = failures > 0 || scene.warnings?.some(warning => warning.code !== 'LOD_SELECTED');
+  notice.textContent = `${partial ? '场景部分可用' : 'LOD 为派生近似'} · ${notices} 项提示`;
 }
 
 function startLongLoadHint(): void {
   window.clearTimeout(longLoadTimer);
   longLoadTimer = window.setTimeout(() => {
-    if (!loading.hidden && (loadProgress.total === 0 || loadProgress.completed < loadProgress.total)) {
-      loadingTitle.textContent = loadProgress.total === 0
-        ? '源 Mesh 较大，正在验证'
-        : '首次生成 LOD，可能需要片刻';
-    }
+    if (!loading.hidden) loadingTitle.textContent = '正在读取场景信息';
   }, 1800);
 }
 
 function finishLoading(): void {
   window.clearTimeout(longLoadTimer);
   loading.hidden = true;
+  renderLoadProgress();
 }
 
 function hideViewerControls(): void {
@@ -373,7 +383,9 @@ function syncSceneControls(): void {
     button.disabled = selected.loading || (quality === 'lod' && geometryViewer!.annotations.some(mark => mark.mesh === geometryViewer!.selectedIndex));
   });
   if (geometryViewer!.annotations.some(mark => mark.mesh === geometryViewer!.selectedIndex)) lodSaving.textContent = '表面标记使用 Raw，分享后位置保持一致';
-  else if (selected.loading) lodSaving.textContent = `正在加载 ${selected.quality === 'lod' ? 'Raw' : 'LOD'} Mesh`;
+  else if (selected.loadState === 'error') lodSaving.textContent = '几何加载失败，可重新选择精度重试';
+  else if (selected.loading) lodSaving.textContent = `正在加载 ${selected.quality === 'raw' ? 'Raw' : 'LOD'} Mesh`;
+  else if (selected.loadState === 'unloaded') lodSaving.textContent = '尚未加载，显示此元素时按需加载';
   else if (selected.lod_bytes !== undefined) {
     const { delta, percent } = savings(selected.raw_bytes, selected.lod_bytes);
     lodSaving.textContent = delta >= 0
@@ -655,8 +667,11 @@ function syncSceneMeta(): void {
   }
   const models = geometryViewer?.modelInfos ?? [];
   const rawBytes = models.reduce((sum, mesh) => sum + mesh.raw_bytes, 0);
-  const activeBytes = models.reduce((sum, mesh) => sum + (mesh.quality === 'lod' ? mesh.lod_bytes ?? mesh.raw_bytes : mesh.raw_bytes), 0);
-  meta.textContent = `${models.length} ${models.length === 1 ? 'mesh' : 'meshes'} · 当前 ${formatBytes(activeBytes)} · ${savings(rawBytes, activeBytes).comparison}`;
+  const visible = models.filter(mesh => mesh.visible && mesh.opacity > 0);
+  const ready = visible.filter(mesh => mesh.loadState === 'ready');
+  const activeBytes = ready.reduce((sum, mesh) => sum + (mesh.quality === 'lod' ? mesh.lod_bytes ?? mesh.raw_bytes : mesh.raw_bytes), 0);
+  meta.textContent = `${models.length} Mesh · Raw 总量 ${formatBytes(rawBytes)} · 可见 ${ready.length} / ${visible.length} 已加载 · ${formatBytes(activeBytes)}`;
 }
 
 function escapeHtml(value: string): string { const div = document.createElement('div'); div.textContent = value; return div.innerHTML; }
+void start();

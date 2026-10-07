@@ -23,7 +23,8 @@ interface Entry { spec: SceneEntity; runtime: ComponentRuntime; capabilities: Co
 export interface EntitySnapshot {
   id: string; component: string; label: string; group: string | null; placement: 'world' | 'panel';
   visible: boolean; opacity: number; selected: boolean; position: Vec3 | null; size: [number, number] | null;
-  capabilities: ComponentCapabilities; color?: string; quality?: 'raw' | 'lod'; loading?: boolean; unavailable?: string;
+  capabilities: ComponentCapabilities; color?: string; quality?: 'raw' | 'lod'; loading?: boolean;
+  loadState?: 'unloaded' | 'loading' | 'ready' | 'error'; unavailable?: string;
 }
 export interface ContentSnapshot {
   id: string; native: boolean; ready: boolean; presentation: Presentation; menu: boolean; unavailable?: string;
@@ -104,6 +105,8 @@ export class ComponentViewer {
   onChange?: () => void;
   onScreenAnnotation?: () => void;
   onContentViewChange?: () => void;
+  onError?: (error: unknown) => void;
+  onFrameRequest?: () => void;
   get selectedEntity(): SceneEntity | undefined { return this.selected?.spec; }
   get selectedGeometry(): 'mesh' | 'points' | undefined { return this.selected?.capabilities.geometry; }
   openInfo(): void { this.setSceneList({open: true, tab: 'info'}); }
@@ -128,6 +131,7 @@ export class ComponentViewer {
   get entities(): readonly SceneEntity[] { return this.entries.map(e => e.spec); }
   bindOperations(host: OperationHost): void { this.operations = host; }
   private changed(): void { this.onChange?.(); this.operations?.notify('entity', {entities: this.listEntities(), selected: this.selected?.spec.id ?? null}); }
+  private runMutation(mutation: Promise<unknown>): void { void mutation.catch(error => this.onError?.(error)); }
   private panelWidthRange(): {min: number; max: number} {
     const width = this.root.clientWidth;
     const max = Math.max(0, width - Math.min(320, width / 2));
@@ -189,7 +193,8 @@ export class ComponentViewer {
     return {id: spec.id, component: spec.component, label: spec.label, group: spec.group, placement: spec.placement,
       visible: spec.visible, opacity: spec.opacity, selected: this.selected === entry, position: spec.position ? [...spec.position] : null,
       size: spec.size ? [...spec.size] : null, capabilities: structuredClone(capabilities),
-      ...(info ? {color: info.color, quality: info.quality, loading: info.loading, ...(info.lod_error ? {unavailable: 'Geometry resource is unavailable'} : {})} : {})};
+      ...(info ? {color: info.color, quality: info.quality, loading: info.loading, loadState: info.loadState,
+        ...(info.load_error ? {unavailable: info.load_error} : {})} : {})};
   }
   selectEntity(id: string): EntitySnapshot { this.select(this.requireEntry(id).spec); return this.getEntity(id); }
   labelEntity(id: string, label: string): EntitySnapshot {
@@ -197,7 +202,7 @@ export class ComponentViewer {
     if (!label.trim() || length > 120) throw new OperationError('INVALID_ARGUMENT', 'Name must contain 1–120 characters', {field: 'label'});
     this.setLabel(this.requireEntry(id), label); return this.getEntity(id);
   }
-  styleEntity(id: string, style: {visible?: boolean; opacity?: number; color?: string}): EntitySnapshot {
+  async styleEntity(id: string, style: {visible?: boolean; opacity?: number; color?: string}): Promise<EntitySnapshot> {
     const entry = this.requireEntry(id);
     if (style.opacity !== undefined && (!Number.isFinite(style.opacity) || style.opacity < 0 || style.opacity > 1)) throw new OperationError('INVALID_ARGUMENT', 'Opacity must be between zero and one', {field: 'opacity'});
     if (style.color !== undefined && (!entry.capabilities.geometry || this.viewer.kind !== 'spatial')) throw new OperationError('UNSUPPORTED', 'Only geometry has a color', {target: id});
@@ -212,14 +217,18 @@ export class ComponentViewer {
     };
     try { if (this.viewer.kind === 'spatial') this.viewer.batchStyles(commit); else commit(); }
     finally { this.syncing = false; }
-    this.sync(); this.changed(); return this.getEntity(id);
+    this.visibilityGeneration++;
+    this.sync(); this.changed();
+    if (effectiveVisibility(entry.spec)) await this.ensureEntries([entry]);
+    return this.getEntity(id);
   }
-  showEntities(ids: readonly string[], opacity?: number, fit = false): EntitySnapshot[] {
+  async showEntities(ids: readonly string[], opacity?: number, fit = false): Promise<EntitySnapshot[]> {
     const chosen = ids.map(id => this.requireEntry(id));
     if (ids.length > 256 || new Set(ids).size !== ids.length) throw new OperationError('INVALID_ARGUMENT', 'Expected at most 256 unique entity IDs', {field: 'ids'});
     if (opacity !== undefined && (!Number.isFinite(opacity) || opacity < 0 || opacity > 1)) throw new OperationError('INVALID_ARGUMENT', 'Opacity must be between zero and one', {field: 'opacity'});
     const selected = new Set(chosen);
     this.syncing = true;
+    if (fit) this.beginFrameRequest();
     const commit = () => {
       for (const entry of this.entries) {
         entry.spec.visible = selected.has(entry);
@@ -231,14 +240,17 @@ export class ComponentViewer {
     try { if (this.viewer.kind === 'spatial') this.viewer.batchStyles(commit); else commit(); }
     finally { this.syncing = false; }
     this.sync();
-    if (fit) {
+    const generation = ++this.visibilityGeneration, frame = this.frameGeneration;
+    this.changed();
+    await this.ensureEntries(chosen.filter(entry => effectiveVisibility(entry.spec)));
+    if (fit && generation === this.visibilityGeneration && frame === this.frameGeneration) {
       const bounds = new THREE.Box3();
       for (const entry of chosen) if (entry.spec.placement === 'world' && effectiveVisibility(entry.spec)) bounds.union(entry.runtime.bounds);
       if (!bounds.isEmpty()) this.viewer.focusBounds(bounds);
     }
-    this.changed(); return this.listEntities();
+    return this.listEntities();
   }
-  isolateEntity(id: string, fit = false): EntitySnapshot[] {
+  isolateEntity(id: string, fit = false): Promise<EntitySnapshot[]> {
     const entry = this.requireEntry(id);
     this.syncing = true;
     try { this.select(entry.spec); } finally { this.syncing = false; }
@@ -247,6 +259,9 @@ export class ComponentViewer {
   async focusEntities(ids: readonly string[], animate = false): Promise<ViewMutation> {
     const entries = ids.map(id => this.requireEntry(id));
     if (!entries.length || ids.length > 256 || new Set(ids).size !== ids.length) throw new OperationError('INVALID_ARGUMENT', 'Focus requires 1–256 unique entity IDs', {field: 'ids'});
+    const generation = this.visibilityGeneration, frame = this.beginFrameRequest();
+    await this.ensureEntries(entries.filter(entry => effectiveVisibility(entry.spec)));
+    if (generation !== this.visibilityGeneration || frame !== this.frameGeneration) return {status: 'interrupted', view: readView(this.viewer)};
     const bounds = new THREE.Box3();
     for (const entry of entries) if (entry.spec.placement === 'world' && effectiveVisibility(entry.spec)) bounds.union(entry.runtime.bounds);
     if (entries.length === 1 && entries[0].spec.placement === 'panel' && effectiveVisibility(entries[0].spec) && entries[0].runtime instanceof SurfaceRuntime) {
@@ -262,8 +277,7 @@ export class ComponentViewer {
     const entry = this.requireEntry(id);
     if (!entry.capabilities.geometry || this.viewer.kind !== 'spatial') throw new OperationError('UNSUPPORTED', 'Only geometry has mesh quality', {target: id});
     if (quality === 'lod' && this.viewer.annotations.some(mark => mark.mesh === entry.spec.source.index)) throw new OperationError('CONFLICT', 'Surface-marked geometry must retain raw quality', {target: id});
-    try { await this.viewer.setQuality(entry.spec.source.index, quality); }
-    catch { throw new OperationError('RESOURCE_UNAVAILABLE', 'Requested geometry quality could not be loaded', {target: id, retryable: true}); }
+    await this.viewer.setQuality(entry.spec.source.index, quality);
     this.sync(); this.changed(); return this.getEntity(id);
   }
   placementEntity(id: string, placement: 'world' | 'panel'): EntitySnapshot {
@@ -283,6 +297,23 @@ export class ComponentViewer {
   getContent(id: string): ContentSnapshot { return this.contentRuntime(id).snapshot(); }
   async whenSettled(): Promise<void> {
     await Promise.all(this.entries.flatMap(entry => entry.runtime instanceof SurfaceRuntime ? [entry.runtime.whenSettled()] : []));
+  }
+  private visibilityGeneration = 0;
+  private frameGeneration = 0;
+  private readonly laidOutGeometry = new Set<number>();
+  cancelPendingFrame(): void { this.frameGeneration++; }
+  private beginFrameRequest(): number { this.onFrameRequest?.(); return ++this.frameGeneration; }
+  async prepareVisibleFrame(): Promise<boolean> {
+    const frame = this.beginFrameRequest(), generation = this.visibilityGeneration;
+    await this.ensureEntries(this.entries.filter(entry => effectiveVisibility(entry.spec)));
+    return frame === this.frameGeneration && generation === this.visibilityGeneration;
+  }
+  private async ensureEntries(entries: readonly Entry[]): Promise<void> {
+    if (this.viewer.kind === 'spatial') {
+      await this.viewer.ensureLoaded(entries.filter(entry => entry.spec.source.kind === 'mesh').map(entry => entry.spec.source.index));
+    }
+    await Promise.all(entries.flatMap(entry => entry.runtime instanceof SurfaceRuntime ? [entry.runtime.ready] : []));
+    await this.whenSettled();
   }
   contentChanged(id: string): void {
     if (!this.entries.some(entry => entry.spec.id === id)) return;
@@ -352,7 +383,7 @@ export class ComponentViewer {
     viewer.renderListeners.add(this.render); this.viewport.addEventListener('change', this.viewportChanged);
     viewer.entityUpdates = () => this.entries.map(e => entityUpdate(e.spec));
     this.refreshBounds();
-    if (viewer.kind === 'spatial' && !scene.state.camera && scene.entities.length) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
+    if (viewer.kind === 'spatial' && !scene.state.camera && viewer.hasVisibleContent) { viewer.setCanonicalView('pz'); viewer.fitAll(false); }
     if (this.entries[0]) this.select(this.entries.find(e => e.spec.id === viewer.focusedComponentId)?.spec ?? (viewer.kind === 'spatial' ? this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === viewer.selectedIndex)?.spec : undefined) ?? this.entries[0].spec, false);
     this.render();
   }
@@ -457,6 +488,19 @@ export class ComponentViewer {
       }
     });
   }
+  private relayoutGeometry(): void {
+    const originals = new Map(sceneEntities(this.scene).map(spec => [spec.id, spec]));
+    this.groupLabels.replaceChildren(); this.captions.length = 0;
+    for (const entry of this.entries) {
+      const original = originals.get(entry.spec.id)!;
+      if (original.position) continue;
+      entry.spec.position = null;
+      if (entry.spec.source.kind === 'mesh' && this.viewer.kind === 'spatial') {
+        entry.runtime.setPosition(this.scene.meshes[entry.spec.source.index].translation ?? [0, 0, 0]);
+      } else entry.runtime.setPosition([0, 0, 0]);
+    }
+    this.layout();
+  }
   private position(entry: Entry, position: Vec3): void { entry.spec.position = position; entry.runtime.setPosition(position); }
   refreshBounds(): void {
     const box = new THREE.Box3();
@@ -475,6 +519,13 @@ export class ComponentViewer {
   selectMesh(index: number): void { const entry = this.entries.find(e => e.spec.source.kind === 'mesh' && e.spec.source.index === index); if (entry) this.select(entry.spec, false); }
   sync(): void {
     if (this.syncing) return; this.syncing = true;
+    if (this.viewer.kind === 'spatial') {
+      const fresh = this.viewer.modelInfos.flatMap((info, index) => info.loadState === 'ready' && !this.laidOutGeometry.has(index) ? [index] : []);
+      if (fresh.length) {
+        for (const index of fresh) this.laidOutGeometry.add(index);
+        this.relayoutGeometry();
+      }
+    }
     for (const entry of this.entries) {
       const {spec, runtime} = entry;
       if (spec.source.kind === 'mesh' && this.viewer.kind === 'spatial') {
@@ -487,7 +538,11 @@ export class ComponentViewer {
         const percentage = Math.round(spec.opacity * 100);
         row.label = spec.label;
         row.button.setAttribute('aria-label', spec.label);
-        row.button.title = `${spec.label} · 双击仅显示此元素`;
+        const info = spec.source.kind === 'mesh' && this.viewer.kind === 'spatial' ? this.viewer.modelInfos[spec.source.index] : undefined;
+        const status = info?.loadState === 'unloaded' ? '尚未加载' : info?.loadState === 'loading' ? '正在加载' : info?.loadState === 'error' ? '加载失败' : '';
+        row.button.dataset.loadState = info?.loadState ?? 'ready';
+        row.button.setAttribute('aria-description', status);
+        row.button.title = `${spec.label}${status ? ` · ${status}` : ''} · 双击仅显示此元素`;
         row.edit.setAttribute('aria-label', `修改 ${spec.label} 的名称`);
         row.input.setAttribute('aria-label', `${spec.label} 的名称`);
         row.button.style.setProperty('--element-opacity', String(visible ? Math.max(.45, spec.opacity) : .35));
@@ -644,8 +699,8 @@ export class ComponentViewer {
     heading.append(tabs);
     const elements = document.createElement('div'); elements.className = 'scene-tree-elements';
     const actions = document.createElement('div'); actions.className = 'scene-tree-actions'; actions.setAttribute('role', 'group'); actions.setAttribute('aria-label', '场景显示');
-    const showAll = button('全部显示', () => this.showEntities(this.entries.map(entry => entry.spec.id)));
-    const hideAll = button('全部隐藏', () => this.showEntities([]));
+    const showAll = button('全部显示', () => this.runMutation(this.showEntities(this.entries.map(entry => entry.spec.id))));
+    const hideAll = button('全部隐藏', () => this.runMutation(this.showEntities([])));
     for (const [action, icon] of [[showAll, 'eye'], [hideAll, 'eye-off']] as const) {
       const marker = document.createElement('i'); marker.dataset.lucide = icon; marker.setAttribute('aria-hidden', 'true'); action.prepend(marker);
     }
@@ -671,7 +726,7 @@ export class ComponentViewer {
         const item = document.createElement('div'); item.className = 'scene-tree-item';
         const row = document.createElement('div'); row.className = 'scene-tree-row';
         const select = button(spec.label, () => this.select(spec)); select.className = 'scene-tree-select'; select.setAttribute('aria-pressed', 'false'); select.title = `${spec.label} · 双击仅显示此元素`;
-        select.addEventListener('dblclick', () => this.isolateEntity(spec.id, true));
+        select.addEventListener('dblclick', () => this.runMutation(this.isolateEntity(spec.id, true)));
         const name = document.createElement('div'); name.className = 'scene-tree-name';
         const editor = document.createElement('form'); editor.className = 'scene-tree-rename'; editor.hidden = true;
         const input = document.createElement('textarea'); input.rows = 2; input.maxLength = 120; input.spellcheck = false;
@@ -687,8 +742,8 @@ export class ComponentViewer {
         const edit = button('', () => this.startRename(entry, edit, editor, input, item)); edit.className = 'scene-tree-edit'; edit.innerHTML = '<i data-lucide="pencil" aria-hidden="true"></i>';
         name.append(select, edit);
         const opacity = document.createElement('input'); opacity.className = 'scene-tree-opacity'; opacity.type = 'range'; opacity.min = '0'; opacity.max = '100'; opacity.step = '1';
-        opacity.addEventListener('input', () => this.styleEntity(spec.id, {visible: Number(opacity.value) > 0, opacity: Number(opacity.value) / 100}));
-        const visibility = button('', () => this.styleEntity(spec.id, {visible: !effectiveVisibility(spec)})); visibility.className = 'scene-tree-visibility';
+        opacity.addEventListener('input', () => this.runMutation(this.styleEntity(spec.id, {visible: Number(opacity.value) > 0, opacity: Number(opacity.value) / 100})));
+        const visibility = button('', () => this.runMutation(this.styleEntity(spec.id, {visible: !effectiveVisibility(spec)}))); visibility.className = 'scene-tree-visibility';
         visibility.innerHTML = '<i data-lucide="eye" aria-hidden="true"></i><i data-lucide="eye-off" aria-hidden="true"></i>';
         const view: TreeRow = {button: select, edit, editor, input, label: spec.label, opacity, visibility};
         if (entry.capabilities.geometry && spec.source.kind === 'mesh') {
@@ -699,7 +754,7 @@ export class ComponentViewer {
           color.setAttribute('aria-controls', palette.id); color.setAttribute('aria-expanded', 'false');
           view.color = color; view.palette = palette; view.choices = geometryPalette.map(value => {
             const choice = button('', () => {
-              this.styleEntity(spec.id, {color: value});
+              this.runMutation(this.styleEntity(spec.id, {color: value}));
               this.closeColorPicker(); color.focus({preventScroll: true});
             });
             choice.className = 'scene-tree-color-choice'; choice.dataset.color = value; choice.style.setProperty('--swatch', value);

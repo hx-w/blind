@@ -22,10 +22,18 @@ image links preserve the review state without changing the original files.
   approximation. 信息 can switch quality without changing the camera and reports
   Raw size, LOD size, saved bytes and the saving percentage.
 - Shared view snapshots preserve the selected Raw or LOD quality for every Mesh.
-- The first cold load shows completed Mesh count while the server generates
-  LODs. At most four Meshes are requested concurrently, and a single large Mesh
-  remains indeterminate until meshoptimizer returns. Individual failures are
-  reported without discarding Meshes that already loaded successfully.
+- The host UI, entity list and document/plugin components become usable before
+  geometry finishes. Only visible, positive-opacity geometry loads initially;
+  hidden resources retain metadata and source identity without downloading geometry.
+- Showing an unloaded entity requests its selected Raw or LOD geometry. Initial,
+  visibility and quality requests share a four-request limit; pending duplicates
+  share work, and hiding/showing resident geometry does not download it again.
+- Geometry rows expose unloaded, loading, ready and error states. Failures leave
+  other entities and controls usable; show again or select quality to retry.
+  Progress describes actual Raw/LOD requests, not LOD generation for Raw scenes.
+- Saved cameras restore before loading. Arrivals do not overwrite navigation;
+  default framing follows initial content only until the first view action.
+  PNG export waits for visible geometry and content, and fails on visible errors.
 - Vertex-only or zero-face PLY files render as circular GPU point sprites with
   sphere-like lighting. They are not expanded into sphere triangle Meshes.
 - PTS rings render as smooth, continuous curves through the original ordered samples, without point markers.

@@ -132,7 +132,8 @@ blind share --config scene.json
 
 `member` selects an exact ZIP member path (no recursive unpacking, maximum 64 MiB).
 `path` is required. Optional resource fields are `component`, `label`, `group`,
-`position: [x,y,z]`, `size: [width,height]`, `placement: "world"|"panel"` and
+`position: [x,y,z]`, `size: [width,height]`, `placement: "world"|"panel"`,
+`visible: true|false` (default `true`) and
 geometry-only `quality: "lod"|"raw"`. Geometry defaults to LOD and sharing warns
 that it is a derived approximation; Raw uses the original geometry directly.
 Placement defaults to `world`; geometry cannot use `panel`. Paths resolve relative to the config;
@@ -143,6 +144,9 @@ At most 256 resources are accepted. Surface files are limited to 64 MiB.
 Unpositioned entities are arranged in stable, flat groups in the XY plane.
 Geometry keeps its internal relative alignment; surfaces sit beside geometry.
 Explicit positions are absolute world-space coordinates and are never tiled.
+Automatic geometry layout updates as previously unloaded bounds become available;
+explicit positions and saved placements remain fixed. Native and plugin hosts do
+not wait for geometry to mount.
 `size` applies only to surfaces, in scene units; default is `[110,70]`.
 The `groups: [{"label":"Reference", "members":[1,2]}]` form and grouped
 `--label` syntax also map to flat groups. A resource belongs to one group; repeat
@@ -214,6 +218,31 @@ section planes/targets/plots/rulers, scene-list and toolbar state, resources, sh
 and Collection layout/activation. Queries do not finish drafts or mutate selection.
 Writes return their completed semantic result; events carry committed state and a
 scene revision. Entity, scene, annotation and stroke IDs are stable public handles.
+
+Host readiness means metadata and control interfaces are available, not that all
+geometry is resident. Geometry snapshots include `loadState` (`unloaded`,
+`loading`, `ready`, `error`), derived `loading`, selected `quality`, and a safe
+`unavailable` message on error. Initial demand excludes invisible or zero-opacity
+geometry for both Raw and LOD; no component needs geometry-specific host logic.
+
+`scene:show`, `entity:isolate`, and visible `entity:set-style` apply validated
+visibility atomically, then await only their selected resources. Loading failures
+return `RESOURCE_UNAVAILABLE` without reverting visibility or blocking unrelated
+entities. Focus/Fit wait for the relevant visible geometry; a newer selection or
+view action prevents an older completion from refitting. Same-quality requests
+share pending work and reuse resident geometry. A superseded quality request
+returns `CANCELLED`; disposed hosts return `DISPOSED`. Explicit quality selection
+can load hidden geometry, and surface annotation creation prepares its target Raw
+surface even when it has not previously been shown.
+Opening or redrawing a section also waits for the selected visible surface;
+cancelling while it loads prevents a late drawing activation. Saved section
+identity, plot state and measurements survive unloaded or unavailable geometry,
+with contours recomputed as visible targets become ready. Annotation queries
+retain their entity IDs even when their source geometry is not resident.
+
+Sharing keeps all entity/source metadata, including unloaded hidden geometry; it
+does not force an all-resource load. PNG completion requires the captured visible
+geometry and content to be ready, not hidden geometry.
 
 Results are `{ok:true,value,sceneId,revision}` or
 `{ok:false,error:{code,message,target?,retryable},sceneId,revision}`.

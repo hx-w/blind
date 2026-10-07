@@ -1,5 +1,6 @@
 import type { SceneViewport } from '../viewport/types';
 import { defineOperation, OperationError, s, type Infer, type Operation, type OperationHost, type Schema } from './core';
+import type {ComponentViewer} from '../component-viewer';
 
 const coordinates2 = s.tuple([s.number(), s.number()]);
 const coordinates3 = s.tuple([s.number(), s.number(), s.number()]);
@@ -44,7 +45,7 @@ export function readView(viewport: SceneViewport): ViewSnapshot {
   return {kind: 'spatial', camera: state.camera!, settings: {background: state.background, projection: state.projection, axes: state.axes, shading: state.shading, render_mode: viewport.renderMode, light: viewport.lightSettings}, frame: state.frame};
 }
 
-export function registerViewOperations(host: OperationHost, viewport: SceneViewport): () => void {
+export function registerViewOperations(host: OperationHost, viewport: SceneViewport, components: ComponentViewer): () => void {
   const complete = (status: ViewMutation['status']): ViewMutation => {
     const view = readView(viewport); host.notify('view', view); return {status, view};
   };
@@ -72,12 +73,14 @@ export function registerViewOperations(host: OperationHost, viewport: SceneViewp
       if (viewport.kind !== 'spatial') throw new OperationError('UNSUPPORTED', 'Board camera does not support rotation');
       viewport.rotate(params.axis, params.angle); return complete('committed');
     }, () => viewport.kind === 'spatial'),
-    host.register(viewOperations.canonical, params => {
+    host.register(viewOperations.canonical, async params => {
       if (viewport.kind !== 'spatial') throw new OperationError('UNSUPPORTED', 'Board camera does not have canonical spatial views');
+      if (!await components.prepareVisibleFrame()) return complete('interrupted');
       if (!viewport.hasVisibleContent) throw new OperationError('RESOURCE_UNAVAILABLE', 'No visible world entities to frame');
       viewport.setCanonicalView(params.direction); return complete('committed');
     }, () => viewport.kind === 'spatial'),
     host.register(viewOperations.fit, async params => {
+      if (!await components.prepareVisibleFrame()) return complete('interrupted');
       if (!viewport.hasVisibleContent) return complete('committed');
       viewport.fitAll(params.animate ?? true);
       const status = await viewport.waitForViewTransition();

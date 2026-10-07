@@ -18,11 +18,12 @@
         <div id="canvas-root" class="canvas-root" aria-label="可交互场景"></div>
         <canvas id="markup-canvas" class="markup-canvas" aria-label="屏幕批注画布" aria-hidden="true"></canvas>
         <button id="scene-notice" class="scene-notice" type="button" hidden data-viewer-chrome data-label-obstacle aria-label="查看场景异常详情"></button>
+        <div id="geometry-progress" class="geometry-progress" role="status" aria-live="polite" hidden data-viewer-chrome data-label-obstacle></div>
         <div class="gesture-hint" id="gesture-hint" role="status" data-viewer-chrome><span>单指旋转</span><i></i><span>双指移动</span><i></i><span>捏合缩放</span></div>
         <div class="loading-state" id="loading-state">
           <span class="loading-spinner" aria-hidden="true"></span>
           <p id="loading-title">正在读取场景</p>
-          <div class="loading-meter" id="loading-meter" role="progressbar" aria-label="LOD 加载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i id="loading-bar"></i></div>
+          <div class="loading-meter" id="loading-meter" role="progressbar" aria-label="几何加载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden><i id="loading-bar"></i></div>
           <small id="loading-progress">正在验证源 Mesh</small>
         </div>
         <div class="invalid-state" id="invalid-state" hidden>
