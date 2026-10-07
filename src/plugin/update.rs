@@ -457,44 +457,65 @@ repository = "team/demo"
         for bad in ["../x", "/x", "a/../../x", "a\\b", "./x"] {
             assert!(!safe_path(Path::new(bad)));
         }
-        for kind in [tar::EntryType::Symlink, tar::EntryType::Link] {
+        let control = tempfile::tempdir().unwrap();
+        extract(
+            &archive(&[("blind-plugin.toml", MANIFEST), ("demo", b"binary")]),
+            control.path(),
+            "demo",
+            [1, 2, 0],
+        )
+        .unwrap();
+        assert_eq!(fs::read(control.path().join("demo")).unwrap(), b"binary");
+
+        for kind in [
+            tar::EntryType::Symlink,
+            tar::EntryType::Link,
+            tar::EntryType::Regular,
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let destination = temp.path().join("staging");
+            fs::create_dir(&destination).unwrap();
+            let escape = temp.path().join("escaped");
             let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
             let mut tar = tar::Builder::new(gzip);
+            let mut entries = vec![("blind-plugin.toml", MANIFEST)];
+            if kind.is_file() {
+                entries.push(("demo", b"binary"));
+            }
+            for (name, bytes) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o755);
+                header.set_cksum();
+                tar.append_data(&mut header, name, bytes).unwrap();
+            }
             let mut header = tar::Header::new_gnu();
             header.set_entry_type(kind);
-            header.set_size(0);
-            header.set_mode(0o777);
-            header.set_cksum();
-            tar.append_link(&mut header, "demo", "/tmp/escape").unwrap();
+            header.set_mode(0o755);
+            if kind.is_file() {
+                // Write the raw header because Builder rejects traversal paths.
+                header.as_mut_bytes()[..10].copy_from_slice(b"../escaped");
+                header.set_size(6);
+                header.set_cksum();
+                tar.append(&header, &b"escape"[..]).unwrap();
+            } else {
+                header.set_size(0);
+                header.set_cksum();
+                tar.append_link(&mut header, "demo", &escape).unwrap();
+            }
             let bytes = tar.into_inner().unwrap().finish().unwrap();
+            assert!(extract(&bytes, &destination, "demo", [1, 2, 0]).is_err());
             assert!(
-                extract(
-                    &bytes,
-                    tempfile::tempdir().unwrap().path(),
-                    "demo",
-                    [1, 2, 0]
-                )
-                .is_err()
+                fs::symlink_metadata(&escape).is_err(),
+                "archive entry escaped the staging directory"
             );
+            if !kind.is_file() {
+                assert!(
+                    fs::symlink_metadata(destination.join("demo")).is_err(),
+                    "rejected link was published as a plugin executable"
+                );
+            }
         }
-        let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-        let mut tar = tar::Builder::new(gzip);
-        let mut header = tar::Header::new_gnu();
-        header.as_mut_bytes()[..7].copy_from_slice(b"../demo");
-        header.set_size(0);
-        header.set_mode(0o755);
-        header.set_cksum();
-        tar.append(&header, &[][..]).unwrap();
-        let bytes = tar.into_inner().unwrap().finish().unwrap();
-        assert!(
-            extract(
-                &bytes,
-                tempfile::tempdir().unwrap().path(),
-                "demo",
-                [1, 2, 0]
-            )
-            .is_err()
-        );
     }
     #[test]
     fn checksums_and_asset_hosts_are_strict() {

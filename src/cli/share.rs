@@ -72,6 +72,7 @@ struct ShareResource {
     group: Option<String>,
     position: Option<[f32; 3]>,
     size: Option<[f32; 2]>,
+    panel_height: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +263,8 @@ impl ShareRenderers {
                         && o.visible.is_none()
                         && o.group.is_none()
                         && o.position.is_none()
-                        && o.size.is_none()),
+                        && o.size.is_none()
+                        && o.panel_height.is_none()),
                 "a plugin share accepts one URI and no display or label overrides"
             );
             input.display.clear();
@@ -537,6 +539,7 @@ fn parse_share_config(config: ShareConfig, base: &Path) -> Result<ShareInput> {
             group: resource.group,
             position: resource.position,
             size: resource.size,
+            panel_height: resource.panel_height,
         };
         options
             .validate()
@@ -884,8 +887,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.json");
         let viewport = json!({"mode":"board","board":{"center":[12.5,-7.25],"scale":2.75}});
-        let resource =
-            json!({"path":"report.md","placement":"panel","size":[120,90],"visible":false});
+        let resource = json!({"path":"report.md","placement":"panel","size":[120,90],"panel_height":320.5,"visible":false});
         fs::write(
             &path,
             serde_json::to_vec(&json!({
@@ -917,6 +919,7 @@ mod tests {
             crate::scene::component::Placement::Panel
         );
         assert_eq!(input.display[0].visible, Some(false));
+        assert_eq!(input.display[0].panel_height, Some(320.5));
         fs::write(
             &path,
             serde_json::to_vec(&json!({
@@ -949,9 +952,10 @@ mod tests {
             crate::scene::component::Placement::Panel
         );
         assert_eq!(input.scenes[0].input.display[0].visible, Some(false));
+        assert_eq!(input.scenes[0].input.display[0].panel_height, Some(320.5));
         fs::write(&path, serde_json::to_vec(&json!({
             "schema_version":1,"requires":["components.v1"],"viewport":viewport,
-            "resources":[],"components":[{"id":"report","label":"Report","uri":"report.md","placement":"panel","visible":false}]
+            "resources":[],"components":[{"id":"report","label":"Report","uri":"report.md","placement":"panel","panel_height":320.5,"visible":false}]
         })).unwrap()).unwrap();
         let SharePlan::Scene(input) = read_share_config(&path).unwrap() else {
             panic!("expected manifest");
@@ -963,6 +967,7 @@ mod tests {
             crate::scene::component::Placement::Panel
         );
         assert_eq!(manifest.components[0].display.visible, Some(false));
+        assert_eq!(manifest.components[0].display.panel_height, Some(320.5));
         for scale in [0., -1.] {
             fs::write(
                 &path,
@@ -981,6 +986,33 @@ mod tests {
         )
         .unwrap();
         assert!(read_share_config(&path).is_err());
+        for resource in [
+            json!({"path":"report.md","panel_height":0}),
+            json!({"path":"report.md","panel_height":-1}),
+            json!({"path":"report.md","panel_height":"320px"}),
+            json!({"path":"mesh.ply","component":"mesh","panel_height":320}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({"resources":[resource]})).unwrap(),
+            )
+            .unwrap();
+            assert!(read_share_config(&path).is_err());
+        }
+        for resource in [
+            json!({"path":"report.md"}),
+            json!({"path":"report.md","panel_height":null}),
+        ] {
+            fs::write(
+                &path,
+                serde_json::to_vec(&json!({"resources":[resource]})).unwrap(),
+            )
+            .unwrap();
+            let SharePlan::Scene(input) = read_share_config(&path).unwrap() else {
+                panic!("expected scene");
+            };
+            assert_eq!(input.display[0].panel_height, None);
+        }
     }
     #[test]
     fn versioned_manifest_normalizes_every_local_source_and_rejects_nested_uris() {

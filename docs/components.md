@@ -133,7 +133,7 @@ blind share --config scene.json
 `member` selects an exact ZIP member path (no recursive unpacking, maximum 64 MiB).
 `path` is required. Optional resource fields are `component`, `label`, `group`,
 `position: [x,y,z]`, `size: [width,height]`, `placement: "world"|"panel"`,
-`visible: true|false` (default `true`) and
+`panel_height: NUMBER|null`, `visible: true|false` (default `true`) and
 geometry-only `quality: "lod"|"raw"`. Geometry defaults to LOD and sharing warns
 that it is a derived approximation; Raw uses the original geometry directly.
 Placement defaults to `world`; geometry cannot use `panel`. Paths resolve relative to the config;
@@ -160,6 +160,18 @@ panels do not. Explicit incompatible `board` configurations fail.
 Captured board state adds `board: {"center":[x,y],"scale":N}`; scale is positive
 CSS pixels per scene unit. Panels remain fixed during navigation, do not
 contribute to Fit, and reserve space from scene chrome and the world viewport.
+
+`panel_height` is the preferred outer fixed-pane height in CSS pixels, including
+the title and resize handle, independent of world-space `size`. Omission or `null`
+uses automatic height: one visible pane fills its host container, while multiple
+automatic panes share the space left by configured panes after padding and gaps.
+The host clamps actual heights between 240px and the available container height
+(reducing the minimum in shorter containers), without overwriting the preference.
+When panes cannot fit together, the sidebar scrolls. Hidden panes take no space.
+Drag a pane's bottom edge or use its keyboard controls; double-click the edge or
+choose **恢复自动高度** to reset. Preferred heights survive placement/presentation
+changes and immutable shares, and PNG export uses the same layout. Geometry
+cannot have an explicit pane height.
 
 ## Interaction
 
@@ -219,6 +231,13 @@ and Collection layout/activation. Queries do not finish drafts or mutate selecti
 Writes return their completed semantic result; events carry committed state and a
 scene revision. Entity, scene, annotation and stroke IDs are stable public handles.
 
+`entity:set-panel-height` accepts `{id, height}` under `scene.write`: `height` is
+a finite positive CSS-pixel number or `null` to restore automatic layout.
+It returns an entity snapshot with `panel_height` after layout and native reading
+settle. Geometry targets return `UNSUPPORTED`. A rejected native reflow leaves
+preferences and sibling pane layout unchanged. Snapshot entity schemas carry the
+same optional field; full entity updates use omission or `null` for automatic height.
+
 Host readiness means metadata and control interfaces are available, not that all
 geometry is resident. Geometry snapshots include `loadState` (`unloaded`,
 `loading`, `ready`, `error`), derived `loading`, selected `quality`, and a safe
@@ -256,8 +275,9 @@ in scene units and scale in CSS pixels per scene unit, native source anchors/CSS
 coordinates, normalized screen points with capture aspect ratio, or section-plane
 coordinates. Source revisions bind persistent content/geometry annotations.
 Screen ink belongs to a captured view and is cleared by actual framing or native
-reading changes, including fixed-panel width changes, not by a board chrome-only
-rescale or display-only settings such as background and lighting. A
+reading changes, including fixed-panel width, height or sidebar scrolling changes,
+not by a board chrome-only rescale or display-only settings such as background
+and lighting. A
 `view:invalidated` event announces a screen-coordinate framing change;
 `view` events carry the latest viewport snapshot and do not themselves invalidate ink.
 
@@ -384,7 +404,7 @@ components, without global business-specific exceptions.
 Resolver manifests can return `components` alongside geometry `resources`,
 `panels` and downloadable `attachments`. Require `components.v1`, plus
 `archive.members` if used. Each component has `id`, `uri`, `label`, `component`,
-optional `member`, `group`, `position`, `size` and `placement`. Example:
+optional `member`, `group`, `position`, `size`, `placement` and `panel_height`. Example:
 
 ```json
 {"id":"worker-log","uri":"oss://team/bucket/run.zip","member":"run.log",

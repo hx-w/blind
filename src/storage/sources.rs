@@ -1100,28 +1100,51 @@ mod tests {
             .insert(remote.id.clone(), pool.clone());
         let _busy = pool.lock().await;
         let mut requests = tokio::task::JoinSet::new();
+        let mut queued = Vec::new();
         for _ in 0..4 {
             let sources = sources.clone();
             let remote = remote.scene_source();
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            queued.push(receiver);
             requests.spawn(async move {
-                sources
-                    .observe(Some(&remote), "/tmp/queued.ply", false)
-                    .await
+                let mut observation =
+                    std::pin::pin!(sources.observe(Some(&remote), "/tmp/queued.ply", false));
+                // With the source connection held, polling to Pending establishes
+                // an actual queued read rather than guessing scheduler progress.
+                std::future::poll_fn(|cx| {
+                    assert!(
+                        observation.as_mut().poll(cx).is_pending(),
+                        "remote read completed while its connection was held"
+                    );
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                sender.send(()).unwrap();
+                observation.await
             });
         }
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            for receiver in queued {
+                receiver.await.expect("remote read failed before queuing");
+            }
+        })
+        .await
+        .expect("remote reads never reached the held connection");
         let file = dir.path().join("healthy.ply");
         fs::write(&file, b"healthy").unwrap();
-        tokio::time::timeout(
+        let observed = tokio::time::timeout(
             Duration::from_secs(1),
             sources.observe(None, file.to_str().unwrap(), true),
         )
-        .await
-        .expect("queued requests exhausted global capacity")
-        .unwrap();
+        .await;
         requests.abort_all();
+        while requests.join_next().await.is_some() {}
+        let observed = observed
+            .expect("queued requests exhausted global capacity")
+            .unwrap();
+        assert_eq!(observed.bytes, b"healthy");
+        assert_eq!(observed.size, b"healthy".len() as u64);
+        assert_eq!(observed.revision, hash_bytes(b"healthy"));
     }
 
     #[test]

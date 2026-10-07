@@ -10,10 +10,11 @@ const sceneListInput = s.object({open: s.optional(s.boolean()), tab: s.optional(
 const sceneListOutput = s.object({open: s.boolean(), tab: s.enum(['elements', 'info'])});
 const vec3 = s.tuple([s.number(), s.number(), s.number()]);
 const presentations = s.array(s.enum(['spatial', 'focus', 'fullscreen']));
+const panelHeight = s.nullable(s.number({exclusiveMin: 0, description: 'Preferred outer fixed-pane height in CSS pixels; null restores automatic layout'}));
 export const entitySnapshotSchema = s.object({
   id, component: s.string(), label: s.string(), group: s.nullable(s.string()), placement: s.enum(['world', 'panel']),
   visible: s.boolean(), opacity: s.number({min: 0, max: 1}), selected: s.boolean(), position: s.nullable(vec3),
-  size: s.nullable(s.tuple([s.number(), s.number()])),
+  size: s.nullable(s.tuple([s.number(), s.number()])), panel_height: panelHeight,
   capabilities: s.object({presentations, movable: s.boolean(), resizable: s.boolean(),
     input: s.object({spatial: s.enum(['scene', 'content']), focus: s.enum(['scene', 'content']), fullscreen: s.enum(['scene', 'content'])}),
     geometry: s.optional(s.enum(['mesh', 'points'])), host_space: s.optional(s.enum(['planar', 'spatial'])), operations: s.optional(s.array(s.string()))}),
@@ -25,6 +26,7 @@ const style = s.object({id, visible: s.optional(s.boolean()), opacity: s.optiona
 const isolate = s.object({id, fit: s.optional(s.boolean())});
 const quality = s.object({id, quality: s.enum(['raw', 'lod'])});
 const placement = s.object({id, placement: s.enum(['world', 'panel'])});
+const height = s.object({id, height: panelHeight});
 const show = s.object({ids: s.array(id, {max: 256, unique: true}), opacity: s.optional(s.number({min: 0, max: 1})), fit: s.optional(s.boolean())});
 const focus = s.object({ids: s.array(id, {min: 1, max: 256, unique: true}), animate: s.optional(s.boolean())});
 const entityResult = {permission: 'scene.write', result: entitySnapshotSchema.json};
@@ -38,6 +40,7 @@ export const entityOperations = {
   isolate: defineOperation<Infer<typeof isolate>, EntitySnapshot[]>('entity:isolate', 'Show only one entity, optionally fitting its world bounds. Fixed panels never affect fit.', isolate, listResult),
   quality: defineOperation<Infer<typeof quality>, EntitySnapshot>('entity:set-quality', 'Load real raw or LOD geometry. Surface-marked meshes cannot switch to LOD.', quality, entityResult),
   placement: defineOperation<Infer<typeof placement>, EntitySnapshot>('entity:set-placement', 'Move the same content DOM between world and fixed panel hosts; geometry cannot be pinned.', placement, entityResult),
+  panelHeight: defineOperation<Infer<typeof height>, EntitySnapshot>('entity:set-panel-height', 'Set the preferred outer fixed-pane height in CSS pixels, or null for automatic layout. Retains the request across viewport clamps and presentation changes without changing world size. Geometry cannot have a pane height. Resolves after layout and native reading settle.', height, entityResult),
   show: defineOperation<Infer<typeof show>, EntitySnapshot[]>('scene:show', 'Atomically set scene visibility to the supplied IDs, with optional opacity for shown entities and world-only fit. Unknown or duplicate IDs never partially apply.', show, listResult),
   focus: defineOperation<Infer<typeof focus>, ViewMutation>('entity:focus', 'Frame visible world bounds of selected IDs without changing visibility. A single visible fixed panel receives native focus instead of moving the camera. Resolves when camera framing commits or is interrupted.', focus, {permission: 'scene.write', result: s.object({status: s.enum(['committed', 'interrupted']), view: viewSnapshotSchema}).json}),
   sceneList: defineOperation<Infer<typeof sceneListInput>, SceneListState>('ui:scene-list', 'Set scene list visibility or the elements/info tab through semantic host UI state.', sceneListInput, {permission: 'ui.write', result: sceneListOutput.json}),
@@ -54,6 +57,7 @@ export function registerEntityOperations(host: OperationHost, components: Compon
     host.register(entityOperations.isolate, ({id, fit}) => components.isolateEntity(id, fit)),
     host.register(entityOperations.quality, ({id, quality}) => components.qualityEntity(id, quality)),
     host.register(entityOperations.placement, async ({id, placement}) => { components.placementEntity(id, placement); await components.whenSettled(); return components.getEntity(id); }),
+    host.register(entityOperations.panelHeight, ({id, height}) => components.panelHeightEntity(id, height)),
     host.register(entityOperations.show, ({ids, opacity, fit}) => components.showEntities(ids, opacity, fit)),
     host.register(entityOperations.focus, ({ids, animate}) => components.focusEntities(ids, animate)),
     host.register(entityOperations.sceneList, params => components.setSceneList(params)),

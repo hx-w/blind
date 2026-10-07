@@ -187,6 +187,8 @@ frame_origins = ["https://example.org"]
             {'manifest':{'schema_version':1,'requires':['attachments'],
                          'resources':[{'id':'mesh','uri':str(mesh)}],
                          'attachments':[{'id':'notes','uri':str(tmp/'run.log'),'visible':True}]}},
+            {'paths':[str(tmp/'run.log')],'display':[{'panel_height':0}]},
+            {'paths':[str(mesh)],'display':[{'panel_height':320}]},
         ]:
             status, payload, _ = api('/api/v1/scenes',body,pat)
             assert status == 400, (body, status, payload)
@@ -276,7 +278,10 @@ frame_origins = ["https://example.org"]
         _, explicit = share(tmp/'capture.json', '--component','example:panel')
         assert explicit['entities'][0]['component'] == 'example:panel'
         # Full PNG export must contain the sandboxed plugin, not only WebGL geometry.
-        plugin_token, plugin_scene = share(tmp/'trace.json', '--plugin', 'example')
+        (tmp/'plugin-pane.json').write_text(json.dumps({'resources':[
+            {'path':str(tmp/'trace.json'),'component':'example:panel','placement':'panel','panel_height':320}]}))
+        plugin_token, plugin_scene = share('--config',tmp/'plugin-pane.json')
+        assert plugin_scene['entities'][0]['panel_height'] == 320
         renderer_url = f"/api/v1/scenes/{plugin_token}/renderers/{plugin_scene['entities'][0]['id']}"
         status, pinned_html, headers = api(renderer_url)
         assert status == 200 and 'sandbox allow-scripts' in headers['Content-Security-Policy']
@@ -287,6 +292,34 @@ frame_origins = ["https://example.org"]
         image = Image.open(io.BytesIO(png)).convert('RGB')
         colored = sum(1 for r,g,b in zip(*(iter(image.tobytes()),)*3) if r > 150 and b > 150 and g < 70)
         assert colored > image.width*image.height*.03, 'plugin missing from exported PNG'
+        def plugin_height(image):
+            rows = [y for y in range(image.height) if any(
+                r > 150 and b > 150 and g < 70 for r,g,b in
+                (image.getpixel((x,y)) for x in range(image.width)))]
+            assert rows, 'plugin pixels missing from pane export'
+            return max(rows) - min(rows) + 1
+        initial_height = plugin_height(image)
+        assert 240 <= initial_height < 300, 'PNG must honor configured outer pane height'
+        pane_update = {'meshes':[], 'state':plugin_scene['state'], 'entities':[
+            {key:plugin_scene['entities'][0][key] for key in
+             ['id','placement','position','size','panel_height','visible','opacity']}]}
+        pane_update['entities'][0]['panel_height'] = 640
+        status, body, _ = api(f'/api/v1/scenes/{plugin_token}/share',pane_update)
+        assert status == 200, body
+        taller_token = json.loads(body)['viewer_url'].rsplit('/',1)[1]
+        taller = json.loads(api(f'/api/v1/scenes/{taller_token}')[1])
+        assert taller['entities'][0]['panel_height'] == 640
+        assert taller['entities'][0]['source'] == plugin_scene['entities'][0]['source']
+        assert taller['entities'][0]['renderer'] == plugin_scene['entities'][0]['renderer']
+        status, png, _ = api(f'/i/{taller_token}.png')
+        assert status == 200, png[:200]
+        assert abs(plugin_height(Image.open(io.BytesIO(png)).convert('RGB')) - initial_height - 320) <= 2
+        assert json.loads(api(f'/api/v1/scenes/{plugin_token}')[1])['entities'][0]['panel_height'] == 320
+        pane_update['entities'][0]['panel_height'] = None
+        status, body, _ = api(f'/api/v1/scenes/{taller_token}/share',pane_update)
+        assert status == 200, body
+        auto_token = json.loads(body)['viewer_url'].rsplit('/',1)[1]
+        assert json.loads(api(f'/api/v1/scenes/{auto_token}')[1])['entities'][0].get('panel_height') is None
         (package/'panel.html').write_text(html.replace('#e000e0','#00aaff'))
         manifest = manifest.replace('version = "1.0.0"', 'version = "1.0.1"')
         (package/'blind-plugin.toml').write_text(manifest)

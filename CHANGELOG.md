@@ -1,7 +1,28 @@
 # Changelog
 
-All notable changes to Blind are documented here. This project follows
-[Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+All notable changes to Blind are documented here. Small backward-compatible
+features and bug fixes increment the patch version within the current series.
+
+## [2.4.1] - 2026-10-07
+
+### Added
+
+- Configure preferred fixed-pane heights with `panel_height`, adjust them by
+  dragging or keyboard controls, and retain them in shared views and PNG exports.
+- Restore automatic pane heights from the bottom edge or content menu; a single
+  pane fills its host and multiple panes share available space.
+
+### Fixed
+
+- Replace the fixed 520px pane cap with container-relative layout, preserving
+  usable content and preferred heights through viewport and presentation changes.
+- Preserve schema-8 scene fingerprints when automatic pane height is absent;
+  reject failed native reflows without changing preferences or sibling layout.
+
+### Upgrade
+
+- Keep scene schema 8. Updating from 2.4.0 preserves existing links,
+  registrations and configuration; no registry clear is required.
 
 ## [2.4.0] - 2026-10-07
 

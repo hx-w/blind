@@ -256,9 +256,11 @@ mod tests {
     fn simplification_compacts_geometry_in_memory() {
         let source = grid(80);
         let source_triangles = source.indices.len() / 3;
+        let (source_min, source_max) = source.bounds();
         let lod = simplify_geometry(source, 2_000);
         assert!(lod.indices.len() / 3 < source_triangles);
         assert!(lod.indices.len() / 3 <= 2_000);
+        assert_eq!(lod.indices.len() % 3, 0);
         assert!(
             lod.indices
                 .iter()
@@ -269,6 +271,33 @@ mod tests {
                 .iter()
                 .flatten()
                 .all(|value| value.is_finite())
+        );
+        let (min, max) = lod.bounds();
+        for axis in 0..3 {
+            assert!(min[axis] >= source_min[axis] - 0.001);
+            assert!(max[axis] <= source_max[axis] + 0.001);
+        }
+        for axis in 0..2 {
+            assert!(
+                max[axis] - min[axis] >= (source_max[axis] - source_min[axis]) * 0.95,
+                "LOD lost the grid's spatial extent on axis {axis}"
+            );
+        }
+        let projected_area: f32 = lod
+            .indices
+            .chunks_exact(3)
+            .map(|triangle| {
+                let a = glam::Vec3::from_array(lod.positions[triangle[0] as usize]);
+                let b = glam::Vec3::from_array(lod.positions[triangle[1] as usize]);
+                let c = glam::Vec3::from_array(lod.positions[triangle[2] as usize]);
+                let cross = (b - a).cross(c - a);
+                cross.z.abs() * 0.5
+            })
+            .sum();
+        let source_area = (source_max[0] - source_min[0]) * (source_max[1] - source_min[1]);
+        assert!(
+            projected_area >= source_area * 0.9,
+            "LOD triangles no longer cover the source grid: {projected_area}"
         );
     }
 

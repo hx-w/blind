@@ -10,9 +10,14 @@
 .component-panel-resize:hover::after, .component-panel-resize:focus-visible::after { background: var(--accent); }
 .component-panel-resize:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .component-panel-resize[hidden] { display: none; }
-.panel-wrapper { width: 100%; flex: 0 0 auto; min-height: 240px; }
+.panel-wrapper { width: 100%; flex: 0 0 auto; min-height: 0; }
 .panel-surface .component-handle { cursor: default; }
 .panel-surface .component-enter { display: none; }
+.component-panel-height { display: none; flex: 0 0 12px; position: relative; cursor: ns-resize; touch-action: none; user-select: none; }
+.panel-surface:not(.expanded) > .component-panel-height { display: block; }
+.component-panel-height::after { content: ''; position: absolute; inset: 5px 12px; background: var(--line); }
+.component-panel-height:hover::after, .component-panel-height:focus-visible::after { background: var(--accent); }
+.component-panel-height:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .scene-surface { position: relative; display: flex; flex-direction: column; width: 100%; height: 100%; overflow: hidden; background: var(--surface-1); border: 1px solid var(--line); border-radius: var(--radius-xs); color: var(--text); pointer-events: auto; }
 .scene-surface.selected { border-color: var(--accent); }
 .component-handle { display: flex; flex: 0 0 42px; align-items: center; gap: 6px; height: 42px; min-height: 42px; padding: 0 0 0 12px; border-bottom: 1px solid var(--line); cursor: grab; touch-action: none; }
@@ -146,7 +151,6 @@
 .native-dialog > header { display: none; }
 .component-dialog.fullscreen-dialog { width: 100vw; height: 100dvh; max-width: none; margin: 0; border: 0; border-radius: 0; }
 .scene-surface.native-surface.expanded .component-handle { display: flex; }
-.scene-surface:not(.native-surface) .component-handle button:last-child { display: none; }
 .scene-surface.native-surface .component-content { touch-action: none; overscroll-behavior: none; user-select: none; -webkit-user-select: none; }
 .scene-surface.native-surface.content-selecting .component-content { user-select: text; -webkit-user-select: text; cursor: text; }
 .native-surface .component-handle { flex-basis: calc(42px * var(--content-ui-scale, 1)); height: calc(42px * var(--content-ui-scale, 1)); min-height: calc(42px * var(--content-ui-scale, 1)); }

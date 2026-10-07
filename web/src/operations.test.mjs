@@ -15,8 +15,11 @@ async function operationModule(path, imports = {}) {
 }
 const viewModule = await operationModule('./operations/view.ts', {'./core':coreUrl});
 const {exports:{entityOperations}} = await operationModule('./operations/entities.ts', {'./core':coreUrl,'./view':viewModule.url});
-const {exports:{annotationOperations,screenStrokeSchema,surfaceAnnotationSchema}} = await operationModule('./operations/annotations.ts', {'./core':coreUrl});
-const {exports:{sectionOperations}} = await operationModule('./operations/section.ts', {'./core':coreUrl});
+const annotationModule = await operationModule('./operations/annotations.ts', {'./core':coreUrl});
+const {annotationOperations,screenStrokeSchema,surfaceAnnotationSchema} = annotationModule.exports;
+const sectionModule = await operationModule('./operations/section.ts', {'./core':coreUrl});
+const {sectionOperations} = sectionModule.exports;
+const {exports:{sceneUpdateSchema}} = await operationModule('./operations/snapshot.ts', {'./core':coreUrl,'./annotations':annotationModule.url,'./section':sectionModule.url});
 const {exports:{validateScreens}} = await operationModule('./annotations/validation.ts', {'../operations/core':coreUrl});
 const params = s.object({ids:s.array(s.string({min:1}),{unique:true}), opacity:s.optional(s.number({min:0,max:1}))});
 const show = defineOperation('scene:show','Set visibility',params,{permission:'scene.write'});
@@ -172,4 +175,17 @@ test('annotation and section boundaries distinguish screen IDs, surface IDs and 
   }
   assert.throws(()=>annotationOperations.pick.params.parse({entityId:'a'.repeat(257),point:[1,2]}),{code:'INVALID_ARGUMENT'});
   assert.throws(()=>sectionOperations.setTargets.params.parse({targets:[{entityId:'a'.repeat(257),revision:'revision'}]}),{code:'INVALID_ARGUMENT'});
+});
+
+test('snapshot consumers accept pane preferences and reject invalid heights or source replacement', () => {
+  const entity = {id:'notes',label:'Review',placement:'panel',position:null,size:[110,70],visible:true,opacity:1,panel_height:700};
+  const snapshot = {entities:[entity],meshes:[],state:{selected:0,viewport:{mode:'board',board:{center:[0,0],scale:1}},shading:'flat',projection:'perspective',background:'dark',axes:false,frame:{width:1200,height:800},camera:null,strokes:[]}};
+  const parsed = sceneUpdateSchema.parse(snapshot);
+  assert.equal(parsed.entities[0].panel_height,700);
+  assert.deepEqual(parsed.entities[0].size,[110,70]);
+  assert.equal(sceneUpdateSchema.parse({...snapshot,entities:[{...entity,panel_height:null}]}).entities[0].panel_height,null);
+  for (const height of [0,-1,NaN,Infinity,'700px']) {
+    assert.throws(() => sceneUpdateSchema.parse({...snapshot,entities:[{...entity,panel_height:height}]}),{code:'INVALID_ARGUMENT'});
+  }
+  assert.throws(() => sceneUpdateSchema.parse({...snapshot,entities:[{...entity,source:{kind:'attachment',index:1}}]}),{code:'INVALID_ARGUMENT'});
 });

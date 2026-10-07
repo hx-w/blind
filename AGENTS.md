@@ -80,7 +80,7 @@ Passing tests do not replace this review. MUST NOT commit while trivial, obsolet
 ## Release Versioning
 
 - MUST obtain explicit user authorization before publishing a new major version. Breaking implementation changes alone do not authorize a major release.
-- Unless a major release is explicitly authorized, publish feature releases as minor versions and bug-fix-only releases as patch versions within the current major series.
+- Small backward-compatible features and bug fixes MUST increment the patch version within the current major/minor series. Do not reset the version to `0.0.x`; obtain explicit user authorization for a minor or major release.
 - MUST keep the Cargo package, browser package, changelog, release tag, and published assets on the same version.
 - MUST disclose any destructive data cutover and obtain authorization for its exact scope before deployment. Version selection does not authorize deleting links, registrations, configuration, or source files.
 

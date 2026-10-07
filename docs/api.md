@@ -62,6 +62,14 @@ per instance. Hidden sources still have complete revision metadata and capabilit
 endpoints, with unchanged registration, source identity and revocation checks.
 Download-only manifest `attachments` reject `visible` rather than ignoring it.
 
+Surface `display` entries accept `panel_height`, a finite positive preferred outer
+pane height in CSS pixels, or omission/null for automatic allocation. Basic config
+resources, Collection children and manifest components use the same field;
+geometry rejects explicit heights. Public entity descriptors and full reshare
+entity updates carry the preference independently of world-space `size`.
+Actual viewport clamps do not alter the saved value. An omitted/null height in a
+full entity update resets that entity to automatic allocation.
+
 
 For Agent integration, prefer the [CLI JSON contract](cli.md#agent-interface).
 

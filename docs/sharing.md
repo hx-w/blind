@@ -57,7 +57,8 @@ The encrypted descriptor contains:
 - Captured frame dimensions.
 - Surface mode, axes, and gray background mode.
 - Scene entities with a renderer type, source reference, editable label,
-  visibility, opacity, position, size, `world`/`panel` placement and component state.
+  visibility, opacity, position, size, preferred CSS-pixel `panel_height`,
+  `world`/`panel` placement and component state.
 - For plugin entities, an immutable binding with plugin ID, component name,
   browser snapshot revision, capabilities and allowed frame origins.
 - Screen strokes with a required stable ID of 1 to 128 ASCII letters, digits,
@@ -83,6 +84,9 @@ running Fit again. Captured vertical framing remains stable across aspect ratios
 while a different device may reveal more or less content horizontally. PNG export
 uses the same viewport and fixed-panel layout, waits for native/plugin readiness,
 and rejects operation mutations in export mode.
+Preferred pane heights are stored independently of world sizes; receiving
+viewports clamp actual heights without changing the preference. Missing/null
+heights use automatic allocation.
 
 Screen markup is tied to that exact camera framing rather than Mesh geometry.
 It can cross empty space and remaps across viewport aspect ratios. The first

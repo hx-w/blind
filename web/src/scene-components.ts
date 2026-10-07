@@ -13,10 +13,12 @@ export interface SceneEntity {
   group: string | null;
   position: Vec3 | null;
   size: [number, number] | null;
+  /** Preferred outer fixed-pane height in CSS pixels; omission/null uses automatic layout. */
+  panel_height?: number | null;
   visible: boolean;
   opacity: number;
 }
-export type EntityUpdate = Pick<SceneEntity, 'id' | 'label' | 'position' | 'size' | 'visible' | 'opacity' | 'state' | 'placement'>;
+export type EntityUpdate = Pick<SceneEntity, 'id' | 'label' | 'position' | 'size' | 'panel_height' | 'visible' | 'opacity' | 'state' | 'placement'>;
 export interface ComponentCapabilities {
   presentations: readonly Presentation[];
   movable: boolean;
@@ -64,7 +66,7 @@ export function sceneEntities(scene: PublicScene): SceneEntity[] {
   return structuredClone(scene.entities);
 }
 export function entityUpdate(spec: SceneEntity): EntityUpdate {
-  return {...(spec.state === undefined ? {} : {state:spec.state}), id: spec.id, label:spec.label, placement: spec.placement, position: spec.position ? [...spec.position] : null, size: spec.size ? [...spec.size] : null, visible: spec.visible, opacity: spec.opacity};
+  return {...(spec.state === undefined ? {} : {state:spec.state}), id: spec.id, label:spec.label, placement: spec.placement, position: spec.position ? [...spec.position] : null, size: spec.size ? [...spec.size] : null, panel_height: spec.panel_height ?? null, visible: spec.visible, opacity: spec.opacity};
 }
 /** Insertion order is stable. A scene has one flat list of groups, never nested scenes. */
 export function componentGroups(components: readonly SceneEntity[]): Map<string, SceneEntity[]> {

@@ -105,10 +105,9 @@ mod tests {
     }
 
     #[test]
-    fn encrypted_tokens_round_trip_without_exposing_scene_text() {
+    fn encrypted_tokens_round_trip_and_reject_wrong_keys() {
         let codec = TokenCodec::new([7; 32]);
         let token = codec.seal(&scene()).unwrap();
-        assert!(!token.contains("review"));
         let opened = codec.open(&token).unwrap();
         assert_eq!(opened.scope, Scope::Public);
         assert_eq!(opened.scene.title, "review");

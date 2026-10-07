@@ -270,11 +270,14 @@ pub struct DisplayOptions {
     pub position: Option<[f32; 3]>,
     /// World-space width and height for a surface component.
     pub size: Option<[f32; 2]>,
+    /// Preferred outer pane height in CSS pixels, independent of world-space size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_height: Option<f64>,
 }
 impl DisplayOptions {
     pub fn validate(&self) -> Result<()> {
         if let Some(kind) = &self.component {
-            self.validate_quality(kind)?;
+            self.validate_kind(kind)?;
         }
         ensure!(
             self.placement != Placement::Panel
@@ -299,12 +302,22 @@ impl DisplayOptions {
                 "component size must be between 1 and 10000"
             );
         }
+        if let Some(height) = self.panel_height {
+            ensure!(
+                height.is_finite() && height > 0.,
+                "panel_height must be a finite positive number"
+            );
+        }
         Ok(())
     }
-    pub fn validate_quality(&self, kind: &ComponentKind) -> Result<()> {
+    pub fn validate_kind(&self, kind: &ComponentKind) -> Result<()> {
         ensure!(
             self.quality.is_none() || kind.geometry(),
             "quality applies only to mesh or points geometry"
+        );
+        ensure!(
+            self.panel_height.is_none() || !kind.geometry(),
+            "panel_height applies only to surface components"
         );
         Ok(())
     }
@@ -335,6 +348,8 @@ pub struct SceneEntity {
     pub group: Option<String>,
     pub position: Option<[f32; 3]>,
     pub size: Option<[f32; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_height: Option<f64>,
     pub visible: bool,
     pub opacity: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,6 +366,8 @@ pub struct EntityUpdate {
     pub label: Option<String>,
     pub position: Option<[f32; 3]>,
     pub size: Option<[f32; 2]>,
+    #[serde(default)]
+    pub panel_height: Option<f64>,
     pub visible: bool,
     pub opacity: f32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,6 +388,7 @@ impl EntityUpdate {
             placement: self.placement,
             position: self.position,
             size: self.size,
+            panel_height: self.panel_height,
             ..Default::default()
         }
         .validate()?;
@@ -473,6 +491,27 @@ mod tests {
             .validate()
             .is_err()
         );
+        for height in [0., -1., f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                DisplayOptions {
+                    panel_height: Some(height),
+                    ..Default::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for kind in [ComponentKind::Mesh, ComponentKind::Points] {
+            assert!(
+                DisplayOptions {
+                    component: Some(kind),
+                    panel_height: Some(320.5),
+                    ..Default::default()
+                }
+                .validate()
+                .is_err()
+            );
+        }
         assert!(serde_json::from_str::<DisplayOptions>(r#"{"componnet":"trace"}"#).is_err());
     }
     #[test]

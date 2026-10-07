@@ -1251,6 +1251,7 @@ mod tests {
                 group: None,
                 position: None,
                 size: None,
+                panel_height: None,
                 visible: true,
                 opacity: 1.,
                 state: None,
@@ -1445,20 +1446,38 @@ mod tests {
         let registry =
             Registry::open_at(&Config::fresh(), directory.path().join("scenes.sqlite3")).unwrap();
         let bundle = renderer("1.0.0", "<!doctype html><p>Reader</p>");
-        let original = renderer_scene("first client", &bundle);
+        let mut original = renderer_scene("first client", &bundle);
+        original.entities[0].panel_height = Some(320.5);
         let first = registry
             .register(&original, std::slice::from_ref(&bundle))
             .unwrap();
         let mut second_scene = original.clone();
         second_scene.title = "second client".into();
+        second_scene.entities[0].panel_height = None;
         let second = registry
             .register(&second_scene, std::slice::from_ref(&bundle))
             .unwrap();
         let inherited = registry.renderers_for_scene(&original).unwrap();
         let mut edited = original.clone();
         edited.entities[0].position = Some([1., 2., 3.]);
+        edited.entities[0].panel_height = Some(640.25);
         let reshare = registry.register(&edited, &inherited).unwrap();
         assert_eq!(snapshot_counts(&registry), (1, 3));
+        let first_saved = registry.resolve(&first.code).unwrap().scene;
+        let reset_saved = registry.resolve(&second.code).unwrap().scene;
+        let edited_saved = registry.resolve(&reshare.code).unwrap().scene;
+        assert_eq!(first_saved.entities[0].panel_height, Some(320.5));
+        assert_eq!(reset_saved.entities[0].panel_height, None);
+        assert_eq!(edited_saved.entities[0].panel_height, Some(640.25));
+        assert_eq!(edited_saved.entities[0].source, original.entities[0].source);
+        assert_eq!(
+            edited_saved.attachments[0].path,
+            original.attachments[0].path
+        );
+        assert_eq!(
+            edited_saved.attachments[0].revision,
+            original.attachments[0].revision
+        );
         registry.mark_gone(&first.code).unwrap();
         registry.mark_gone(&second.code).unwrap();
         assert_eq!(snapshot_counts(&registry), (1, 1));
@@ -1693,11 +1712,11 @@ mod tests {
         std::fs::write(&mesh_path, include_bytes!("../../tests/fixtures/tetra.ply")).unwrap();
         let config = Config::fresh();
         let registry = Registry::open_at(&config, directory.path().join("scenes.sqlite3")).unwrap();
-        let scene = SceneDescriptor::create(std::slice::from_ref(&mesh_path), None)
+        let mut scene = SceneDescriptor::create(std::slice::from_ref(&mesh_path), None)
             .await
             .unwrap();
+        scene.entities = scene.entity_descriptors();
         let valid = registry.register(&scene, &[]).unwrap();
-
         let payload = registry.codec.seal(&scene).unwrap();
         let current = now();
         {

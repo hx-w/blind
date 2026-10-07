@@ -481,6 +481,27 @@ mod tests {
             io::{AsyncReadExt, AsyncWriteExt},
             net::TcpListener,
         };
+        async fn request_headers(stream: &mut tokio::net::TcpStream) -> Option<String> {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                while request.len() < 8192 {
+                    let remaining = chunk.len().min(8192 - request.len());
+                    let size = stream.read(&mut chunk[..remaining]).await.ok()?;
+                    if size == 0 {
+                        return None;
+                    }
+                    request.extend_from_slice(&chunk[..size]);
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        return String::from_utf8(request).ok();
+                    }
+                }
+                None
+            })
+            .await
+            .ok()
+            .flatten()
+        }
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let sink = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let origin = format!("http://{}", listener.local_addr().unwrap());
@@ -491,6 +512,9 @@ mod tests {
         let sink_task = tokio::spawn(async move {
             while let Ok((mut stream, _)) = sink.accept().await {
                 external_hits.fetch_add(1, Ordering::SeqCst);
+                if request_headers(&mut stream).await.is_none() {
+                    continue;
+                }
                 let _ = stream
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                     .await;
@@ -501,24 +525,22 @@ mod tests {
         let local_origin = origin.clone();
         let server = tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
-                let mut request = vec![0; 8192];
-                let size = stream.read(&mut request).await.unwrap();
-                let request = String::from_utf8_lossy(&request[..size]);
+                let Some(request) = request_headers(&mut stream).await else {
+                    continue;
+                };
                 let path = request.split_whitespace().nth(1).unwrap_or("");
                 let (status, headers, body) = match path {
                     "/s/test?render=1" => ("200 OK", String::new(), r#"<!doctype html><script>
-                    let initialized=0; addEventListener('message',e=>{if(e.data==='attempted' && ++initialized===3)setTimeout(()=>document.documentElement.dataset.renderStatus='ready',700)});
-                    new Worker('/assets/isolation.js').onmessage=()=>postMessage('attempted','*');
+                    const completed=new Set(); addEventListener('message',e=>{if(['outer','nested','worker'].includes(e.data)){completed.add(e.data);if(completed.size===3)document.documentElement.dataset.renderStatus='ready'}});
+                    const worker=new Worker('/assets/isolation.js'); worker.onmessage=e=>{if(e.data==='worker'){worker.terminate();postMessage('worker','*')}};
                     </script><iframe sandbox="allow-scripts" src="/api/v1/scenes/test/renderers/outer"></iframe>"#.to_owned()),
                     "/api/v1/scenes/test/renderers/outer" => ("200 OK", "Content-Security-Policy: sandbox allow-scripts\r\n".into(), format!(r#"<!doctype html><script>
-                    new Image().src='{external}/image'; fetch('{external}/fetch').catch(()=>{{}});
-                    new Image().src='{local_origin}/private';
-                    new Image().src='{local_origin}/api/v1/scenes/test/attachments/0';
-                    parent.postMessage('attempted','*');
+                    function image(url){{return new Promise(resolve=>{{const img=new Image();img.onload=img.onerror=resolve;img.src=url}})}}
+                    Promise.allSettled([image('{external}/image'),fetch('{external}/fetch'),image('{local_origin}/private'),image('{local_origin}/api/v1/scenes/test/attachments/0')]).then(()=>parent.postMessage('outer','*'));
                     </script><iframe src="{local_origin}/api/v1/scenes/test/renderers/nested"></iframe>"#)),
-                    "/api/v1/scenes/test/renderers/nested" => ("200 OK", "Content-Security-Policy: sandbox allow-scripts\r\n".into(), format!(r#"<!doctype html><script>new Image().src='{external}/nested';parent.parent.postMessage('attempted','*');</script>"#)),
+                    "/api/v1/scenes/test/renderers/nested" => ("200 OK", "Content-Security-Policy: sandbox allow-scripts\r\n".into(), format!(r#"<!doctype html><script>const img=new Image();img.onload=img.onerror=()=>parent.parent.postMessage('nested','*');img.src='{external}/nested';</script>"#)),
                     "/assets/isolation.js" => ("200 OK", String::new(), format!(
-                        "Promise.allSettled([fetch('{external}/worker'),fetch('{local_origin}/private-worker')]).then(()=>postMessage('attempted'));"
+                        "Promise.allSettled([fetch('{external}/worker'),fetch('{local_origin}/private-worker')]).then(()=>postMessage('worker'));"
                     )),
                     "/api/v1/scenes/test/attachments/0" => {
                         redirect_hits.fetch_add(1, Ordering::SeqCst);
@@ -541,6 +563,8 @@ mod tests {
         let result = render(&format!("{origin}/s/test?render=1"), 400, 300).await;
         server.abort();
         sink_task.abort();
+        let _ = server.await;
+        let _ = sink_task.await;
         let png = result.unwrap();
         assert!(png.starts_with(b"\x89PNG"));
         assert_eq!(

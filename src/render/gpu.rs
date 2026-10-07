@@ -1526,6 +1526,7 @@ mod tests {
 
     #[tokio::test]
     async fn point_cloud_scene_builds_and_renders_instanced_batch() {
+        use crate::scene::CameraState;
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cloud.ply");
         // Two layers exercise the aligned dynamic-uniform offset used after
         // the first point batch, not only the zero-offset happy path.
@@ -1533,8 +1534,21 @@ mod tests {
             .await
             .unwrap();
         scene.state.axes = false;
-        scene.state.frame.width = 64;
-        scene.state.frame.height = 64;
+        scene.state.frame.width = 256;
+        scene.state.frame.height = 128;
+        scene.state.projection = Projection::Orthographic;
+        scene.state.camera = Some(CameraState {
+            position: [0.0, 0.0, 10.0],
+            target: [0.0; 3],
+            up: [0.0, 1.0, 0.0],
+            fov: 34.0,
+            zoom: 1.0,
+            orthographic_height: 4.0,
+        });
+        scene.meshes[0].translation = [-2.0, 0.0, 0.0];
+        scene.meshes[0].color = "#ff0000".into();
+        scene.meshes[1].translation = [2.0, 0.0, 0.0];
+        scene.meshes[1].color = "#0000ff".into();
         let material: MatteShader =
             serde_json::from_str(include_str!("../../shaders/matte.json")).unwrap();
 
@@ -1558,8 +1572,36 @@ mod tests {
             .render(&scene, sources)
             .await
             .unwrap();
-        let image = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
-        assert_eq!((image.width(), image.height()), (64, 64));
+        let image = image::load_from_memory_with_format(&png, ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!((image.width(), image.height()), (256, 128));
+        // Looking down Z projects each cloud into a separate 3-by-3 grid.
+        // Check every projected point, including the second batch's own color.
+        for (offset, channel) in [(0, 0), (128, 2)] {
+            for x in [32, 64, 96] {
+                for y in [32, 64, 96] {
+                    let mut colored_pixels = 0;
+                    for sample_y in y - 4..=y + 4 {
+                        for sample_x in x + offset - 4..=x + offset + 4 {
+                            let pixel = image.get_pixel(sample_x, sample_y);
+                            if pixel[channel] > 80
+                                && (0..3).filter(|other| *other != channel).all(|other| {
+                                    u16::from(pixel[channel]) > u16::from(pixel[other]) * 2
+                                })
+                            {
+                                colored_pixels += 1;
+                            }
+                        }
+                    }
+                    assert!(
+                        colored_pixels >= 8,
+                        "cloud point at {},{y} lacks batch color: {colored_pixels} pixels",
+                        x + offset
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

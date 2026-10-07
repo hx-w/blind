@@ -45,7 +45,7 @@ pub(in crate::server) async fn scene_from_sources(
             .unwrap_or_else(|| ComponentKind::infer(options.member.as_deref().unwrap_or(path)))
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
         options
-            .validate_quality(&kind)
+            .validate_kind(&kind)
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
         let renderer = if let ComponentKind::Plugin(name) = &kind {
             Some(
@@ -117,6 +117,7 @@ pub(in crate::server) async fn scene_from_sources(
             group: options.group,
             position: options.position,
             size: options.size,
+            panel_height: options.panel_height,
             visible: options.visible.unwrap_or(true),
             opacity: 1.0,
         });

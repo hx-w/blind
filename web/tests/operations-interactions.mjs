@@ -355,6 +355,126 @@ test('sidebar edge resizing reserves real viewport space without resizing source
   } finally {await page.close();}
 });
 
+test('pane auto heights allocate the actual host container and retain reachable content when space is scarce', async () => {
+  const {page, errors} = await openScene('board');
+  try {
+    await operation(page, 'entity:set-placement', {id: 'notes', placement: 'panel'});
+    const panel = page.locator('.component-fixed-panels');
+    const metrics = () => panel.evaluate(element => {
+      const style = getComputedStyle(element);
+      return {available: element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom), gap: parseFloat(style.rowGap)};
+    });
+    const pane = selector => page.locator(selector).locator('..');
+    await rendered(page);
+    approximately((await pane(notesSurface).boundingBox()).height, (await metrics()).available, 1);
+    await operation(page, 'entity:set-placement', {id: 'document', placement: 'panel'});
+    await rendered(page);
+    const two = await metrics();
+    approximately((await pane(notesSurface).boundingBox()).height, (two.available - two.gap) / 2, 1);
+    approximately((await pane(documentSurface).boundingBox()).height, (two.available - two.gap) / 2, 1);
+    await operation(page, 'entity:set-style', {id: 'document', visible: false});
+    await rendered(page);
+    approximately((await pane(notesSurface).boundingBox()).height, (await metrics()).available, 1);
+    await operation(page, 'entity:set-style', {id: 'document', visible: true});
+    await page.locator('#canvas-root').evaluate(element => {element.style.height = '280px';});
+    await rendered(page);
+    const short = await metrics();
+    assert.ok(short.available < 280, 'pane sizing follows the child container, not browser vh');
+    assert.equal(await panel.evaluate(element => element.scrollHeight > element.clientHeight), true);
+    await panel.evaluate(element => {element.scrollTop = element.scrollHeight;});
+    const last = await pane(notesSurface).boundingBox(), sidebar = await panel.boundingBox();
+    assert.ok(last.y + last.height <= sidebar.y + sidebar.height + 1, 'the last pane remains reachable by scrolling');
+    await operation(page, 'entity:set-style', {id: 'document', visible: false});
+    await rendered(page);
+    approximately((await pane(notesSurface).boundingBox()).height, short.available, 1);
+    assert.deepEqual(errors, []);
+  } finally {await page.close();}
+});
+
+test('pane height controls preserve preferred sizes, reading and world geometry through clamps and immutable sharing', async () => {
+  const {page, errors} = await openScene('board');
+  let reopened;
+  try {
+    await operation(page, 'entity:set-placement', {id: 'notes', placement: 'panel'});
+    const original = await operation(page, 'entity:get', {id: 'notes'});
+    const camera = (await operation(page, 'view:get')).camera;
+    await page.evaluate(selector => {window.heightContent = document.querySelector(`${selector} .component-content`);}, notesSurface);
+    await operation(page, 'content:scroll', {id: 'notes', x: 0, y: 600});
+    const reading = (await operation(page, 'content:get', {id: 'notes'})).state.reading;
+    await operation(page, 'annotation:create-screen', {label: 'Height framing', color: '#ff6b5e', aspect: 1.5, points: [[.2, .2], [.4, .3]]});
+    await operation(page, 'entity:set-panel-height', {id: 'notes', height: 400});
+    const pane = page.locator(notesSurface).locator('..');
+    approximately((await pane.boundingBox()).height, 400, 1);
+    assert.deepEqual((await operation(page, 'annotation:list', {kind: 'screen'})).screen, [], 'height reflow invalidates view-scoped ink');
+    const edge = pane.getByRole('separator');
+    const handle = await edge.boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2 + 50, {steps: 5});
+    await page.mouse.up();
+    await edge.press('ArrowDown'); await rendered(page);
+    approximately((await pane.boundingBox()).height, 460, 1);
+    approximately((await operation(page, 'entity:get', {id: 'notes'})).panel_height, 460, 1);
+    await operation(page, 'entity:set-panel-height', {id: 'notes', height: 700});
+    await page.setViewportSize({width: 1200, height: 480}); await rendered(page);
+    assert.ok((await pane.boundingBox()).height < 480);
+    assert.equal((await operation(page, 'entity:get', {id: 'notes'})).panel_height, 700, 'viewport clamps never overwrite preference');
+    await page.setViewportSize({width: 1200, height: 800}); await rendered(page);
+    approximately((await pane.boundingBox()).height, 700, 1);
+    for (const height of [0, -1, '500px']) await failure(page, 'entity:set-panel-height', {id: 'notes', height}, 'INVALID_ARGUMENT');
+    assert.equal((await operation(page, 'entity:get', {id: 'notes'})).panel_height, 700);
+    await operation(page, 'entity:set-placement', {id: 'notes', placement: 'world'});
+    await operation(page, 'entity:set-placement', {id: 'notes', placement: 'panel'});
+    await operation(page, 'content:present', {id: 'notes', presentation: 'fullscreen'});
+    await operation(page, 'content:present', {id: 'notes', presentation: 'spatial'});
+    const content = await operation(page, 'content:get', {id: 'notes'});
+    assert.equal(content.state.reading.source, reading.source);
+    assert.equal(content.state.reading.target, reading.target);
+    assert.equal(await page.evaluate(selector => window.heightContent === document.querySelector(`${selector} .component-content`), notesSurface), true);
+    assert.deepEqual((await operation(page, 'entity:get', {id: 'notes'})).size, original.size);
+    assert.deepEqual((await operation(page, 'view:get')).camera, camera);
+    const links = await operation(page, 'share:create');
+    const token = new URL(links.viewer_url).pathname.split('/').at(-1);
+    const opened = await openScene(token); reopened = opened.page;
+    assert.equal((await operation(reopened, 'entity:get', {id: 'notes'})).panel_height, 700);
+    approximately((await reopened.locator(notesSurface).locator('..').boundingBox()).height, 700, 1);
+    await operation(reopened, 'entity:set-panel-height', {id: 'notes', height: null});
+    assert.equal((await operation(reopened, 'entity:get', {id: 'notes'})).panel_height, null);
+    assert.ok((await reopened.locator(notesSurface).locator('..').boundingBox()).height > 700);
+    assert.equal((await fetch(`${origin}/api/v1/scenes/${token}`).then(response => response.json())).entities.find(entity => entity.id === 'notes').panel_height, 700, 'resetting a viewer never mutates its captured link');
+    assert.deepEqual(opened.errors, []); assert.deepEqual(errors, []);
+  } finally {await reopened?.close(); await page.close();}
+});
+
+test('failed native reading preflight leaves pane preferences and sibling layout unchanged', async () => {
+  const {page} = await openScene('board');
+  let constrained;
+  try {
+    await operation(page, 'entity:set-placement', {id: 'document', placement: 'panel'});
+    await operation(page, 'entity:set-placement', {id: 'notes', placement: 'panel'});
+    const snapshot = await operation(page, 'scene:snapshot');
+    const budget = structuredClone(board);
+    budget.entities.forEach(entity => Object.assign(entity, snapshot.entities.find(next => next.id === entity.id)));
+    const state = budget.entities.find(entity => entity.id === 'document').state;
+    state.padding = '';
+    state.padding = 'x'.repeat(65536 - Buffer.byteLength(JSON.stringify(state)));
+    assert.equal(Buffer.byteLength(JSON.stringify(state)), 65536);
+    scenes.set('pane-budget', budget);
+    ({page: constrained} = await openScene('pane-budget'));
+    const pane = constrained.locator(documentSurface).locator('..');
+    const sibling = constrained.locator(notesSurface).locator('..');
+    const before = await operation(constrained, 'entity:get', {id: 'notes'});
+    const beforePane = await pane.boundingBox(), beforeSibling = await sibling.boundingBox();
+    await constrained.locator(`${documentSurface} .component-content`).evaluate(element => {element.scrollTop = 1234.5;});
+    await rendered(constrained);
+    await failure(constrained, 'entity:set-panel-height', {id: 'notes', height: 500}, 'INVALID_ARGUMENT');
+    assert.deepEqual(await operation(constrained, 'entity:get', {id: 'notes'}), before, 'a rejected height cannot leak into later shares');
+    approximately((await pane.boundingBox()).height, beforePane.height, 1);
+    approximately((await sibling.boundingBox()).height, beforeSibling.height, 1);
+    await failure(constrained, 'entity:set-panel-height', {id: 'notes', height: 500}, 'INVALID_ARGUMENT');
+  } finally {scenes.delete('pane-budget'); await constrained?.close(); await page.close();}
+});
+
 test('board and spatial panel cycles preserve projected native text, same DOM, reading and marks without refitting', async () => {
   for (const token of ['board', 'spatial-document']) {
     const {page, errors} = await openScene(token);

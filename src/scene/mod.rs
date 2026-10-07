@@ -735,6 +735,7 @@ impl SceneDescriptor {
                     .map(|g| g.text.clone()),
                 position: Some(mesh.translation),
                 size: None,
+                panel_height: None,
                 visible: mesh.visible,
                 opacity: mesh.opacity,
             })
@@ -915,6 +916,10 @@ impl SceneDescriptor {
                         || c.placement == component::Placement::World,
                     "geometry cannot use panel placement"
                 );
+                ensure!(
+                    !old.unwrap().component.geometry() || c.panel_height.is_none(),
+                    "panel_height applies only to surface components"
+                );
                 old.unwrap()
                     .component
                     .validate_native_state(c.state.as_ref())?;
@@ -992,6 +997,7 @@ impl SceneDescriptor {
                 }
                 old.position = c.position;
                 old.size = c.size;
+                old.panel_height = c.panel_height;
                 old.visible = c.visible;
                 old.opacity = c.opacity;
                 if let crate::scene::component::ComponentSource::Mesh(index) = old.source {
@@ -1213,6 +1219,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(entity.placement, component::Placement::World);
+        assert_eq!(entity.panel_height, None);
         let viewport = ViewportState {
             mode: ViewportMode::Board,
             board: Some(BoardViewportState {
@@ -1231,7 +1238,7 @@ mod tests {
         let update: SceneUpdate = serde_json::from_value(serde_json::json!({
             "meshes":[],"state":state,"entities":[{
                 "id":"report","placement":"panel","position":[10,20,0],"size":[110,70],
-                "visible":true,"opacity":1
+                "visible":true,"opacity":1,"panel_height":12345.5
             }]
         }))
         .unwrap();
@@ -1241,6 +1248,28 @@ mod tests {
         assert_eq!(saved.schema, 8);
         assert_eq!(saved.state.viewport, viewport);
         assert_eq!(saved.entities[0].placement, component::Placement::Panel);
+        assert_eq!(saved.entities[0].panel_height, Some(12345.5));
+        assert_eq!(saved.entities[0].size, entity.size);
+        assert_eq!(saved.entities[0].source, entity.source);
+        for height in [Some(serde_json::Value::Null), None] {
+            let mut snapshot = serde_json::to_value(&saved.entities[0]).unwrap();
+            if let Some(height) = height {
+                snapshot["panel_height"] = height;
+            } else {
+                snapshot.as_object_mut().unwrap().remove("panel_height");
+            }
+            for key in ["component", "source", "renderer", "group"] {
+                snapshot.as_object_mut().unwrap().remove(key);
+            }
+            let update: SceneUpdate = serde_json::from_value(serde_json::json!({
+                "meshes":[],"state":saved.state,"entities":[snapshot]
+            }))
+            .unwrap();
+            let mut reset = saved.clone();
+            reset.apply_update(update).unwrap();
+            assert_eq!(reset.entities[0].panel_height, None);
+            assert_eq!(saved.entities[0].panel_height, Some(12345.5));
+        }
 
         for scale in [0., -1., f64::NAN, f64::INFINITY] {
             let invalid = ViewportState {
@@ -1383,6 +1412,7 @@ mod tests {
             group: None,
             position: Some([4.0, 0.0, 0.0]),
             size: Some([40.0, 30.0]),
+            panel_height: None,
             visible: true,
             opacity: 1.0,
             state: None,
@@ -1449,6 +1479,7 @@ mod tests {
             group: None,
             position: Some([4., 0., 0.]),
             size: Some([40., 30.]),
+            panel_height: None,
             visible: true,
             opacity: 1.,
             state: None,
@@ -1472,6 +1503,16 @@ mod tests {
         let saved = serde_json::to_vec(&scene).unwrap();
         let reopened: SceneDescriptor = serde_json::from_slice(&saved).unwrap();
         assert_eq!(reopened.entities[1].state.as_ref(), Some(&valid));
+        for (index, height) in [(0, 320.5), (1, 0.), (1, -1.), (1, f64::INFINITY)] {
+            let mut invalid = update(&scene, valid.clone());
+            invalid.entities.as_mut().unwrap()[index].panel_height = Some(height);
+            assert!(scene.apply_update(invalid).is_err());
+            assert_eq!(
+                serde_json::to_vec(&scene).unwrap(),
+                saved,
+                "invalid pane height must not mutate presentation or source state"
+            );
+        }
         for invalid in [
             serde_json::json!({"marks":{}}),
             serde_json::json!({"marks":[{}]}),

@@ -86,6 +86,16 @@ Placement is independent of focus/fullscreen presentation and survives sharing.
 Returning content to the world preserves its world position, surface size,
 camera, source reading and annotations rather than refitting the scene.
 
+Each fixed pane automatically shares available host height unless `panel_height`
+sets a preferred outer height in CSS pixels. Drag its bottom edge with a mouse
+or touch, or focus the horizontal separator and use Up/Down arrows (Shift for
+larger steps), Home for minimum height and End for maximum. Double-click the edge
+or choose **恢复自动高度** in **更多** to reset. Heights are saved in shares;
+viewport clamps preserve the preference so it returns when space grows.
+Multiple panes scroll together when their usable heights cannot fit.
+Resizing keeps the same native content or plugin iframe and does not navigate
+the camera or change world-space surface size.
+
 Agents and components use the [public operation catalog](components.md#public-operations)
 for the same controls. Typed operations cover native reading and review tools;
 unsupported geometry actions remain explicitly unavailable on a board.
@@ -93,7 +103,8 @@ unsupported geometry actions remain explicitly unavailable on a board.
 On macOS, Cmd+C copies an image link and Cmd+Shift+C copies a view link.
 Use Ctrl on other desktop systems. Text selections and editable fields retain
 their normal copy behavior. Sharing preserves camera, labels, positions, surface
-sizes, visibility, opacity, source-anchored reading and content annotations.
+sizes, preferred pane heights, visibility, opacity, source-anchored reading and
+content annotations.
 Screen brush remains a distinct temporary view annotation: camera changes or
 content scrolling, zoom, layer changes and reading-window changes clear it.
 See [links and lifetimes](cli.md#links-and-lifetimes).

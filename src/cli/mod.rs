@@ -72,6 +72,10 @@ RESOURCE FIELDS
              Each number must be finite with absolute value <= 1000000.
   size       Optional [width,height] in world units for surfaces, not geometry.
              Default [110,70]; each value must be finite and between 1 and 10000.
+  panel_height
+             Optional preferred outer pane height in CSS pixels for surfaces.
+             A finite positive number; omission/null automatically shares available
+             host height. Viewport clamps preserve this preference when sharing.
   Unpositioned resources are tiled in stable flat groups. Geometry in a group
   keeps its source-relative alignment. Explicit positions bypass automatic tiling.
   groups is optional: at most 64 {"label":STRING,"members":[INDEX,...]} entries.
@@ -134,7 +138,7 @@ PLUGINS AND ADVANCED MANIFESTS
   components, panels, attachments and warnings.
   viewport uses the same state as basic scene config; each collection child
   can specify viewport independently, including plugin-uri children.
-  components: [{id,uri,label,component?,quality?,visible?,placement?,member?,group?,position?,size?}].
+  components: [{id,uri,label,component?,quality?,visible?,placement?,member?,group?,position?,size?,panel_height?}].
   panels: [{id,label,members:[RESOURCE_ID,...],group?}], flat geometry assemblies,
   not independent collection scenes. If present, they cover every geometry
   resource; members within one panel are distinct existing resource IDs.

@@ -15,3 +15,16 @@ export function packGroups(sizes: readonly (readonly [number, number])[], aspect
   }
   return best!.points;
 }
+
+/** Fixed panes retain their preferred heights; only automatic panes share spare space. */
+export function panelHeights(preferred: readonly (number | null | undefined)[], available: number, gap: number): {min: number; max: number; heights: number[]} {
+  const max = Math.max(0, available), min = Math.min(240, max);
+  let fixed = 0, automatic = 0;
+  const heights = preferred.map(height => {
+    if (height == null) { automatic++; return 0; }
+    const bounded = Math.min(max, Math.max(min, height)); fixed += bounded; return bounded;
+  });
+  const share = automatic ? Math.max(min, (max - Math.max(0, preferred.length - 1) * gap - fixed) / automatic) : 0;
+  for (let index = 0; index < preferred.length; index++) if (preferred[index] == null) heights[index] = share;
+  return {min, max, heights};
+}

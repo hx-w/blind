@@ -174,9 +174,17 @@ Subsystem sftp {sftp_server}
 LogLevel VERBOSE
 ''')
         ssh = start([sshd, '-D', '-e', '-f', ssh_config], 'sshd')
-        time.sleep(.4)
-        if ssh.poll() is not None:
-            raise AssertionError('isolated sshd could not start: '+(tmp/'sshd.log').read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if ssh.poll() is not None:
+                raise AssertionError('isolated sshd could not start: '+(tmp/'sshd.log').read_text())
+            try:
+                with socket.create_connection(('127.0.0.1', ssh_port), timeout=.2):
+                    break
+            except OSError:
+                time.sleep(.05)
+        else:
+            raise AssertionError('isolated sshd listener startup timed out: '+(tmp/'sshd.log').read_text())
 
         invitation = run([BIN/'blind', 'invite', '--host', origin], env).strip()
         import base64

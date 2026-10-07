@@ -64,7 +64,7 @@ pub(in crate::server) async fn scene_from_manifest(
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
         component
             .display
-            .validate_quality(&kind)
+            .validate_kind(&kind)
             .map_err(|e| AppError::bad_request(&e.to_string()))?;
         if kind.geometry()
             && component.display.placement == crate::scene::component::Placement::Panel

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { packGroups } from './component-layout';
+import { packGroups, panelHeights } from './component-layout';
 import { CSS3DObject, CSS3DRenderer } from 'three/addons/renderers/CSS3DRenderer.js';
 import type { PublicScene, Vec3 } from './api';
 import type { SceneViewport } from './viewport/types';
@@ -22,7 +22,7 @@ interface Context extends ContentFactoryContext { viewer: SceneViewport; host: C
 interface Entry { spec: SceneEntity; runtime: ComponentRuntime; capabilities: ComponentCapabilities }
 export interface EntitySnapshot {
   id: string; component: string; label: string; group: string | null; placement: 'world' | 'panel';
-  visible: boolean; opacity: number; selected: boolean; position: Vec3 | null; size: [number, number] | null;
+  visible: boolean; opacity: number; selected: boolean; position: Vec3 | null; size: [number, number] | null; panel_height: number | null;
   capabilities: ComponentCapabilities; color?: string; quality?: 'raw' | 'lod'; loading?: boolean;
   loadState?: 'unloaded' | 'loading' | 'ready' | 'error'; unavailable?: string;
 }
@@ -150,7 +150,38 @@ export class ComponentViewer {
     this.panelEdge.setAttribute('aria-valuetext', `${Math.round(width)} 像素`);
     this.viewer.setReservedSpace(visible ? width : 0);
     this.root.closest<HTMLElement>('.app-shell')?.style.setProperty('--fixed-panel-space', `${visible ? width : 0}px`);
+    this.layoutPanels();
   };
+  private panelHeightSpace(): {available: number; gap: number} {
+    const style = getComputedStyle(this.panelRoot);
+    return {available: Math.max(0, this.panelRoot.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom)), gap: parseFloat(style.rowGap) || 0};
+  }
+  panelHeightRange(): {min: number; max: number} {
+    return panelHeights([], this.panelHeightSpace().available, 0);
+  }
+  private layoutPanels(request?: {entry: Entry; height: number | null}): void {
+    const panes = this.entries.filter(entry => entry.spec.placement === 'panel' && effectiveVisibility(entry.spec) && entry.runtime instanceof SurfaceRuntime);
+    const {available, gap} = this.panelHeightSpace();
+    const {min, max, heights} = panelHeights(panes.map(entry => entry === request?.entry ? request.height : entry.spec.panel_height), available, gap);
+    for (let index = 0; index < panes.length; index++) (panes[index].runtime as SurfaceRuntime).validatePanelHeight(heights[index]);
+    this.commitContent(() => {
+      if (request) {
+        request.entry.spec.panel_height = request.height;
+        (request.entry.runtime as SurfaceRuntime).updatePanelHeightControls();
+      }
+      panes.forEach((entry, index) => (entry.runtime as SurfaceRuntime).applyPanelHeight(heights[index], min, max));
+    });
+  }
+  setPanelHeight(id: string, height: number | null): void {
+    const entry = this.requireEntry(id);
+    if (height !== null && (typeof height !== 'number' || !Number.isFinite(height) || height <= 0)) throw new OperationError('INVALID_ARGUMENT', 'Pane height must be a finite positive number or null', {field: 'height'});
+    if (!(entry.runtime instanceof SurfaceRuntime)) throw new OperationError('UNSUPPORTED', 'Geometry cannot have a pane height', {target: id});
+    if ((entry.spec.panel_height ?? null) === height) return;
+    this.layoutPanels({entry, height}); this.changed();
+  }
+  async panelHeightEntity(id: string, height: number | null): Promise<EntitySnapshot> {
+    this.setPanelHeight(id, height); await this.whenSettled(); return this.getEntity(id);
+  }
   private resizePanel(width: number): void {
     const {min, max} = this.panelWidthRange();
     this.panelWidth = Math.min(max, Math.max(min, width)); this.updatePanelSpace();
@@ -192,7 +223,7 @@ export class ComponentViewer {
     const info = this.viewer.kind === 'spatial' && spec.source.kind === 'mesh' ? this.viewer.modelInfos[spec.source.index] : undefined;
     return {id: spec.id, component: spec.component, label: spec.label, group: spec.group, placement: spec.placement,
       visible: spec.visible, opacity: spec.opacity, selected: this.selected === entry, position: spec.position ? [...spec.position] : null,
-      size: spec.size ? [...spec.size] : null, capabilities: structuredClone(capabilities),
+      size: spec.size ? [...spec.size] : null, panel_height: spec.panel_height ?? null, capabilities: structuredClone(capabilities),
       ...(info ? {color: info.color, quality: info.quality, loading: info.loading, loadState: info.loadState,
         ...(info.load_error ? {unavailable: info.load_error} : {})} : {})};
   }
@@ -349,6 +380,7 @@ export class ComponentViewer {
     this.operations = factoryContext.operations;
     this.compositor.className = 'component-compositor'; if (viewer.kind === 'spatial') root.append(this.compositor);
     this.panelRoot.className = 'component-fixed-panels'; this.panelRoot.setAttribute('aria-label', '固定内容面板'); root.append(this.panelRoot);
+    this.panelRoot.addEventListener('scroll', () => this.onContentViewChange?.(), {passive: true});
     this.panelRoot.id = 'component-fixed-panels';
     this.panelEdge.className = 'component-panel-resize'; this.panelEdge.tabIndex = 0;
     this.panelEdge.setAttribute('role', 'separator'); this.panelEdge.setAttribute('aria-orientation', 'vertical');
@@ -410,7 +442,7 @@ export class ComponentViewer {
   private routePointer = (event: PointerEvent): void => {
     // Forwarded canvas events already belong to ArcballControls.
     if (!event.isTrusted && event.target instanceof HTMLCanvasElement) return;
-    if (event.target === this.panelEdge) return;
+    if (event.target === this.panelEdge || event.target instanceof Element && event.target.closest('.component-panel-height')) return;
     if (event.pointerType === 'touch') {
       const element = event.target instanceof Element ? event.target.closest('.scene-surface') : null;
       const runtime = this.entries.find(entry => entry.runtime.element === element)?.runtime;
@@ -873,6 +905,9 @@ export class SurfaceRuntime implements ComponentRuntime {
   readonly element = document.createElement('section');
   private readonly wrapper = document.createElement('div');
   private readonly panelWrapper = document.createElement('div');
+  private readonly heightEdge = document.createElement('div');
+  private readonly resetHeight: HTMLButtonElement;
+  private heightDrag?: {id: number; y: number; height: number; scroll: number};
   readonly object?: CSS3DObject;
   private readonly worldPosition = new THREE.Vector3();
   private visible = true;
@@ -936,7 +971,21 @@ export class SurfaceRuntime implements ComponentRuntime {
       placement.textContent = spec.placement === 'panel' ? '放回场景' : '固定面板';
     });
     placement.className = 'content-placement'; this.menu.append(placement);
-    this.header.append(this.expand, this.overflow); this.element.append(this.header, this.body, this.menu);
+    this.resetHeight = button('恢复自动高度', () => { host.setPanelHeight(spec.id, null); this.showMenu(false); });
+    this.resetHeight.className = 'content-panel-auto'; this.menu.append(this.resetHeight);
+    this.element.id = `component-surface-${spec.id}`;
+    this.heightEdge.className = 'component-panel-height'; this.heightEdge.tabIndex = 0;
+    this.heightEdge.setAttribute('role', 'separator'); this.heightEdge.setAttribute('aria-orientation', 'horizontal');
+    this.heightEdge.setAttribute('aria-controls', this.element.id); this.heightEdge.setAttribute('data-viewer-chrome', '');
+    this.heightEdge.title = '拖动调整面板高度，双击恢复自动高度';
+    this.heightEdge.addEventListener('pointerdown', this.heightPointerDown);
+    this.heightEdge.addEventListener('pointermove', this.heightPointerMove);
+    this.heightEdge.addEventListener('pointerup', this.heightPointerEnd);
+    this.heightEdge.addEventListener('pointercancel', this.heightPointerEnd);
+    this.heightEdge.addEventListener('lostpointercapture', this.heightPointerEnd);
+    this.heightEdge.addEventListener('keydown', this.heightKeyDown);
+    this.heightEdge.addEventListener('dblclick', event => { event.preventDefault(); event.stopPropagation(); host.setPanelHeight(spec.id, null); });
+    this.header.append(this.expand, this.overflow); this.element.append(this.header, this.body, this.heightEdge, this.menu);
     this.wrapper.className = 'component-world-wrapper'; this.wrapper.append(this.element);
     if (context.viewer.kind === 'spatial') { this.object = new CSS3DObject(this.wrapper); host.layer.add(this.object); }
     this.mount();
@@ -976,6 +1025,62 @@ export class SurfaceRuntime implements ComponentRuntime {
     });
     document.addEventListener('pointerdown', this.dismissMenu);
     this.bindNative();
+  }
+  private heightPointerDown = (event: PointerEvent): void => {
+    if (!event.isPrimary || event.button !== 0 || this.heightDrag) return;
+    event.preventDefault(); event.stopPropagation(); this.cancelContentGesture();
+    this.heightDrag = {id: event.pointerId, y: event.clientY, height: this.panelWrapper.getBoundingClientRect().height, scroll: this.context.host.panelRoot.scrollTop};
+    this.heightEdge.focus({preventScroll: true}); this.heightEdge.setPointerCapture(event.pointerId);
+  };
+  private heightPointerMove = (event: PointerEvent): void => {
+    const drag = this.heightDrag;
+    if (!drag || event.pointerId !== drag.id) return;
+    event.preventDefault(); event.stopPropagation();
+    this.resizePanelHeight(drag.height + event.clientY - drag.y + this.context.host.panelRoot.scrollTop - drag.scroll);
+  };
+  private heightPointerEnd = (event: PointerEvent): void => {
+    if (event.pointerId !== this.heightDrag?.id) return;
+    event.stopPropagation(); this.heightDrag = undefined;
+    if (this.heightEdge.hasPointerCapture(event.pointerId)) this.heightEdge.releasePointerCapture(event.pointerId);
+  };
+  private heightKeyDown = (event: KeyboardEvent): void => {
+    const {min, max} = this.context.host.panelHeightRange(), height = this.panelWrapper.getBoundingClientRect().height;
+    const step = event.shiftKey ? 40 : 10;
+    const next = event.key === 'ArrowUp' ? height - step : event.key === 'ArrowDown' ? height + step
+      : event.key === 'Home' ? min : event.key === 'End' ? max : undefined;
+    if (next === undefined) return;
+    event.preventDefault(); event.stopPropagation(); this.resizePanelHeight(next);
+  };
+  private resizePanelHeight(height: number): void {
+    const {min, max} = this.context.host.panelHeightRange();
+    if (max > 0) this.context.host.setPanelHeight(this.spec.id, Math.min(max, Math.max(min, height)));
+  }
+  updatePanelHeightControls(): void {
+    this.heightEdge.hidden = this.spec.placement !== 'panel' || this.mode !== 'spatial';
+    this.heightEdge.setAttribute('aria-label', `调整 ${this.spec.label} 的面板高度`);
+    const height = parseFloat(this.panelWrapper.style.height) || 0;
+    this.heightEdge.setAttribute('aria-valuenow', String(Math.round(height)));
+    this.heightEdge.setAttribute('aria-valuetext', `${Math.round(height)} 像素${this.spec.panel_height == null ? '，自动高度' : ''}`);
+    this.resetHeight.hidden = this.spec.placement !== 'panel' && this.spec.panel_height == null;
+    this.resetHeight.disabled = this.spec.panel_height == null;
+  }
+  validatePanelHeight(height: number): void {
+    if (parseFloat(this.panelWrapper.style.height) !== height && this.mode === 'spatial' && this.spec.placement === 'panel' && this.visible) {
+      this.validatePresentation();
+    }
+  }
+  applyPanelHeight(height: number, min: number, max: number): void {
+    this.heightEdge.setAttribute('aria-valuemin', String(Math.round(min)));
+    this.heightEdge.setAttribute('aria-valuemax', String(Math.round(max)));
+    const previous = parseFloat(this.panelWrapper.style.height);
+    if (previous !== height) {
+      const active = this.mode === 'spatial' && this.spec.placement === 'panel' && this.visible;
+      if (active && !this.preparePresentation()) throw new OperationError('INVALID_ARGUMENT', 'Content state cannot be persisted');
+      if (active && !this.initializingContent && Number.isFinite(previous)) this.context.host.onContentViewChange?.();
+      this.panelWrapper.style.height = `${height}px`;
+      if (active) this.settle();
+    }
+    this.updatePanelHeightControls();
   }
   snapshot(): ContentSnapshot {
     const native = this.content.native;
@@ -1221,6 +1326,7 @@ export class SurfaceRuntime implements ComponentRuntime {
     this.header.querySelector<HTMLElement>('span')!.textContent = label; this.header.title = label;
     this.body.querySelector<HTMLButtonElement>('.component-enter')?.setAttribute('aria-label', `选中 ${label}，双击展开`);
     this.expand.setAttribute('aria-label', this.mode === 'spatial' ? `全屏 ${label}` : '返回场景');
+    this.updatePanelHeightControls();
   }
   occludedAt(x: number, y: number): boolean {
     if (this.mode !== 'spatial' || this.spec.placement === 'panel' || this.context.viewer.kind !== 'spatial' || !this.object) return false;
@@ -1241,10 +1347,10 @@ export class SurfaceRuntime implements ComponentRuntime {
     if (this.content.native) this.content.native.scroll.focus({preventScroll: true});
     else { this.element.tabIndex = -1; this.element.focus({preventScroll: true}); }
   }
-  validatePresentation(mode: Presentation): void {
+  validatePresentation(mode?: Presentation): void {
     if (!this.hasNative) return;
     const reading = this.pendingReading ?? this.content.native?.capture();
-    try { validateContentState({...this.state, ...(reading ? {reading} : {}), presentation: mode}); }
+    try { validateContentState({...this.state, ...(reading ? {reading} : {}), ...(mode ? {presentation: mode} : {})}); }
     catch (error) { throw new OperationError('INVALID_ARGUMENT', error instanceof Error ? error.message : String(error)); }
   }
   preparePresentation(mode?: Presentation): boolean {
@@ -1258,6 +1364,7 @@ export class SurfaceRuntime implements ComponentRuntime {
     if (!this.preparePresentation(mode)) return;
     this.mode = mode;
     this.context.viewer.invalidate(); this.element.classList.toggle('expanded', mode !== 'spatial');
+    this.updatePanelHeightControls();
     this.expand.textContent = mode === 'spatial' ? '全屏' : '返回'; this.expand.setAttribute('aria-label', mode === 'spatial' ? `全屏 ${this.spec.label}` : '返回场景');
     this.content.element.inert = !this.hasNative && mode === 'spatial' && this.spec.placement === 'world';
     if (mode === 'spatial') moveElement(this.spec.placement === 'panel' ? this.panelWrapper : this.wrapper, this.element);
@@ -1323,6 +1430,7 @@ export class SurfaceRuntime implements ComponentRuntime {
       this.wrapper.hidden = !this.visible;
     }
     this.element.classList.toggle('panel-surface', this.spec.placement === 'panel');
+    this.updatePanelHeightControls();
   }
   setPlacement(placement: 'world' | 'panel'): void {
     if (!this.preparePresentation()) throw new OperationError('INVALID_ARGUMENT', 'Content state cannot be persisted');
@@ -1334,7 +1442,6 @@ export class SurfaceRuntime implements ComponentRuntime {
   private size(): void {
     const [w,h] = this.spec.size ?? [110,70], p = this.worldPosition;
     this.wrapper.style.width = '800px'; this.wrapper.style.height = `${800 * h / w}px`;
-    this.panelWrapper.style.height = 'min(65vh, 520px)';
     // CSS3DRenderer owns and caches the spatial wrapper matrix, even while its
     // content is in a panel/dialog. Clearing it leaves the next render unscaled.
     if (this.context.viewer.kind === 'board') this.wrapper.style.transform = this.spec.placement === 'world'

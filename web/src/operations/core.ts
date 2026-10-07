@@ -32,9 +32,9 @@ export const s = {
       return value;
     });
   },
-  number(options: {min?: number; max?: number; integer?: boolean; description?: string} = {}): Schema<number> {
-    return schema({type: options.integer ? 'integer' : 'number', ...(options.min === undefined ? {} : {minimum: options.min}), ...(options.max === undefined ? {} : {maximum: options.max}), ...(options.description ? {description: options.description} : {})}, (value, path) => {
-      if (typeof value !== 'number' || !Number.isFinite(value) || options.integer && !Number.isInteger(value) || options.min !== undefined && value < options.min || options.max !== undefined && value > options.max) return invalid(path, 'Expected a finite number within the declared bounds');
+  number(options: {min?: number; max?: number; exclusiveMin?: number; integer?: boolean; description?: string} = {}): Schema<number> {
+    return schema({type: options.integer ? 'integer' : 'number', ...(options.min === undefined ? {} : {minimum: options.min}), ...(options.max === undefined ? {} : {maximum: options.max}), ...(options.exclusiveMin === undefined ? {} : {exclusiveMinimum: options.exclusiveMin}), ...(options.description ? {description: options.description} : {})}, (value, path) => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || options.integer && !Number.isInteger(value) || options.min !== undefined && value < options.min || options.max !== undefined && value > options.max || options.exclusiveMin !== undefined && value <= options.exclusiveMin) return invalid(path, 'Expected a finite number within the declared bounds');
       return value;
     });
   },
