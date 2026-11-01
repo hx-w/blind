@@ -38,7 +38,7 @@ jobs:
           test -f /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           echo "VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json" >> "$GITHUB_ENV"
           vulkaninfo --summary
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Check and build Rust
         run: |
           cargo fmt --check
