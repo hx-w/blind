@@ -3,7 +3,7 @@
 All notable changes to Blind are documented here. Small backward-compatible
 features and bug fixes increment the patch version within the current series.
 
-## [2.4.2] - Unreleased
+## [2.4.2] - 2026-11-02
 
 ### Changed
 
