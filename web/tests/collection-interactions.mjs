@@ -716,7 +716,11 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     await boardPage.close();
   } finally {
     await browser?.close();
-    if (server) { server.kill(); await new Promise(resolve => server.once('exit', resolve)); }
+    if (server && server.exitCode === null && server.signalCode === null) {
+      const exited = new Promise(resolve=>server.once('exit',resolve));
+      server.kill('SIGTERM');
+      await exited;
+    }
     await rm(directory,{recursive:true,force:true});
   }
 });

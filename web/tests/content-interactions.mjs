@@ -330,7 +330,11 @@ test('source-anchored board reading survives dragging, fullscreen reflow and rea
     assert.equal(oldSource.status,410,'old anchors must not be rendered against replaced source bytes');
   } finally {
     await browser?.close();
-    if(server) { server.kill(); await new Promise(resolve=>server.once('exit',resolve)); }
+    if (server && server.exitCode === null && server.signalCode === null) {
+      const exited = new Promise(resolve=>server.once('exit',resolve));
+      server.kill('SIGTERM');
+      await exited;
+    }
     await rm(directory,{recursive:true,force:true});
   }
 });
