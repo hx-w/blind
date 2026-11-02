@@ -141,9 +141,9 @@ export class ComponentViewer {
     const visible = this.entries.some(entry => entry.spec.placement === 'panel' && effectiveVisibility(entry.spec));
     this.panelRoot.hidden = !visible; this.panelEdge.hidden = !visible; this.root.classList.toggle('has-fixed-panels', visible);
     const {min, max} = this.panelWidthRange();
-    const width = Math.min(max, Math.max(min, this.panelWidth ?? Math.min(360, this.root.clientWidth * .4)));
+    const width = Math.min(max, Math.max(min, this.panelWidth ?? Math.min(420, this.root.clientWidth * .4)));
     this.panelRoot.style.width = `${width}px`;
-    this.panelEdge.style.right = `${width - 6}px`;
+    this.panelEdge.style.right = `${width - 22}px`;
     this.panelEdge.setAttribute('aria-valuemin', String(Math.round(min)));
     this.panelEdge.setAttribute('aria-valuemax', String(Math.round(max)));
     this.panelEdge.setAttribute('aria-valuenow', String(Math.round(width)));

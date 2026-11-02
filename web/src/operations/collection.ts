@@ -10,6 +10,7 @@ export interface CollectionState {
   layout: CollectionLayout;
   mode: 'single' | 'split';
   maximized: boolean;
+  allScenes: boolean;
   scenes: Array<{id: string; title: string; ready: boolean; parked: boolean}>;
   strokes: ScreenStroke[];
   selection: string | null;
@@ -22,7 +23,7 @@ export interface CollectionOperations {
   state(): CollectionState;
   uiState(): CollectionUIState;
   select(id: string): void;
-  layout(sceneId: string | undefined, maximized: boolean): Promise<void>;
+  layout(sceneId: string | undefined, maximized: boolean, allScenes?: boolean): Promise<void>;
   catalog(sceneId: string): Promise<OperationDescriptor[]>;
   execute(sceneId: string, operation: string, params: unknown): Promise<unknown>;
   snapshot(sceneId: string, prepare: boolean): Promise<SceneUpdate>;
@@ -54,7 +55,7 @@ export const collectionLayoutSchema: Schema<CollectionLayout> = s.object({
   columns: s.number({min: 1, integer: true}),
 });
 export const collectionStateSchema: Schema<CollectionState> = s.object({
-  activeSceneId: id, layout: collectionLayoutSchema, mode: s.enum(['single', 'split']), maximized: s.boolean(),
+  activeSceneId: id, layout: collectionLayoutSchema, mode: s.enum(['single', 'split']), maximized: s.boolean(), allScenes: s.boolean(),
   scenes: s.array(s.object({id, title: s.string(), ready: s.boolean(), parked: s.boolean()})),
   strokes: s.array(screenStrokeSchema, {max: 64}), selection: s.nullable(id), canUndo: s.boolean(), canRedo: s.boolean(),
 });
@@ -82,7 +83,7 @@ const annotation = {permission: 'annotation.write', result: annotationToolbarSch
 export const collectionState = defineOperation<{}, CollectionState>('collection:get', 'Read collection layout, active scene, parked state and global screen annotations without finishing drafts.', empty, read);
 export const collectionUIGet = defineOperation<{}, CollectionUIState>('ui:get', 'Read collection observation controls, scoped annotation toolbar and active scene viewport state.', empty, {...read, result: collectionUISchema.json});
 export const collectionSelect = defineOperation<{sceneId: string}, CollectionState>('collection:select', 'Select a scene by its stable collection scene ID.', scene, write);
-export const collectionLayout = defineOperation<{sceneId?: string; maximized: boolean}, CollectionState>('collection:set-layout', 'Set maximized layout; false restores responsive split/tab layout.', s.object({sceneId: s.optional(id), maximized: s.boolean()}), write);
+export const collectionLayout = defineOperation<{sceneId?: string; maximized: boolean; allScenes?: boolean}, CollectionState>('collection:set-layout', 'Set maximized layout; false restores comparison. allScenes opts into full tiling instead of the default two-pane comparison.', s.object({sceneId: s.optional(id), maximized: s.boolean(), allScenes: s.optional(s.boolean())}), write);
 export const collectionCatalog = defineOperation<{sceneId: string}, OperationDescriptor[]>('collection:scene-catalog', 'Read the operation catalog for an exact child scene ID.', scene, {...read, result: collectionCatalogSchema});
 export const collectionExecute = defineOperation('collection:scene-execute', 'Execute a child catalog operation against an exact scene ID, never the subsequently active scene.', s.object({sceneId: id, operation: s.string({min: 1, max: 120}), params: s.json()}), {...write, result: {description: 'Value described by the requested child operation outputSchema in collection:scene-catalog.', anyOf: [{type: 'object'}, {type: 'array'}, {type: 'string'}, {type: 'number'}, {type: 'boolean'}, {type: 'null'}]}});
 export const collectionSnapshot = defineOperation<{sceneId: string}, SceneUpdate>('collection:scene-snapshot', 'Read a pure child snapshot without finishing annotation drafts.', scene, {...read, result: sceneUpdateSchema.json});
@@ -93,7 +94,7 @@ export const collectionObserve = defineOperation<{open?: boolean; category?: 'sh
 export const collectionAnnotationGet = defineOperation<{}, AnnotationToolbarState>('annotation:get', 'Read the active collection annotation toolbar state without finishing drafts.', empty, {...read, result: annotationToolbarSchema.json});
 export const collectionAnnotationOpen = defineOperation<{}, AnnotationToolbarState>('annotation:open', 'Open annotation tools for the current scene and composition.', empty, annotation);
 export const collectionAnnotationClose = defineOperation<{}, AnnotationToolbarState>('annotation:close', 'Close annotation tools and finish current drafts.', empty, annotation);
-export const collectionAnnotationTool = defineOperation<{mode: 'select' | 'point' | 'line' | 'screen'}, AnnotationToolbarState>('annotation:set-tool', 'Select annotation tool; split screen ink belongs to the collection.', s.object({mode: s.enum(['select', 'point', 'line', 'screen'] as const)}), annotation);
+export const collectionAnnotationTool = defineOperation<{mode: 'select' | 'point' | 'line' | 'screen'}, AnnotationToolbarState>('annotation:set-tool', 'Select annotation tool; screen ink belongs to the collection only when every scene is tiled.', s.object({mode: s.enum(['select', 'point', 'line', 'screen'] as const)}), annotation);
 export const collectionAnnotationColor = defineOperation<{color: string}, AnnotationToolbarState>('annotation:set-color', 'Set active annotation color, including the selected stroke.', s.object({color}), annotation);
 export const collectionAnnotationSelect = defineOperation<{kind: 'surface' | 'screen'; id: string}, AnnotationToolbarState>('annotation:select', 'Select an annotation by stable ID.', s.object({kind: s.enum(['surface', 'screen'] as const), id}), annotation);
 export const collectionAnnotationEdit = defineOperation<{id: string; label?: string; color?: string}, AnnotationToolbarState>('annotation:edit-screen', 'Edit a screen annotation by stable ID.', s.object({id, label: s.optional(s.string({max: 120})), color: s.optional(color)}), annotation);
@@ -110,7 +111,7 @@ export function registerCollectionOperations(host: OperationHost, app: Collectio
   host.register(collectionState, () => app.state());
   host.register(collectionUIGet, () => app.uiState());
   host.register(collectionSelect, p => {app.select(p.sceneId); return app.state();});
-  host.register(collectionLayout, async p => {await app.layout(p.sceneId, p.maximized); return app.state();});
+  host.register(collectionLayout, async p => {await app.layout(p.sceneId, p.maximized, p.allScenes); return app.state();});
   host.register(collectionCatalog, p => app.catalog(p.sceneId));
   host.register(collectionExecute, p => app.execute(p.sceneId, p.operation, p.params));
   host.register(collectionSnapshot, p => app.snapshot(p.sceneId, false));

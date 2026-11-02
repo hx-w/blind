@@ -492,7 +492,27 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
     await widePage.locator('.collection-shell.collection-split').waitFor();
     assert.equal(await widePage.locator('.collection-card').count(), 5);
     await waitForCollectionReady(widePage, wideConfig.scenes.map(scene => scene.id));
-    const wideBounds = await widePage.locator('.collection-card').evaluateAll(cards => cards.map(card => {
+    const visibleScenes = () => widePage.locator('.collection-card:not([hidden])').evaluateAll(cards => cards.map(card => card.dataset.scene));
+    assert.deepEqual(await visibleScenes(), ['scene_1', 'scene_2'], 'wide windows still start with just two comparison panes');
+    await widePage.evaluate(() => { window.comparisonFrames = [...document.querySelectorAll('.collection-frame')]; });
+    await operation(widePage, 'collection:select', {sceneId: 'scene_2'});
+    await widePage.getByRole('tab', {name: 'Scene 5', exact: true}).click();
+    assert.deepEqual(await visibleScenes(), ['scene_1', 'scene_5'], 'switching replaces the focused pane and retains the comparison partner');
+    await widePage.getByRole('tab', {name: 'Scene 1', exact: true}).focus();
+    await widePage.keyboard.press('End');
+    assert.equal((await operation(widePage, 'collection:get')).activeSceneId, 'scene_5', 'keyboard navigation activates the selected scene');
+    assert.deepEqual(await visibleScenes(), ['scene_1', 'scene_5'], 'selecting a visible scene does not replace either pane');
+    const partialInk = await widePage.evaluate(() => window.blind.execute('collection:screen-create', {color: '#ff6b5e', aspect: 1.6, points: [[.2,.3],[.7,.4]]}));
+    assert.equal(partialInk.ok, false);
+    assert.equal(partialInk.error.code, 'CONFLICT', 'global ink cannot attach to only a subset of collection scenes');
+    let comparisonPayload;
+    widePage.on('request', request => {if (request.url().endsWith('/share') && request.method() === 'POST') comparisonPayload = request.postDataJSON();});
+    await operation(widePage, 'share:create');
+    assert.deepEqual(Object.keys(comparisonPayload.updates).sort(), wideConfig.scenes.map(scene => scene.id), 'sharing retains all parked scenes');
+    await widePage.getByRole('button', {name: '全部平铺', exact: true}).click();
+    await widePage.waitForFunction(() => document.querySelectorAll('.collection-card:not([hidden])').length === 5);
+    assert.equal((await operation(widePage, 'collection:get')).allScenes, true);
+    const wideBounds = await widePage.locator('.collection-card:not([hidden])').evaluateAll(cards => cards.map(card => {
       const bounds = card.getBoundingClientRect();
       return {left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom, width: bounds.width, height: bounds.height};
     }));
@@ -503,6 +523,18 @@ test('collection layout, focused toolbar, independent rendering, and scene switc
       assert.ok(bounds.right <= other.left || other.right <= bounds.left || bounds.bottom <= other.top || other.bottom <= bounds.top,
         'ready split panes must not overlap');
     }
+    await operation(widePage, 'collection:set-layout', {maximized: false, allScenes: false});
+    assert.deepEqual(await visibleScenes(), ['scene_1', 'scene_5']);
+    await widePage.setViewportSize({width: 390, height: 844});
+    await widePage.locator('.collection-shell.collection-single').waitFor();
+    assert.deepEqual(await visibleScenes(), ['scene_5']);
+    await widePage.getByRole('tab', {name: 'Scene 3', exact: true}).click();
+    assert.deepEqual(await visibleScenes(), ['scene_3']);
+    await widePage.setViewportSize({width: 2400, height: 1300});
+    await widePage.locator('.collection-shell.collection-split').waitFor();
+    assert.deepEqual(await visibleScenes(), ['scene_1', 'scene_3']);
+    assert.equal(await widePage.evaluate(() => window.comparisonFrames.every((frame, index) => frame === document.querySelectorAll('.collection-frame')[index])), true,
+      'comparison, full tiling and narrow views retain the original scene frames');
     await widePage.close();
     const failedPage = await browser.newPage({viewport:{width:390,height:844}});
     await failedPage.route('**/api/v1/scenes/*?scene=*', route => route.abort());

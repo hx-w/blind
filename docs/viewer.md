@@ -76,7 +76,9 @@ surface title navigates the scene; it does not move or resize the surface.
 See [components and layout](components.md#groups-and-layout).
 
 `placement: "panel"` keeps a component in a fixed sidebar outside the world
-layout. Its body owns native input and remains fixed while panning or zooming;
+layout. Fixed documents use the same inset, rounded surface treatment as scene
+controls, with a wider reading area on desktop and no full-height dividing rail.
+Their bodies own native input and remain fixed while panning or zooming;
 the host reserves sidebar space from scene controls. Drag the sidebar's left
 edge with a mouse or touch to resize it, or focus the edge and use Left/Right
 arrows (Shift for larger steps), Home for minimum width and End for maximum.

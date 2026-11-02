@@ -25,6 +25,11 @@ const observeBack = originalDock.querySelector<HTMLButtonElement>('#observe-back
 originalShare.setAttribute('aria-label', '分享全部场景');
 const shell = document.createElement('div'); shell.className = 'app-shell collection-shell';
 const sceneTabs = document.createElement('nav'); sceneTabs.className = 'collection-scene-tabs'; sceneTabs.setAttribute('role', 'tablist'); sceneTabs.setAttribute('aria-label', '场景切换');
+const sceneBar = document.createElement('header'); sceneBar.className = 'collection-scene-bar'; sceneBar.hidden = true;
+const allScenes = document.createElement('button'); allScenes.type = 'button'; allScenes.className = 'collection-all-scenes';
+allScenes.textContent = '全部平铺'; allScenes.setAttribute('aria-pressed', 'false');
+allScenes.addEventListener('click', () => ui(setCollectionLayout(undefined, false, !showAll)));
+sceneBar.append(sceneTabs, allScenes);
 const tabs = new Map<string, HTMLButtonElement>();
 const expandButtons = new Map<string, HTMLButtonElement>();
 sceneTabs.addEventListener('keydown', event => {
@@ -39,13 +44,15 @@ const inkBadges = document.createElement('div'); inkBadges.className = 'collecti
 stage.append(inkCanvas, inkBadges);
 const dialog = document.createElement('dialog'); dialog.className = 'collection-share';
 const toast = document.createElement('div'); toast.className = 'toast'; toast.setAttribute('role', 'status');
-shell.append(sceneTabs, stage, originalDock, dialog, toast); document.body.replaceChildren(shell);
+shell.append(sceneBar, stage, originalDock, dialog, toast); document.body.replaceChildren(shell);
 installIcons(shell);
 
 let overview: CollectionOverview;
 let active = new URLSearchParams(location.search).get('scene') ?? '';
 let mode: 'split' | 'single' = 'single';
 let maximized = false;
+let showAll = false;
+let compared: string[] = [];
 let cards = new Map<string, HTMLElement>();
 let frames = new Map<string, HTMLIFrameElement>();
 let ready = new Set<string>();
@@ -96,7 +103,7 @@ async function runScene<P, R>(id: string, operation: Operation<P, R>, params: P)
 function report(error: unknown): void {notify(error instanceof Error ? error.message : String(error));}
 function ui(action: Promise<unknown>): void {void action.catch(report);}
 async function sendScope(id: string): Promise<void> {
-  await runScene(id, workbenchOperations.screenScope, {scope: mode === 'single' ? 'scene' : 'collection'});
+  await runScene(id, workbenchOperations.screenScope, {scope: fullComposition() ? 'collection' : 'scene'});
 }
 async function refreshSceneState(id: string): Promise<void> {
   const [annotation, view] = await Promise.all([
@@ -108,10 +115,10 @@ async function refreshSceneState(id: string): Promise<void> {
 }
 function captureLayout(): CollectionLayout {
   const rect = stage.getBoundingClientRect();
-  if (mode === 'single') {
+  if (!fullComposition()) {
     const columns = Math.ceil(Math.sqrt(overview.scenes.length));
     const rows = Math.ceil(overview.scenes.length / columns);
-    let tileWidth = Math.round(rect.width), tileHeight = Math.round(rect.height);
+    let tileWidth = Math.round(mode === 'split' ? (rect.width - 1) / 2 : rect.width), tileHeight = Math.round(rect.height);
     const extent = (width:number, height:number) => ({width:columns*width+columns-1, height:rows*height+rows-1});
     const full = extent(tileWidth, tileHeight);
     const scale = Math.min(1,4096/full.width,4096/full.height,Math.sqrt(16_000_000/(full.width*full.height)));
@@ -241,7 +248,8 @@ function ensureToolbar(): void {
     else if (selection) ui(runScene(active, annotationOperations.editSurface, {id: selection.id, label: value}));
   });
 }
-function isGlobalInk(): boolean {return mode === 'split' && annotationMode === 'screen';}
+function fullComposition(): boolean {return mode === 'split' && (showAll || overview.scenes.length <= 2);}
+function isGlobalInk(): boolean {return fullComposition() && annotationMode === 'screen';}
 function annotationState(): AnnotationToolbarState {
   const child = annotationStates.get(active);
   if (isGlobalInk()) {
@@ -320,7 +328,7 @@ function editGlobalScreen(id: string, label?: string, value?: string): void {
 }
 async function selectAnnotation(kind: 'screen' | 'surface', id: string): Promise<void> {
   if (kind === 'screen' && markup.exportStrokes().some(stroke => stroke.id === id)) {
-    if (mode !== 'split') throw new OperationError('CONFLICT', 'Collection ink is parked outside its split composition');
+    if (!fullComposition()) throw new OperationError('CONFLICT', 'Collection ink is parked outside its full composition');
     const sceneId = active;
     if (!annotationMode) await beginAnnotation();
     if (active !== sceneId) throw new OperationError('CONFLICT', 'Active scene changed while opening annotation tools', {target: sceneId});
@@ -389,8 +397,8 @@ function mount(id: string): void {
 async function snapshot(id: string, prepare = false): Promise<SceneUpdate> {
   return await runScene(id, prepare ? workbenchOperations.prepareSnapshot : workbenchOperations.snapshot, {});
 }
-function fitGrid(): number | null {
-  const count = overview.scenes.length;
+function fitGrid(all = showAll): number | null {
+  const count = all ? overview.scenes.length : Math.min(2, overview.scenes.length);
   const width = stage.clientWidth, height = stage.clientHeight;
   const candidates = Array.from({length:count},(_,i)=>i+1).filter(columns => {
     const rows = Math.ceil(count / columns);
@@ -401,6 +409,8 @@ function fitGrid(): number | null {
     const paneWidth = (width-columns+1)/columns, paneHeight = (height-rows+1)/rows;
     return Math.min(paneWidth/paneHeight,paneHeight/paneWidth);
   };
+  // The default comparison stays side by side; narrow windows show one scene.
+  if (!all) return candidates.includes(count) ? count : null;
   return candidates.sort((a,b)=>score(b)-score(a))[0] ?? null;
 }
 function layout(): void {
@@ -414,16 +424,30 @@ function layout(): void {
   mode = nextMode;
   shell.classList.toggle('collection-split',mode==='split'); shell.classList.toggle('collection-single',mode==='single');
   shell.classList.toggle('collection-maximized', maximized);
-  sceneTabs.hidden = mode === 'split' || overview.scenes.length < 2;
-  const rows = mode === 'split' ? Math.ceil(overview.scenes.length / columns!) : 1;
+  const paged = overview.scenes.length > 2;
+  shell.classList.toggle('collection-paged', paged);
+  shell.classList.toggle('collection-complete', fullComposition());
+  sceneBar.hidden = overview.scenes.length < 2 || (!paged && mode === 'split');
+  allScenes.hidden = !paged;
+  allScenes.disabled = !showAll && fitGrid(true) === null;
+  allScenes.title = allScenes.disabled ? '窗口空间不足，请扩大窗口后平铺全部场景' : '';
+  allScenes.setAttribute('aria-pressed', String(showAll));
+  allScenes.textContent = showAll ? '双场景对比' : '全部平铺';
+  const rows = mode === 'split' && showAll ? Math.ceil(overview.scenes.length / columns!) : 1;
   stage.style.gridTemplateColumns = `repeat(${columns ?? 1},minmax(0,1fr))`;
   stage.style.gridTemplateRows = `repeat(${rows},minmax(0,1fr))`;
   for (const scene of overview.scenes) {
     const card = cards.get(scene.id)!;
     // Park, rather than destroy, inactive frames at their last viewport size.
     // Camera, reading, quality, selection and local undo stacks stay in that scene.
-    card.hidden = mode === 'single' && scene.id !== active;
+    card.hidden = mode === 'single' ? scene.id !== active : !showAll && !compared.includes(scene.id);
+    card.style.order = String(showAll ? overview.scenes.indexOf(scene) : Math.max(0, compared.indexOf(scene.id)));
     card.inert = card.hidden;
+    if (!frames.has(scene.id)) {
+      // Never initialize an offscreen viewer at an implicit, tiny grid-track size.
+      card.style.setProperty('--park-width', `${(stage.clientWidth - (columns ?? 1) + 1) / (columns ?? 1)}px`);
+      card.style.setProperty('--park-height', `${(stage.clientHeight - rows + 1) / rows}px`);
+    }
     const expand = expandButtons.get(scene.id);
     if (expand) {
       const expanded = maximized && scene.id === active;
@@ -436,13 +460,13 @@ function layout(): void {
   }
   // Global ink belongs to its captured split composition, not the temporary
   // maximized/tab viewport. Keep it parked until that composition returns.
-  if (mode === 'split' && parkedViewChanged) invalidateCollectionInk();
-  if (mode === 'split' && strokeLayout) {
+  if (fullComposition() && parkedViewChanged) invalidateCollectionInk();
+  if (fullComposition() && strokeLayout) {
     const current = captureLayout();
     if (current.width !== strokeLayout.width || current.height !== strokeLayout.height || current.columns !== strokeLayout.columns)
       invalidateCollectionInk();
   }
-  markup.setEnabled(annotationMode==='screen' && mode==='split');
+  markup.setEnabled(isGlobalInk());
   updateFocus(); renderInkBadges(); syncToolbar();
   host.notify('collection', collectionState());
 }
@@ -455,9 +479,12 @@ function updateFocus(): void {
     card.classList.toggle('active',id===active);
     card.querySelector('.collection-scene-label')?.setAttribute('aria-pressed', String(id === active));
     const tab = tabs.get(id);
-    if (tab) { tab.setAttribute('aria-selected', String(id === active)); tab.tabIndex = id === active ? 0 : -1; }
+    if (tab) {
+      tab.setAttribute('aria-selected', String(id === active)); tab.tabIndex = id === active ? 0 : -1;
+      tab.dataset.visible = String(!card.hidden);
+    }
   }
-  if (!sceneTabs.hidden) tabs.get(active)?.scrollIntoView({block: 'nearest', inline: 'nearest'});
+  if (!sceneBar.hidden) tabs.get(active)?.scrollIntoView({block: 'nearest', inline: 'nearest'});
   const title = overview.scenes.find(scene=>scene.id===active)?.title ?? '';
   originalDock.setAttribute('aria-label',`${title} 场景查看工具`);
   toolbar?.setAttribute('aria-label',`${title} 场景标注工具`);
@@ -472,18 +499,26 @@ function focus(id: string): void {
   if (id === active) return;
   observeStates.set(active,{open:observeOpen,category:activeObserveCategory});
   exitAnnotation();
+  if (!compared.includes(id)) {
+    const slot = compared.indexOf(active);
+    compared[slot >= 0 ? slot : 1] = id;
+  }
   active = id; shareLinks = undefined;
   const state = observeStates.get(id);
   setObserveToolbar(state?.open ?? false,true);
   activeObserveCategory = null; setObserveCategory(state?.category ?? null);
   syncObserveMode();
-  if (mode === 'single') layout(); else updateFocus();
+  layout();
   host.notify('collection', collectionState());
 }
-async function setMaximized(id: string | undefined, value: boolean): Promise<void> {
+async function setCollectionLayout(id: string | undefined, value: boolean, all?: boolean): Promise<void> {
+  if (all === true && !value && fitGrid(true) === null)
+    throw new OperationError('CONFLICT', 'The window is too small to tile every scene');
   if (id !== undefined) focus(id);
   if (annotationMode && ready.has(active)) ui(runScene(active, workbenchOperations.annotationClose, {}));
-  exitAnnotation(); maximized = value; shareLinks = undefined;
+  exitAnnotation(); maximized = value;
+  if (all !== undefined) showAll = all;
+  shareLinks = undefined;
   layout(); expandButtons.get(active)?.focus({preventScroll: true});
   await new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
   await Promise.all([...ready].map(sceneId => runScene(sceneId, workbenchOperations.get, {})));
@@ -502,7 +537,7 @@ function receiveSceneEvent(id: string, event: OperationEvent): void {
     if (event.data) viewStates.set(id, event.data as ViewSnapshot);
     if (id === active) syncObserveMode();
   } else if (event.domain === 'view:invalidated') {
-    if (mode === 'single') {
+    if (!fullComposition()) {
       if (markup.hasStrokes || strokeHistory.length || strokeFuture.length || strokeBefore) parkedViewChanged = true;
     } else invalidateCollectionInk();
   } else if (event.domain === 'lifecycle') {
@@ -523,7 +558,7 @@ function receiveSceneEvent(id: string, event: OperationEvent): void {
   host.notify('collection:scene', {sceneId: id, revision: event.revision, domain: event.domain});
 }
 function collectionState(): CollectionState {
-  return {activeSceneId: active, layout: captureLayout(), mode, maximized,
+  return {activeSceneId: active, layout: captureLayout(), mode, maximized, allScenes: showAll,
     scenes: overview.scenes.map(scene => ({...scene, ready: ready.has(scene.id), parked: !!cards.get(scene.id)?.hidden})),
     strokes: markup.exportStrokes(), selection: selectedStroke ?? null, canUndo: !!strokeHistory.length, canRedo: !!strokeFuture.length};
 }
@@ -533,7 +568,7 @@ async function refreshLinks(origin?: string): Promise<ShareResponse> {
   const sceneUpdates: Record<string, SceneUpdate> = {};
   for (const scene of overview.scenes) sceneUpdates[scene.id] = await snapshot(scene.id, true);
   if (parkedViewChanged) invalidateCollectionInk();
-  const composition = mode === 'single' && markup.hasStrokes && strokeLayout ? strokeLayout : captureLayout();
+  const composition = !fullComposition() && markup.hasStrokes && strokeLayout ? strokeLayout : captureLayout();
   const links = await shareCollection(token, activeSceneId, sceneUpdates, markup.exportStrokes(), composition, owner, origin);
   shareLinks = links; host.notify('share', {activeSceneId}); return links;
 }
@@ -609,7 +644,7 @@ for (const [selector, action] of [['#fit-view','fit'], ['#brush-tool','annotate'
   originalDock.querySelector(selector)?.addEventListener('click', () => action === 'annotate' ? (setObserveToolbar(false), ui(beginAnnotation())) : ui(runScene(active, viewOperations.fit, {})));
 }
 registerCollectionOperations(host, {
-  state: collectionState, select: focus, layout: setMaximized,
+  state: collectionState, select: focus, layout: setCollectionLayout,
   uiState: () => ({observe: {open: observeOpen, category: activeObserveCategory}, annotation: annotationState(), view: viewStates.get(active) ?? null}),
   catalog: id => sceneClient(id).catalog(),
   execute: (id, operation, params) => sceneClient(id).execute(operation, params),
@@ -628,7 +663,7 @@ registerCollectionOperations(host, {
   annotationFinish: finishAnnotation, annotationCancel: cancelAnnotation,
   annotationClosed: async (id, closed) => {const sceneId = active; await runScene(sceneId, annotationOperations.setClosed, {id, closed}); await refreshSceneState(sceneId);},
   screenCreate: value => {
-    if (mode !== 'split') throw new OperationError('CONFLICT', 'Global ink requires the split composition');
+    if (!fullComposition()) throw new OperationError('CONFLICT', 'Global ink requires all scenes tiled; use collection:set-layout with allScenes true');
     markup.finishActive();
     const strokes = markup.exportStrokes();
     if (strokes.length >= 64 || strokes.reduce((total, stroke) => total + stroke.points.length, value.points.length) > 4096)
@@ -650,6 +685,8 @@ try {
   strokeLayout=overview.layout ?? undefined;
   markup.load(overview.strokes ?? []);
   if (!overview.scenes.some(scene => scene.id === active)) active = overview.active_scene_id;
+  compared = overview.scenes.slice(0, 2).map(scene => scene.id);
+  if (!compared.includes(active)) compared[1] = active;
   document.title = `${overview.title} · Blind`;
   stage.setAttribute('aria-label', `${overview.title} 多场景视图`);
   for (const scene of overview.scenes) {
@@ -665,7 +702,7 @@ try {
       const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'collection-scene-expand';
       expand.setAttribute('aria-controls', card.id);
       expand.innerHTML = '<i data-lucide="maximize-2"></i><i data-lucide="minimize-2"></i>';
-      expand.addEventListener('click', () => ui(setMaximized(scene.id, !maximized))); card.append(expand); expandButtons.set(scene.id, expand);
+      expand.addEventListener('click', () => ui(setCollectionLayout(scene.id, !maximized))); card.append(expand); expandButtons.set(scene.id, expand);
       const tab = document.createElement('button'); tab.type = 'button'; tab.textContent = scene.title; tab.title = scene.title;
       tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', card.id);
       tab.addEventListener('click', () => focus(scene.id)); tab.addEventListener('focus', () => focus(scene.id));

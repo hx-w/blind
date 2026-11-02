@@ -2,7 +2,7 @@
 
 [Documentation](../README.md#documentation)
 
-Use Rust stable, Node.js 24, and npm, matching the CI toolchains.
+Use Rust stable, Node.js 24, and npm.
 
 ```sh
 npm ci --prefix web
@@ -11,8 +11,8 @@ cargo build --locked --release
 ```
 
 The installed binary embeds the generated `web/dist` and does not require
-Node.js. The directory is intentionally excluded from version control. Before
-a pull request, run:
+Node.js. The directory is intentionally excluded from version control.
+The following local checks are available when verification is requested:
 
 ```sh
 npm test --prefix web
@@ -23,14 +23,14 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Pull requests and main-branch pushes run CI checks. A stable tag must pass the
-same verification before the Release workflow builds the viewer and native
-binaries, packages the three archives, generates SHA-256 checksums, and publishes
-the GitHub Release. Run local checks before tagging too. The first build, a
-toolchain change, or cache eviction can still require a cold compilation.
+Pull requests and main-branch pushes do not run a CI workflow. Changes are
+reviewed in code; run local checks only when explicitly requested, and report
+exactly what was performed. A stable tag triggers the Release workflow to build the viewer and native binaries, package the three
+archives, generate SHA-256 checksums, and publish the GitHub Release. It does not
+invoke a separate verification workflow.
 
-The [CI workflow](../.github/workflows/ci.yml) also runs collection, component,
-plugin, cross-Client browser-snapshot lifecycle and OSS integration tests.
+Collection, component, plugin, cross-Client browser-snapshot lifecycle and OSS
+integration scripts remain available for explicit verification.
 `python3 tests/integration_plugin_bundles.py` exercises real CLI Clients, snapshot
 deduplication, conflicts, immutable links, PNG export and last-reference cleanup.
 Component and collection exports require Chrome/Chromium; see

@@ -197,16 +197,19 @@ snapshot; the original link and its quality/warnings remain unchanged.
 
 A collection shares 2 to 16 independent scenes under one short link. Each
 scene has its own components, focused component, camera, reading, selection,
-rendering, visibility and annotations. The viewer splits only when every scene
-has at least a 480 × 360 px viewport; otherwise top-left tabs choose one scene.
+rendering, visibility and annotations. By default, at most two scenes appear side
+by side, each with at least a 480 × 360 px viewport. Narrower windows show the
+active scene alone. For three or more scenes, a compact scene bar stays above the
+canvas. Selecting a hidden scene replaces the focused comparison pane; the other
+pane stays in place. Selecting an already visible scene only focuses it.
+**全部平铺** opts into the full responsive grid when every scene fits; **双场景对比**
+returns to the two-pane view. This layout preference lasts for the current session.
 Each pane has a top-right expand/restore button: expand fills the viewing area
-with that scene and folds the others into tabs; restore returns to the responsive
-split layout. Inactive viewers stay mounted at their last size to preserve
-reading, camera, annotations and local undo. Single-scene links have no collection
-tabs or expand/restore buttons.
-Panes fill the viewport with 1px dividers and lightweight overlaid names, not
-reserved headers or outer margins. The shared bottom toolbar controls the focused
-scene and shares the entire collection.
+with that scene; restore returns to the chosen comparison or full-grid layout.
+Inactive viewers stay mounted at their last size to preserve reading, camera,
+annotations and local undo. Single-scene links have no collection controls.
+Panes use 1px dividers and lightweight overlaid names. The shared bottom toolbar
+controls the focused scene and shares the entire collection, including parked scenes.
 Toolbar markup starts hidden. Only the owning single-scene or Collection
 controller enables it; embedded child scenes never show an independent toolbar,
 including before scripts run or while scene requests are pending.
@@ -245,14 +248,20 @@ overview; `?scene=<id>` returns one child in the existing scene format.
 route renders every child into an edge-to-edge grid, including inactive scenes.
 Overlaid name chips identify panes and the focused scene. Captured collection
 layout determines each child viewport and the cross-scene screen-ink coordinates.
-Collection screen ink stays parked while a scene is expanded and returns only
-with the same split layout and scene views. Framing changes in either the expanded
-or inactive child defer invalidation until split restoration or sharing. Changed
+Collection-wide screen ink is available only when all scenes are tiled. In a
+partial comparison or single-scene view, the brush annotates the focused scene.
+Existing collection ink stays parked there and returns only with the same full
+grid layout and scene views; it is never overlaid on a different pair of scenes.
+Framing changes in either the expanded or inactive child defer invalidation until split restoration or sharing. Changed
 split dimensions, camera or content reading windows invalidate ink and its
 undo/redo history. Background initial loading does not count as navigation.
 Expand/restore finishes the active annotation tool before hiding its toolbar.
-The `collection:set-layout` operation waits for browser sizing and native child
-layout settlement before returning, so ink created afterward belongs to the completed composition.
+The `collection:set-layout` operation accepts `maximized` and optional `allScenes`
+(`true` for full tiling, `false` for two-pane comparison). Omitting `allScenes`
+keeps the current preference. `collection:get` reports this preference and each
+scene's actual `parked` state. Layout changes wait for browser sizing and native
+child layout settlement before returning, so ink created afterward belongs to
+the completed composition.
 
 Sharing from the collection viewer posts `active_scene_id` and an `updates`
 object keyed by scene ID to `POST /api/v1/scenes/<token>/share`. Omitted child

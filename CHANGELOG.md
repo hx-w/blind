@@ -3,6 +3,30 @@
 All notable changes to Blind are documented here. Small backward-compatible
 features and bug fixes increment the patch version within the current series.
 
+## [2.4.2] - Unreleased
+
+### Changed
+
+- Start collections with at most two side-by-side scenes. Switch the focused
+  comparison pane through a scene bar, retain parked viewers, and opt into full
+  tiling when needed. Narrow windows show the active scene alone.
+- Present fixed documents as inset surfaces matching scene controls, with wider
+  desktop reading space and consistent headings, spacing and resize handles.
+- Remove the CI workflow and its Release dependency; review changes in code.
+  Release packaging remains tag-triggered, and local checks remain available.
+- Include reviewed compatible Rust, browser and release-action dependency updates.
+
+### Fixed
+
+- Keep collection-wide ink parked outside the complete scene composition and
+  retain every scene when sharing a partial comparison.
+- Let browser integration cleanup finish when its server has already exited.
+
+### Upgrade
+
+- Keep scene schema 8 and existing source/capability boundaries. No data migration
+  or registry clear is required.
+
 ## [2.4.1] - 2026-10-07
 
 ### Added
